@@ -224,7 +224,7 @@ func (a *app) nativeVolumeSlider(c *ui.Context, pop popover) {
 	s := ui.SliderBase(c.Key("volume"), &a.volume, 0, 1).Vertical().Size(knob+8, 124).PaddingY(knob / 2).
 		Step(0.01).AutoFocus().FocusRing(false).Label(T("Volume"))
 	if s.Changed() {
-		a.pl.SetVolume(a.volume)
+		a.setPlayerVolume(a.volume)
 	}
 	s.HandleInput(func(ev ui.InputEvent) bool { return a.scrollVolume(ev) })
 	pressed := s.Pressed()
@@ -260,8 +260,7 @@ func (a *app) scrollVolume(ev ui.InputEvent) bool {
 	if ev.Kind != ui.InputScroll {
 		return false
 	}
-	a.volume = min(1, max(0, a.volume-volumeScroll(ev)))
-	a.pl.SetVolume(a.volume)
+	a.setPlayerVolume(a.volume - volumeScroll(ev))
 	return true
 }
 
@@ -298,12 +297,7 @@ func (a *app) muteButton(c *ui.Context, color ui.Color) {
 		icon = iconMute
 	}
 	if iconButton(c.Key("mute"), icon, 16, color, T("Mute")).Clicked() {
-		if a.volume > 0 {
-			a.mutedFrom, a.volume = a.volume, 0
-		} else {
-			a.volume = max(a.mutedFrom, 0.5)
-		}
-		a.pl.SetVolume(a.volume)
+		a.toggleMute()
 	}
 }
 
@@ -313,7 +307,7 @@ func (a *app) volumeSlider(c *ui.Context, color, track ui.Color, width float32) 
 		a.muteButton(c, color)
 		s := ui.SliderBase(c.Key("volume"), &a.volume, 0, 1).Width(width).Height(16).FocusRing(false).Label(T("Volume"))
 		if s.Changed() {
-			a.pl.SetVolume(a.volume)
+			a.setPlayerVolume(a.volume)
 		}
 		hot := s.Hovered() || s.Pressed()
 		thick := float32(4)

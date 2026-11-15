@@ -22,6 +22,7 @@ import (
 func TestLikeFromPlayerBar(t *testing.T) {
 	calls := make(chan bool, 4)
 	a := newTestApp()
+	post := posts(a)
 	fake(a).like = func(id string, like bool) error { calls <- like; return nil }
 	a.account = &music.Account{ID: "1", Name: "小明"}
 	a.pl.Cue([]music.Track{song("7", "宝船", "DOUDOU")})
@@ -39,6 +40,7 @@ func TestLikeFromPlayerBar(t *testing.T) {
 	if like := wait(t, calls, "the like"); !like {
 		t.Error("asked the source to unlike")
 	}
+	until(t, post, func() bool { return len(a.likeWrites) == 0 })
 	tt.Frame()
 	if err := tt.Click("Unlike"); err != nil {
 		t.Fatal(err)
@@ -49,6 +51,7 @@ func TestLikeFromPlayerBar(t *testing.T) {
 	if like := wait(t, calls, "the unlike"); like {
 		t.Error("asked the source to like again")
 	}
+	until(t, post, func() bool { return len(a.likeWrites) == 0 })
 }
 
 // The heart of an episode playing likes the episode, once the source was
@@ -61,6 +64,7 @@ func TestLikeEpisode(t *testing.T) {
 	}
 	calls := make(chan call, 4)
 	a := newTestApp()
+	post := posts(a)
 	fake(a).isLiked = func(ids []string) (map[string]bool, error) { asked <- ids; return nil, nil }
 	fake(a).like = func(string, bool) error { t.Error("liked the episode as a song"); return nil }
 	fake(a).likeEpisode = func(id string, like bool) error { calls <- call{id, like}; return nil }
@@ -81,6 +85,7 @@ func TestLikeEpisode(t *testing.T) {
 	if c := wait(t, calls, "the like"); c != (call{"13", true}) {
 		t.Errorf("asked the source for %+v", c)
 	}
+	until(t, post, func() bool { return len(a.likeWrites) == 0 })
 	tt.Frame()
 	if err := tt.Click("Unlike"); err != nil {
 		t.Fatal(err)
@@ -88,6 +93,7 @@ func TestLikeEpisode(t *testing.T) {
 	if c := wait(t, calls, "the unlike"); c != (call{"13", false}) || a.liked["13"] {
 		t.Errorf("asked the source for %+v, liked %v", c, a.liked["13"])
 	}
+	until(t, post, func() bool { return len(a.likeWrites) == 0 })
 	if len(asked) > 0 {
 		t.Error("asked again whether the episode is liked")
 	}

@@ -57,23 +57,35 @@ func (a *app) askLiked(lib *library, ids []string) {
 	// Asked: they don't come up again, whatever it answers.
 	for _, id := range ask {
 		lib.liked[id] = false
+		lib.likesPending[id] = true
 	}
 	who := lib.listener()
+	epoch := lib.likeEpoch
+	versions := make(map[string]uint64, len(ask))
+	for _, id := range ask {
+		versions[id] = lib.likeVersions[id]
+	}
 	go func() {
 		liked, err := lib.src.IsLiked(ask)
-		if err != nil {
-			return
-		}
 		a.post(func() {
 			// Forgotten meanwhile, as the listener signed out, it's asked anew;
 			// and it's no one else's who signed in since.
-			if lib.liked == nil || lib.listener() != who {
+			if lib.liked == nil || lib.listener() != who || lib.likeEpoch != epoch {
 				return
 			}
 			for _, id := range ask {
-				if liked[id] {
-					lib.liked[id] = true
+				if lib.likeVersions[id] != versions[id] {
+					continue
 				}
+				delete(lib.likesPending, id)
+				if err != nil {
+					// 保留占位，避免视图重绘时对失败来源无限重发查询。
+					lib.likesFailed[id] = true
+				} else {
+					delete(lib.likesFailed, id)
+					lib.liked[id] = liked[id]
+				}
+				a.resolveShortcutLike(lib, id, err == nil)
 			}
 		})
 	}()
@@ -114,9 +126,37 @@ func (a *app) toggleLike(tr *music.Track) {
 	if lib.liked == nil {
 		lib.liked = map[string]bool{}
 	}
-	id, like := tr.ID, !lib.liked[tr.ID]
+	a.setLike(lib, *tr, !lib.liked[tr.ID], false)
+}
+
+type likeWrite struct {
+	confirmed bool
+	track     music.Track
+	quiet     bool
+}
+
+func (a *app) setLike(lib *library, tr music.Track, like, quiet bool) {
+	id := tr.ID
+	if pending := a.shortcutLikePending; pending != nil && pending.lib == lib && pending.track.ID == id {
+		a.shortcutLikePending = nil
+	}
+	// 同曲目串行写入；回滚只依据服务端已确认的状态，不依赖前一次乐观更新。
+	write := lib.likeWrites[id]
+	if write == nil {
+		write = &likeWrite{confirmed: lib.liked[id]}
+		lib.likeWrites[id] = write
+		defer a.sendLike(lib, id, write)
+	}
+	write.track, write.quiet = tr, quiet
 	lib.liked[id] = like
-	liked := *tr
+	delete(lib.likesPending, id)
+	delete(lib.likesFailed, id)
+	lib.likeVersions[id]++
+}
+
+func (a *app) sendLike(lib *library, id string, write *likeWrite) {
+	tr, quiet, like := write.track, write.quiet, lib.liked[id]
+	version, who, epoch := lib.likeVersions[id], lib.listener(), lib.likeEpoch
 	send := lib.src.Like
 	if tr.ShowID != "" {
 		send = lib.src.LikeEpisode
@@ -124,14 +164,36 @@ func (a *app) toggleLike(tr *music.Track) {
 	go func() {
 		err := send(id, like)
 		a.post(func() {
-			if err != nil {
-				if lib.liked != nil {
-					lib.liked[id] = !like
-				}
-				a.actionFailed(lib, err, T("That didn't work. Try again later."))
+			if lib.likeWrites[id] != write {
 				return
 			}
-			a.likedChanged(lib, liked, like)
+			// 旧账号结果不能覆盖新缓存，也不能留下阻塞后续收藏的写入占位。
+			if lib.listener() != who || lib.likeEpoch != epoch || lib.liked == nil {
+				delete(lib.likeWrites, id)
+				return
+			}
+			if err == nil {
+				write.confirmed = like
+				a.likedChanged(lib, tr, like)
+			}
+			if a.libOf(lib.id) != lib {
+				// 停用来源会复用此缓存；只结算已发请求，取消后续意图并释放占位。
+				lib.liked[id] = write.confirmed
+				delete(lib.likeWrites, id)
+				return
+			}
+			if lib.likeVersions[id] != version {
+				a.sendLike(lib, id, write)
+				return
+			}
+			delete(lib.likeWrites, id)
+			if err != nil {
+				lib.liked[id] = write.confirmed
+				if !quiet {
+					a.actionFailed(lib, err, T("That didn't work. Try again later."))
+				}
+				return
+			}
 		})
 	}()
 }

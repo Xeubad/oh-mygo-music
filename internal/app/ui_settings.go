@@ -50,6 +50,8 @@ func (a *app) openSettings() {
 		Content:         ui.View(a.settingsView),
 	})
 	a.settingsWin.OnClosed(func() {
+		a.endShortcutRecording()
+		a.shortcutEdit.confirm = false
 		a.settingsWin = nil
 		// Its sign-in dialog goes with it; a sign-in on its way still counts.
 		if a.signIn.here {
@@ -57,6 +59,7 @@ func (a *app) openSettings() {
 		}
 		a.syncDock()
 	})
+	a.settingsWin.OnBlur(a.endShortcutRecording)
 	a.syncDock()
 }
 
@@ -150,8 +153,17 @@ func (a *app) settingsView(c *ui.Context) {
 	useAccent(&t, p)
 	c.SetTheme(&t)
 	c.Root().Background(p.bg)
-	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.settingsWin.Close() })
-	c.OnShortcut(ui.Cmd, ui.KeyF, func() { a.settingsSearchBox.Focus(c) })
+	if a.shortcutEdit.recording != "" && (!c.WindowActive() || a.shortcutEdit.hadFocus && !a.shortcutEdit.handle.Focused(c)) {
+		a.endShortcutRecording()
+	}
+	if a.shortcutEdit.recording == "" {
+		c.OnShortcut(ui.Cmd, ui.KeyW, func() {
+			if a.settingsWin != nil {
+				a.settingsWin.Close()
+			}
+		})
+		c.OnShortcut(ui.Cmd, ui.KeyF, func() { a.settingsSearchBox.Focus(c) })
+	}
 
 	sections := a.settingsSections(c, p)
 	current := sections[0]
@@ -264,6 +276,8 @@ func (a *app) settingsNavItem(c *ui.Context, p palette, sec settingsSection, sel
 		ui.Text(c, sec.title).FontSize(13).FontWeight(500).SingleLine().Shrink(1).MinWidth(0)
 	})
 	if b.Clicked() {
+		a.endShortcutRecording()
+		a.shortcutEdit.confirm = false
 		a.settingsPage, a.settingsQuery = sec.id, ""
 	}
 }
@@ -391,6 +405,11 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	})
 
 	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) { a.sourceSettings(c, row, block, p) })
+	if runtime.GOOS == "windows" && a.globalShortcuts != nil {
+		add("shortcuts", T("Shortcuts"), iconLaptop, func(row settingsRow, block settingsBlock) {
+			a.shortcutSettings(c, p, row, block)
+		})
+	}
 
 	// Only on macOS, the one with a notch player.
 	if a.notch != nil {

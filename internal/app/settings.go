@@ -67,6 +67,9 @@ type settings struct {
 	StageSparks bool `json:"stageSparks,omitempty"`
 	// Volume is where the volume was left, from 0 to 1.
 	Volume float64 `json:"volume"`
+	// 静音退出后仍恢复原来的非零音量；零值表示尚无有效历史。
+	MutedFrom float64         `json:"mutedFrom,omitempty"`
+	Shortcuts *shortcutConfig `json:"globalShortcuts,omitempty"`
 	// Normalize evens out the loudness of tracks, by what their source
 	// measured of each.
 	Normalize bool `json:"normalize"`
@@ -128,7 +131,23 @@ func (s settings) save() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(path), ".settings-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	// 同目录替换，写入失败时不截断用户原来的设置。
+	return os.Rename(f.Name(), path)
 }
 
 // applyAppearance makes the windows light, dark, or follow the system. Only

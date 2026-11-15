@@ -141,9 +141,12 @@ type app struct {
 	radioStarting string // the radio asked for its first songs, or ""
 	stationAt     int    // which of a few stations their switch has chosen
 
-	volume     float64
-	volumeOpen bool // the volume popover of the player bar shows
-	mutedFrom  float64
+	volume              float64
+	volumeOpen          bool // the volume popover of the player bar shows
+	mutedFrom           float64
+	globalShortcuts     *shortcutManager
+	shortcutEdit        shortcutEditor
+	shortcutLikePending *shortcutLikeRequest
 
 	rowBars barState
 	// underTop and underBottom say whether the page has content under its
@@ -359,7 +362,11 @@ func Run() error {
 			a.syncCaptions()
 		}
 		a.volume = a.settings.Volume
-		a.pl.SetVolume(a.volume)
+		a.mutedFrom = a.settings.MutedFrom
+		if a.volume < 0 || a.volume > 1 {
+			a.volume = 0.8
+		}
+		a.setPlayerVolume(a.volume)
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:         mygo.App.Name(),
 			Width:         1180,
@@ -378,6 +385,7 @@ func Run() error {
 			Content:              ui.View(a.view),
 		})
 		a.setMenu()
+		a.initGlobalShortcuts()
 		a.boot()
 		// The notch player is macOS's, over its menu bar: elsewhere it would
 		// hang at the top of the screen as a black box.
@@ -420,7 +428,12 @@ func Run() error {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
+		a.endShortcutRecording()
+		if a.globalShortcuts != nil {
+			a.globalShortcuts.stop()
+		}
 		a.settings.Volume = a.volume
+		a.settings.MutedFrom = a.mutedFrom
 		a.settings.save()
 		a.saveSession()
 	})
