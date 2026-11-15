@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"mygo-music/internal/buildinfo"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/music"
 )
@@ -651,6 +652,40 @@ func TestMinAppVersion(t *testing.T) {
 	bad, data := write(t, `{"id":"x","minAppVersion":"soon"}`, `export function suggest() { return []; }`)
 	if _, err := Load(bad, data); err == nil {
 		t.Error("loaded with a minAppVersion that isn't a version")
+	}
+}
+
+// 自有发行号曾被当作插件 API 版本，降为 0.0.1 会误拒绝仍兼容的官方插件。
+func TestForkPluginCompatibility(t *testing.T) {
+	official := buildinfo.PluginVersion()
+	numbers, ok := versionNumbers(official)
+	if !ok {
+		t.Fatalf("invalid official compatibility version %q", official)
+	}
+	future := fmt.Sprintf("%d.%d.%d", numbers[0], numbers[1], numbers[2]+1)
+	for _, test := range []struct {
+		minimum string
+		loads   bool
+	}{
+		{official, true},
+		{future, false},
+	} {
+		t.Run(test.minimum, func(t *testing.T) {
+			manifest := fmt.Sprintf(`{"id":"x","minAppVersion":%q}`, test.minimum)
+			dir, data := write(t, manifest, `export function suggest() { return []; }`)
+			loaded, err := Load(dir, data)
+			if loaded != nil {
+				defer loaded.Close()
+			}
+			var needs *NeedsNewerApp
+			if test.loads {
+				if err != nil {
+					t.Fatalf("compatible plugin rejected: %v", err)
+				}
+			} else if !errors.As(err, &needs) || needs.Version != future {
+				t.Fatalf("future plugin was not rejected: %v", err)
+			}
+		})
 	}
 }
 

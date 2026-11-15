@@ -38,6 +38,7 @@ import (
 	"github.com/MoeForge/moejs/eventloop"
 	"github.com/MoeForge/moejs/webapi"
 
+	"mygo-music/internal/buildinfo"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/music"
 )
@@ -133,11 +134,10 @@ type Manifest struct {
 	RequestHeaders []RequestHeaders `json:"requestHeaders,omitempty"`
 }
 
-// appVersion is the app's version, which the app sets. With none, as when
-// it's built for development, any plugin loads.
-var appVersion string
+// 插件要求的是官方 API 基线；自有发行从 0.0.1 编号，不能用于兼容判断。
+var appVersion = buildinfo.PluginVersion()
 
-// SetAppVersion says which version of the app this is.
+// SetAppVersion overrides the plugin compatibility version.
 func SetAppVersion(v string) { appVersion = v }
 
 // NeedsNewerApp is why a plugin doesn't load: it works with a newer version of

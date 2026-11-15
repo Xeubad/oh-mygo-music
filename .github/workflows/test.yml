@@ -1,6 +1,4 @@
-# Runs the tests on every push to main and every pull request, on Linux and
-# on macOS, since some tests, like the notch's, only run on macOS and skip
-# elsewhere.
+# Runs tests on Windows, Linux and macOS; the notch tests only run on macOS.
 name: Test
 
 on:
@@ -11,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CGO_ENABLED: "0"
+
 # A newer push to a pull request cancels the run of the older one.
 concurrency:
   group: test-${{ github.event.pull_request.number || github.ref }}
@@ -20,10 +21,14 @@ jobs:
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
+          - { name: Windows, os: windows-latest }
           - { name: Linux, os: ubuntu-latest }
           - { name: macOS, os: macos-latest }
     steps:
@@ -47,6 +52,6 @@ jobs:
           key: test-go-${{ matrix.name }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: test-go-${{ matrix.name }}-
       - name: Build
-        run: go build -o /dev/null .
+        run: go build -o "$RUNNER_TEMP/mygo-music" .
       - name: Test
         run: go test ./internal/...
