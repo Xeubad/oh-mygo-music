@@ -1,6 +1,7 @@
 package player
 
 import (
+	"context"
 	"errors"
 	"math"
 	"math/rand/v2"
@@ -61,17 +62,18 @@ type Player struct {
 	feeding  bool // the feed is asked
 	awaiting bool // at the queue's end, for what the feed gives
 
-	track   *music.Track
-	out     *audio.Player
-	stream  stream
-	watch   *watched // stream, as out plays it
-	info    *music.Stream // what the current track streams
-	fade    fader
-	gain    float64 // the current track's normalizing gain
-	loading bool
-	playing bool // what the listener wants: false while paused
-	err     string
-	gen     int // counts loads, to drop the results of stale ones
+	track      *music.Track
+	out        *audio.Player
+	stream     stream
+	watch      *watched      // stream, as out plays it
+	info       *music.Stream // what the current track streams
+	fade       fader
+	gain       float64 // the current track's normalizing gain
+	loading    bool
+	playing    bool // what the listener wants: false while paused
+	err        string
+	gen        int // counts loads, to drop the results of stale ones
+	loadCancel context.CancelFunc
 
 	lyrics       []lyrics.Line
 	lyricsLoaded bool
@@ -449,6 +451,15 @@ func (p *Player) TogglePlay() {
 	if p.out == nil {
 		switch {
 		case p.loading:
+			if p.loadCancel != nil && p.playing {
+				// 暂停是取消本轮，不是一次来源失败；保留本项和恢复位置。
+				p.loadCancel()
+				p.loadCancel = nil
+				p.gen++
+				p.loading, p.playing = false, false
+				p.sync()
+				return
+			}
 			// It plays once loaded, or not.
 			p.playing = !p.playing
 			p.sync()
@@ -601,6 +612,10 @@ func (p *Player) Levels() ([Bands]float32, bool) {
 }
 
 func (p *Player) stop() {
+	if p.loadCancel != nil {
+		p.loadCancel()
+		p.loadCancel = nil
+	}
 	if out := p.out; out != nil {
 		// Paused first, it fades out over a few milliseconds, rather than
 		// stopping with a click.
@@ -691,8 +706,53 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 		quality = p.Quality()
 	}
 	pre := p.takeAhead(t, quality)
+	var ctx context.Context
+	cooperative, usesCooperation := src.(music.CooperativeSource)
+	usesCooperation = usesCooperation && src.Can("playbackPlan") && src.Can("resolveCandidate")
+	if usesCooperation {
+		ctx, p.loadCancel = context.WithCancel(context.Background())
+	}
 	go func() {
-		info, s, err := p.open(src, t, quality, pre)
+		var info *music.Stream
+		var s stream
+		var err error
+		if usesCooperation {
+			if pre != nil {
+				pre.close()
+			}
+			_, _, err = p.openCooperative(ctx, cooperative, t, quality, func(attempt context.Context, info *music.Stream, s stream) error {
+				committed := make(chan error, 1)
+				p.post(func() {
+					if attempt.Err() != nil || gen != p.gen {
+						committed <- context.Canceled
+						return
+					}
+					err := p.startLoaded(attempt, gen, s, info, quality)
+					if err == nil {
+						p.loading = false
+					}
+					committed <- err
+				})
+				select {
+				case err := <-committed:
+					return err
+				case <-attempt.Done():
+					return attempt.Err()
+				}
+			})
+			p.post(func() {
+				if gen != p.gen {
+					return
+				}
+				if err != nil {
+					p.loading = false
+					p.loadFailed(t.Source, err, at, skipped, dir)
+				}
+			})
+			return
+		} else {
+			info, s, err = p.open(src, t, quality, pre)
+		}
 		p.post(func() {
 			if gen != p.gen {
 				if s != nil {
@@ -705,37 +765,70 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 				p.loadFailed(t.Source, err, at, skipped, dir)
 				return
 			}
-			p.stream, p.info = s, info
-			p.gain = normGain(info)
-			p.watch = &watched{stream: s, now: p.now, ended: func() { p.post(func() {}) }}
-			p.out = audio.NewPlayer(p.watch)
-			// From its middle, as a session picked up again, it fades in.
-			level := 1.0
-			if p.pending > 0 {
-				level = 0
-			}
-			p.fade.attach(p.out, level)
-			p.applyGain()
-			p.out.OnEnd(func() {
-				p.post(func() {
-					if gen == p.gen {
-						p.ended()
-					}
-				})
-			})
-			if p.pending > 0 {
-				p.out.Seek(p.pending)
-				p.pending = 0
-			}
-			if p.playing {
-				p.out.Play()
-				p.fade.fade(1, fadeIn, nil)
-				p.record()
-			}
-			p.sync()
-			p.getAhead(quality)
+			p.startLoaded(context.Background(), gen, s, info, quality)
+
 		})
 	}()
+}
+
+// startLoaded 只在主线程安装已核验的流；协作调用在原截止内等待此处执行。
+func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music.Stream, quality string) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.stream, p.info = s, info
+	p.gain = normGain(info)
+	p.watch = &watched{stream: s, now: p.now, ended: func() { p.post(func() {}) }}
+	out := audio.NewPlayer(p.watch)
+	p.out = out
+	from := p.pending
+	defer func() {
+		if err != nil {
+			// 只撤回本候选，不能调用 stop 取消整轮；下一来源仍使用原预算和定位。
+			out.Close()
+			if p.out == out {
+				p.out, p.stream, p.watch, p.info = nil, nil, nil, nil
+				p.pending = from
+				p.fade.attach(nil, 1)
+			}
+		}
+	}()
+	// From its middle, as a session picked up again, it fades in.
+	level := 1.0
+	if from > 0 {
+		level = 0
+	}
+	p.fade.attach(out, level)
+	p.applyGain()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	out.OnEnd(func() {
+		p.post(func() {
+			if gen == p.gen && p.out == out {
+				p.ended()
+			}
+		})
+	})
+	if from > 0 {
+		out.Seek(from)
+	}
+	// 主线程已进入回调也不代表及时开播，设备准备与定位后仍须重查原截止。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.playing {
+		out.Play()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		p.fade.fade(1, fadeIn, nil)
+		p.record()
+	}
+	p.pending = 0
+	p.sync()
+	p.getAhead(quality)
+	return nil
 }
 
 // loadCover shows the system the cover of t, once it has it.
@@ -780,7 +873,7 @@ func (p *Player) loadLyrics(gen int, src music.Source, t music.Track) {
 // to do something first, which would stop the next track too.
 func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 	p.err = errorText(err)
-	if errors.Is(err, music.ErrSignIn) || errors.Is(err, music.ErrSetup) {
+	if errors.Is(err, music.ErrSignIn) || errors.Is(err, music.ErrSetup) || errors.Is(err, music.ErrPlaybackBlocked) {
 		p.playing = false
 		if p.Failed != nil {
 			p.Failed(source, err)
@@ -788,7 +881,16 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 		p.sync()
 		return
 	}
-	if dir != stay && skipped+1 < len(p.order) {
+	limit := len(p.order)
+	var cooperative *cooperativeFailure
+	if errors.As(err, &cooperative) {
+		limit = min(limit, cooperative.limit)
+		// 失败不能冒充正常播完；单曲循环须停留当前项等待用户处理。
+		if p.repeat == RepeatOne {
+			dir = stay
+		}
+	}
+	if dir != stay && skipped+1 < limit {
 		next := (at + dir + len(p.order)) % len(p.order)
 		p.loadSkipping(next, skipped+1, dir, p.playing, 0)
 		return
@@ -828,6 +930,12 @@ func (p *Player) open(src music.Source, t music.Track, quality string, pre *ahea
 			pre.close()
 		}
 		return nil, nil, errNoSource
+	}
+	if cooperative, ok := src.(music.CooperativeSource); ok && src.Can("playbackPlan") && src.Can("resolveCandidate") {
+		if pre != nil {
+			pre.close()
+		}
+		return p.openCooperative(context.Background(), cooperative, t, quality, nil)
 	}
 	var dl *download
 	var info *music.Stream

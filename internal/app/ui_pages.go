@@ -50,6 +50,12 @@ func (a *app) homeHello(c *ui.Context, now time.Time) {
 func (a *app) homePage(c *ui.Context) {
 	now := c.Now()
 	lib := a.library
+	if lib.can("aggregate") && lib.home != nil {
+		if _, ok := lib.src.(aggregateSource); ok {
+			a.aggregateLibrary(c, lib, a.pal, false)
+			return
+		}
+	}
 	if lib.home != nil && len(lib.home.Sections) > 0 {
 		a.browseRows(c, lib.home, "", func(c *ui.Context) { a.homeHello(c, now) })
 		return

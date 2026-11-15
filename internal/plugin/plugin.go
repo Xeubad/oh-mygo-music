@@ -21,6 +21,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,8 +48,7 @@ const (
 	callTimeout = 30 * time.Second
 	// Signing in waits for the listener, in their browser.
 	signInTimeout = 5 * time.Minute
-	// A runtime that doesn't take on a task in this long is stuck in the
-	// plugin's code, rather than waiting on something.
+	// 旧接口超时后探测事件循环；仍能处理任务的异步等待不应丢失运行时状态。
 	stuckAfter = time.Second
 	// memoryLimit is what a plugin may keep. Passing it restarts the plugin.
 	memoryLimit = 256 << 20
@@ -400,11 +400,14 @@ const fail = (e) => {
   const isObject = e !== null && typeof e === "object";
   bad(String((isObject && e.code) || ""), isObject ? String(e.message || "") : String(e));
 };
+const controller = new AbortController();
+if (arg !== null && typeof arg === "object") arg.signal = controller.signal;
 try {
   Promise.resolve(fn(arg)).then((r) => ok(r === undefined ? null : r), fail);
 } catch (e) {
   fail(e);
-}`
+}
+return () => controller.abort();`
 
 var helperScript = func() *moejs.Script {
 	s, err := moejs.CompileFunction("host-call", "fn, arg, ok, bad", helperBody, moejs.FunctionOptions{})
@@ -519,6 +522,8 @@ func asError(code, message string) error {
 		known = music.ErrSetup
 	case "unavailable":
 		known = music.ErrUnavailable
+	case "playbackBlocked":
+		known = music.ErrPlaybackBlocked
 	case "unsupported":
 		known = music.ErrUnsupported
 	default:
@@ -531,19 +536,19 @@ func asError(code, message string) error {
 }
 
 // ask calls an export on the loop; the answer comes through got, once.
-func (v *vm) ask(method string, params []byte, got func(answer)) {
+func (v *vm) ask(method string, params []byte, got func(answer)) moejs.Value {
 	rt := v.rt
 	fn, ok := rt.Export(method)
 	if !ok {
 		got(answer{err: music.ErrUnsupported})
-		return
+		return moejs.Undefined()
 	}
 	arg := moejs.Undefined()
 	if params != nil {
 		var err error
 		if arg, err = rt.ParseJSON(params); err != nil {
 			got(answer{err: err})
-			return
+			return moejs.Undefined()
 		}
 	}
 	// The call's data goes once nothing is using it. It can't go any sooner, as
@@ -567,10 +572,12 @@ func (v *vm) ask(method string, params []byte, got func(answer)) {
 		done(answer{err: asError(moejs.Arg(args, 0).String(), moejs.Arg(args, 1).String())})
 		return moejs.Undefined(), nil
 	})
-	if _, err := rt.CallFunction(v.helper, moejs.Undefined(), fn, arg, okFn, badFn); err != nil {
+	abort, err := rt.CallFunction(v.helper, moejs.Undefined(), fn, arg, okFn, badFn)
+	if err != nil {
 		// Only an interrupt gets here: the helper catches what the plugin throws.
 		done(answer{err: err})
 	}
+	return abort
 }
 
 // call asks the plugin and decodes its answer into out, unless out is nil.
@@ -579,6 +586,19 @@ func (p *Plugin) call(method string, params, out any) error {
 }
 
 func (p *Plugin) callWithin(timeout time.Duration, method string, params, out any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return p.callWithContext(ctx, method, params, out, true)
+}
+
+func (p *Plugin) callContext(ctx context.Context, method string, params, out any) error {
+	return p.callWithContext(ctx, method, params, out, false)
+}
+
+func (p *Plugin) callWithContext(ctx context.Context, method string, params, out any, recoverLegacyTimeout bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !p.exports[method] {
 		return music.ErrUnsupported
 	}
@@ -593,14 +613,18 @@ func (p *Plugin) callWithin(timeout time.Duration, method string, params, out an
 		}
 	}
 	ch := make(chan answer, 1)
+	var abort moejs.Value
+	finished := false // 只在运行时线程访问，取消不能碰已经释放的调用数据。
 	if !v.loop.RunOnLoop(func(*moejs.Runtime) {
-		v.ask(method, encoded, func(a answer) { ch <- a })
+		if ctx.Err() != nil {
+			finished = true
+			return
+		}
+		abort = v.ask(method, encoded, func(a answer) { finished = true; ch <- a })
 	}) {
 		p.drop(v)
 		return fmt.Errorf("the plugin stopped; try again")
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case a := <-ch:
 		if a.err != nil {
@@ -610,21 +634,36 @@ func (p *Plugin) callWithin(timeout time.Duration, method string, params, out an
 			return nil
 		}
 		return json.Unmarshal(a.json, out)
-	case <-timer.C:
-		p.dropIfStuck(v)
-		return fmt.Errorf("the plugin didn't answer %s in time", method)
+	case <-ctx.Done():
+		// AbortSignal 贯通到 fetch；迟到回包仍被上层轮次世代隔离。
+		v.loop.RunOnLoop(func(rt *moejs.Runtime) {
+			if !finished {
+				rt.CallFunction(abort, moejs.Undefined())
+			}
+		})
+		if recoverLegacyTimeout {
+			// 未完成的 Promise 也可能只是等待 I/O；只重启无法响应事件循环探测的运行时。
+			p.dropIfStuck(v)
+			return fmt.Errorf("the plugin didn't answer %s in time", method)
+		}
+		// 协作导出收到 AbortSignal 并应中止其 HTTP/媒体请求；不能等待旧 VM
+		// 的恢复检测，否则恢复耗时会越过单候选和整轮截止。
+		return ctx.Err()
 	}
 }
 
-// dropIfStuck ends a runtime that takes on no more tasks, which code that never
-// returns, or passing the memory limit, leaves it as. A plugin only waiting on
-// something, and slow about it, goes on.
+// dropIfStuck 仅用于旧接口的超时恢复；协作候选必须在原截止立即返回，不等待探测。
 func (p *Plugin) dropIfStuck(v *vm) {
 	alive := make(chan struct{})
-	v.loop.RunOnLoop(func(*moejs.Runtime) { close(alive) })
+	if !v.loop.RunOnLoop(func(*moejs.Runtime) { close(alive) }) {
+		p.drop(v)
+		return
+	}
+	timer := time.NewTimer(stuckAfter)
+	defer timer.Stop()
 	select {
 	case <-alive:
-	case <-time.After(stuckAfter):
+	case <-timer.C:
 		log.Printf("plugin %s: stuck; restarting it", p.manifest.ID)
 		p.drop(v)
 	}

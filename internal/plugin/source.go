@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/url"
@@ -298,6 +299,33 @@ func (p *Plugin) Stream(id, quality string) (*music.Stream, error) {
 		}
 	}
 	return &s, nil
+}
+
+// PlaybackPlan 只在两个协作导出同时存在时使用，旧插件仍走 Stream。
+func (p *Plugin) PlaybackPlan(ctx context.Context, id, quality, roundID string) (*music.PlaybackPlan, error) {
+	var plan music.PlaybackPlan
+	if err := p.callContext(ctx, "playbackPlan", map[string]string{"id": id, "quality": quality, "roundID": roundID}, &plan); err != nil {
+		return nil, err
+	}
+	return &plan, nil
+}
+
+func (p *Plugin) ResolveCandidate(ctx context.Context, id, roundID string, candidate music.PlaybackCandidate) (*music.CandidateStream, error) {
+	var result music.CandidateStream
+	if err := p.callContext(ctx, "resolveCandidate", map[string]any{"id": id, "roundID": roundID, "candidate": candidate}, &result); err != nil {
+		return nil, err
+	}
+	if u, err := url.Parse(result.Stream.URL); err == nil {
+		for k, v := range p.HeadersFor(u, KindAudio) {
+			if result.Stream.Headers == nil {
+				result.Stream.Headers = map[string]string{}
+			}
+			if !hasHeader(result.Stream.Headers, k) {
+				result.Stream.Headers[k] = v
+			}
+		}
+	}
+	return &result, nil
 }
 
 func (p *Plugin) RemotePlay(ids []string, start int, position int64) error {

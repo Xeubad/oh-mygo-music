@@ -95,6 +95,12 @@ func (p *Plugin) installHost(v *vm) error {
 			"set":    moejs.NativeFunc(p.storageSet(v)),
 			"remove": moejs.NativeFunc(p.storageRemove),
 		},
+		// 长期密钥只交给系统凭据库，不经过插件的普通 storage/settings。
+		"credentials": map[string]any{
+			"get":    moejs.NativeFunc(p.credentialGet),
+			"set":    moejs.NativeFunc(p.credentialSet),
+			"remove": moejs.NativeFunc(p.credentialRemove),
+		},
 		// language answers the listener's, as the app speaks it: en or zh-CN.
 		// It changes as they change it, without the plugin starting over.
 		"language": moejs.NativeFunc(func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) {

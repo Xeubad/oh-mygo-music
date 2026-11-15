@@ -676,6 +676,7 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 		for _, st := range info.Settings {
 			a.sourceSetting(c.Key(st.Key), lib, st, p)
 		}
+		a.aggregateSettings(c.Key("aggregate"), lib, p)
 	})
 }
 
