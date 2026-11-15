@@ -239,7 +239,8 @@ func (s picky) Stream(id, _ string) (*music.Stream, error) {
 		return nil, music.ErrUnavailable
 	}
 	path, err := filepath.Abs("testdata/seek.mp3")
-	return &music.Stream{URL: "file://" + filepath.ToSlash(path), Type: "mp3"}, err
+	// 统一编码文件 URL，避免 Windows 盘符被解析为主机名而丢失。
+	return &music.Stream{URL: music.FileURL(path), Type: "mp3"}, err
 }
 
 // pickyQueue is a, b and c, of which b can't play.
@@ -293,15 +294,18 @@ func TestPrevSkipsBack(t *testing.T) {
 	defer p.stop()
 	p.PlayTrack(q, 2)
 	settle(t, ch, p)
+	if p.Current().ID != "c" || !p.Playing() {
+		t.Fatalf("initially on %s, playing %v, err %q", p.Current().ID, p.Playing(), p.Err())
+	}
 	p.Prev()
 	settle(t, ch, p)
 	if p.Current().ID != "a" || !p.Playing() {
-		t.Fatalf("previous went to %s, playing %v", p.Current().ID, p.Playing())
+		t.Fatalf("previous went to %s, playing %v, err %q", p.Current().ID, p.Playing(), p.Err())
 	}
 	p.Next()
 	settle(t, ch, p)
 	if p.Current().ID != "c" || !p.Playing() {
-		t.Errorf("next went to %s, playing %v", p.Current().ID, p.Playing())
+		t.Errorf("next went to %s, playing %v, err %q", p.Current().ID, p.Playing(), p.Err())
 	}
 }
 
