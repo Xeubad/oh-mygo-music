@@ -35,6 +35,8 @@ type download struct {
 	done   bool
 	err    error
 	cancel context.CancelFunc
+	// 只报告真实下载任务结束；已交接的播放可据此立即处理网络错误。
+	finished chan struct{}
 	// part is the file's path until the cache keeps it, which keep does
 	// once the song has all come in: the path it is at then.
 	part string
@@ -53,7 +55,7 @@ type download struct {
 // without one.
 func startDownload(url string, size int64, headers map[string]string, part *os.File, keep func(string, int64) (string, bool)) *download {
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &download{size: size, cancel: cancel, users: 2}
+	d := &download{size: size, cancel: cancel, users: 2, finished: make(chan struct{})}
 	d.cond.L = &d.mu
 	switch {
 	case part != nil:
@@ -88,6 +90,7 @@ func opened(f *os.File, size int64) *download {
 }
 
 func (d *download) run(ctx context.Context, url string, headers map[string]string) {
+	defer close(d.finished)
 	defer d.release()
 	finish := func(err error) {
 		d.mu.Lock()

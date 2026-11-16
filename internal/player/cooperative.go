@@ -29,9 +29,15 @@ type lowerQualityResult struct{ info music.Stream }
 
 func (r *lowerQualityResult) Error() string { return "player: audio is below requested quality" }
 
-func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSource, track music.Track, quality string, commit func(context.Context, *music.Stream, stream, func(func() error) error) error) (info *music.Stream, result stream, failure error) {
+func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSource, track music.Track, quality string, timing *recoveryTiming, commit func(context.Context, *music.Stream, stream, playbackPolicy, func(func() error) error) error) (info *music.Stream, result stream, failure error) {
 	roundID := fmt.Sprintf("playback-%d", roundSequence.Add(1))
 	started := time.Now()
+	if timing != nil {
+		// 读取新候选计划也计入恢复剩余时间，不能在解析前重新计时。
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, timing.started.Add(timing.policy.recovery))
+		defer cancel()
+	}
 	// 读取设置本身也受默认整轮约束，不能在候选开始前无限等待。
 	// 计划尚未取得也可能最终失败，必须先安装默认限制，不能绕过连续失败保护。
 	limit := 3
@@ -53,10 +59,21 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 	if plan.ConsecutiveFailureLimit > 0 {
 		limit = plan.ConsecutiveFailureLimit
 	}
-	roundBudget := positiveBudget(plan.RoundTimeoutMs, 20*time.Second)
-	round, roundCancel := context.WithDeadline(ctx, started.Add(roundBudget))
+	policy := playbackPolicy{
+		candidate:    positiveBudget(plan.CandidateTimeoutMs, 5*time.Second),
+		stall:        positiveBudget(plan.StallTimeoutMs, 5*time.Second),
+		recovery:     positiveBudget(plan.RecoveryTimeoutMs, 20*time.Second),
+		failureLimit: limit,
+	}
+	deadline := started.Add(positiveBudget(plan.RoundTimeoutMs, 20*time.Second))
+	if timing != nil {
+		policy = timing.policy
+		limit = policy.failureLimit
+		deadline = timing.started.Add(policy.recovery)
+	}
+	round, roundCancel := context.WithDeadline(ctx, deadline)
 	defer roundCancel()
-	candidateBudget := positiveBudget(plan.CandidateTimeoutMs, 5*time.Second)
+	candidateBudget := policy.candidate
 	last := error(music.ErrUnavailable)
 	seen := map[[4]string]bool{}
 	// 后备只能活在当前轮次；用完整身份及实际档位索引，不改变计划的候选顺序。
@@ -100,7 +117,7 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 			// 准备仍受原截止；主线程成功交接时同步解除下载取消，而非等后台回执。
 			dl, _ := s.source()
 			guard.protect(dl.Close)
-			err = commit(guarded, info, s, guard.commit)
+			err = commit(guarded, info, s, policy, guard.commit)
 			if guard.committed() {
 				err = nil
 			} else if err != nil {
