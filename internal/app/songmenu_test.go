@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -86,6 +87,119 @@ func TestSongMenuOnRightClick(t *testing.T) {
 	}
 	if a.pl.Current() != nil {
 		t.Error("the right click played the song")
+	}
+}
+
+// 右键下一首播放只插入队列，不能替换原列表或打断当前播放、暂停与进度。
+func TestSongMenuQueuesNextWithoutInterruptingPlayback(t *testing.T) {
+	for _, playing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "paused", true: "playing"}[playing], func(t *testing.T) {
+			a := newTestApp()
+			current := song("current", "Current song", "Artist")
+			current.Source = "fake"
+			later := song("later", "Later song", "Artist")
+			later.Source = "fake"
+			picked := song("picked", "Picked song", "Artist")
+			a.pl.Cue([]music.Track{current, later})
+			if playing {
+				a.pl.Hold(42 * time.Second)
+			}
+			position := a.pl.Position()
+			a.playlists["42"] = &music.Playlist{ID: "42", Name: "Choices", Tracks: []music.Track{picked}}
+			a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+			tester := ui.NewTester(a.view, 1200, 800)
+			tester.Frame()
+			if err := tester.RightClick("Picked song"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tester.ChooseMenuItem("Play Next"); err != nil {
+				t.Fatal(err)
+			}
+			tester.Frame()
+			if a.pl.Current().ID != "current" || a.pl.Playing() != playing || a.pl.Position() != position {
+				t.Fatalf("insertion changed current playback: %+v, playing %v, position %s", a.pl.Current(), a.pl.Playing(), a.pl.Position())
+			}
+			order, at := a.pl.PlayOrder()
+			queue := a.pl.Queue()
+			if len(order) != 3 || at != 0 || queue[order[1]].ID != "picked" || queue[order[1]].Source != "fake" || queue[order[2]].ID != "later" {
+				t.Fatalf("wrong next track or lost source: queue %+v, order %v at %d", queue, order, at)
+			}
+			if a.playlists["42"].Tracks[0].Source != "" {
+				t.Fatal("queue insertion mutated the source list")
+			}
+		})
+	}
+}
+
+// 来源明确标记不可播放的曲目不能通过右键下一首播放绕过限制或改变当前队列。
+func TestSongMenuCannotQueueUnavailableTrack(t *testing.T) {
+	a := newTestApp()
+	a.pl.Cue([]music.Track{{ID: "current", Source: "fake", Name: "Current song"}})
+	picked := song("missing", "Unavailable song", "Artist")
+	picked.Unavailable = true
+	a.playlists["42"] = &music.Playlist{ID: "42", Name: "Choices", Tracks: []music.Track{picked}}
+	a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+	tester := ui.NewTester(a.view, 1200, 800)
+	tester.Frame()
+	if err := tester.RightClick("Unavailable song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Play Next"); err == nil {
+		t.Fatal("unavailable song could be queued")
+	}
+	tester.CloseMenu()
+	if len(a.pl.Queue()) != 1 || a.pl.Current().ID != "current" {
+		t.Fatal("disabled action changed the queue")
+	}
+}
+
+// 聚合曲目的下一首播放遵守显式来源选择，失效选择不能回退到另一录音或污染旧队列。
+func TestSongMenuQueuesNextWithSelectedAggregateSource(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(map[bool]string{false: "selected", true: "stale"}[stale], func(t *testing.T) {
+			a := newTestApp()
+			left := music.AggregateSource{Platform: "wy", AccountID: "one", TrackID: "left"}
+			right := music.AggregateSource{Platform: "tx", AccountID: "two", TrackID: "right"}
+			frozen, err := json.Marshal(map[string]any{"version": 1, "identity": left, "sources": []music.AggregateSource{left, right}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			picked := music.Track{ID: "aggregate:" + string(frozen), Source: "fake", Name: "Selected recording", AggregateSources: []music.AggregateSource{left, right}}
+			a.aggregateViews = map[*library]*aggregateView{
+				a.library: {sourceChoices: map[string]string{aggregateTrackIdentity(&picked): aggregateSourceKey(right)}},
+			}
+			if stale {
+				picked.AggregateSources = []music.AggregateSource{left}
+			}
+			a.pl.Cue([]music.Track{{ID: "current", Source: "fake", Name: "Current song"}})
+			a.playlists["42"] = &music.Playlist{ID: "42", Name: "Choices", Tracks: []music.Track{picked}}
+			a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+			tester := ui.NewTester(a.view, 1200, 800)
+			tester.Frame()
+			if err := tester.RightClick("Selected recording"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tester.ChooseMenuItem("Play Next"); err != nil {
+				t.Fatal(err)
+			}
+			if a.pl.Current().ID != "current" {
+				t.Fatal("queueing changed the current track")
+			}
+			if stale {
+				if len(a.pl.Queue()) != 1 {
+					t.Fatal("stale source choice was silently queued")
+				}
+				return
+			}
+			order, at := a.pl.PlayOrder()
+			var queued struct{ Identity music.AggregateSource }
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(a.pl.Queue()[order[at+1]].ID, "aggregate:")), &queued); err != nil {
+				t.Fatal(err)
+			}
+			if !sameAggregateSource(queued.Identity, right) || a.playlists["42"].Tracks[0].ID != picked.ID {
+				t.Fatal("next track ignored the selected source or mutated its list")
+			}
+		})
 	}
 }
 

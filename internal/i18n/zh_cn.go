@@ -297,6 +297,7 @@ var zhCN = map[string]string{
 	"Paste":                            "粘贴",
 	"Pause":                            "暂停播放",
 	"Play":                             "播放",
+	"Play Next":                        "下一首播放",
 	"Play/Pause":                       "播放/暂停",
 	"Playback":                         "播放",
 	"Playing":                          "正在播放",

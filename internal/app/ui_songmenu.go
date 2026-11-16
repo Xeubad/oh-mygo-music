@@ -26,6 +26,22 @@ func (a *app) songMenu(c *ui.Context, tr *music.Track, size float32, color ui.Co
 func (a *app) songItems(tr *music.Track, pid string) func(m *ui.Menu) {
 	return func(m *ui.Menu) {
 		lib := a.trackLib(tr)
+		if m.Item(T("Play Next")).Disabled(tr.Unavailable || lib == nil).Chosen() {
+			next := *tr
+			if next.Source == "" {
+				next.Source = lib.id
+			}
+			if view := a.aggregateViews[lib]; view != nil {
+				queued, err := aggregateQueueTracks([]music.Track{next}, view.sourceChoices)
+				if err != nil {
+					a.toast = err.Error()
+					return
+				}
+				next = queued[0]
+			}
+			a.pl.PlayNext(next)
+			return
+		}
 		if tr.ShowID == "" && m.Item(T("Share Card…")).Chosen() {
 			a.openShare(*tr)
 		}

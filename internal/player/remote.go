@@ -36,12 +36,13 @@ const (
 
 // remote is how a track of a remote source is going.
 type remote struct {
-	src     music.Source
-	started bool // the source was told to play it
-	seen    bool // the source was seen playing it
-	polling bool // an answer is on its way
-	polls   int  // answers since it was told, until it was seen playing it
-	fails   int  // answers failed in a row
+	src          music.Source
+	started      bool // the source was told to play it
+	seen         bool // the source was seen playing it
+	polling      bool // an answer is on its way
+	polls        int  // answers since it was told, until it was seen playing it
+	fails        int  // answers failed in a row
+	queueChanged bool
 
 	pos      time.Duration // the position at the time of at
 	at       time.Time
@@ -382,6 +383,15 @@ func (p *Player) remoteMoved(r *remote, st *music.RemoteState) {
 	defer p.post(func() {})
 	if p.repeat == RepeatOne {
 		p.load(p.at)
+		return
+	}
+	if r.queueChanged && p.at+1 < len(p.order) {
+		next := p.queue[p.order[p.at+1]]
+		if next.ID == st.TrackID && next.Source == p.track.Source {
+			p.follow(r, p.at+1, st)
+		} else {
+			p.load(p.at + 1)
+		}
 		return
 	}
 	for k, i := range p.order {
