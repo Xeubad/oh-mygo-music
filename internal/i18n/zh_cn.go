@@ -11,6 +11,7 @@ var zhCN = map[string]string{
 	"Loading aggregate settings…":     "正在读取聚合设置…",
 	"Aggregate settings unavailable":  "聚合设置暂时不可读",
 	"Reload aggregate status":         "重新加载聚合状态",
+	"Reload Current Track":            "重新加载当前曲目",
 	"Target Quality":                  "目标音质",
 	"Minimum Quality":                 "最低音质",
 	"Platform Order":                  "候选平台顺序",

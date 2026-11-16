@@ -222,6 +222,12 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 			if ui.Button(c.Key("discard"), T("Reload aggregate status")).Disabled(e.busy).Clicked() {
 				a.aggregateCommand(lib, e, "status", nil)
 			}
+			if current := a.pl.Current(); current != nil && current.Source == lib.id {
+				// 保存设置不打断播放；只有明确重载才将新设置应用于当前曲目。
+				if ui.Button(c.Key("reload-track"), T("Reload Current Track")).Disabled(e.busy).Clicked() {
+					a.pl.Reload()
+				}
+			}
 		})
 		ui.Text(c, T("Stall detection must be below the recovery budget; changes apply to new playback flows.")).FontSize(11.5).TextColor(p.muted)
 		aggregateField(c, "Resolver Key", func() {

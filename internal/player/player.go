@@ -456,6 +456,26 @@ func (p *Player) Jump(i int) {
 	}
 }
 
+// Reload reapplies source settings without starting a new song playback.
+func (p *Player) Reload() {
+	if p.track == nil || p.at < 0 || p.at >= len(p.order) {
+		return
+	}
+	if p.playback != nil {
+		// 重载是用户要求的新解析，不是新一遍播放；已用机会保留，旧恢复截止不继承。
+		p.playback.dir, p.playback.skipped = stay, 0
+		p.playback.recovery = nil
+		if p.playback.completed {
+			// 末尾没有可准备的首帧；释放旧音频但保留结束位置，等明确重播再解析。
+			from := p.Position()
+			p.stop()
+			p.pending = from
+			return
+		}
+	}
+	p.loadPlayback(p.at, 0, stay, p.playing, p.Position(), p.playback)
+}
+
 // TogglePlay pauses, fading out, or plays, fading in.
 func (p *Player) TogglePlay() {
 	if p.remote != nil && p.remote.started {
@@ -478,12 +498,18 @@ func (p *Player) TogglePlay() {
 			p.playing = !p.playing
 			p.sync()
 		case len(p.order) > 0:
-			// 手动续播沿用已用机会，但本首余下失败必须尊重最新的停留意图。
+			from := p.pending
+			// 手动续播沿用已用机会，只有真实正常结束后的明确重播才从头开始新一遍。
 			if p.playback != nil {
-				p.playback.dir, p.playback.skipped = stay, 0
-				p.playback.recovery = nil
+				if p.playback.completed {
+					p.playback = &playbackAttempt{dir: stay, policy: p.playback.policy}
+					from = 0
+				} else {
+					p.playback.dir, p.playback.skipped = stay, 0
+					p.playback.recovery = nil
+				}
 			}
-			p.loadPlayback(max(p.at, 0), 0, stay, true, p.pending, p.playback)
+			p.loadPlayback(max(p.at, 0), 0, stay, true, from, p.playback)
 		}
 		return
 	}
@@ -544,6 +570,10 @@ func (p *Player) Seek(t time.Duration) {
 	if p.remote != nil && p.remote.started {
 		p.remoteSeek(t)
 		return
+	}
+	if p.playback != nil {
+		// 拖动是当前播放的定位意图，不是从头重播；清除完成标记但保留已用恢复机会。
+		p.playback.completed = false
 	}
 	if p.out == nil {
 		p.pending = t
@@ -776,30 +806,48 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 				requested.ID = t.PlaybackID
 			}
 			_, _, err = p.openCooperative(ctx, cooperative, requested, quality, playback.recovery, func(attempt context.Context, info *music.Stream, s stream, policy playbackPolicy, handoff func(func() error) error) error {
-				// 元数据可先于音频到达；首次开播也必须在原候选预算内解码出首帧。
-				prepared, err := prepareCooperativeStream(attempt, s, from)
-				if err != nil {
-					return err
+				type preparationResult struct {
+					position time.Duration
+					retry    bool
+					err      error
 				}
-				s = prepared
-				committed := make(chan error, 1)
-				p.post(func() {
-					if attempt.Err() != nil || gen != p.gen {
-						committed <- context.Canceled
-						return
+				for {
+					// 元数据不等于开播；定位改变时仍用同一流和候选截止重新准备，不能领取新预算。
+					prepared, err := prepareCooperativeStream(attempt, s, from)
+					if err != nil {
+						return err
 					}
-					playback.policy = policy
-					err := p.startLoaded(attempt, gen, s, info, quality, handoff)
-					if err == nil {
-						p.loading = false
+					committed := make(chan preparationResult, 1)
+					p.post(func() {
+						if attempt.Err() != nil || gen != p.gen {
+							committed <- preparationResult{err: context.Canceled}
+							return
+						}
+						// pending 只在主线程读取；准备期间的最新定位不能被旧首帧覆盖。
+						if p.pending != from {
+							committed <- preparationResult{position: p.pending, retry: true}
+							return
+						}
+						playback.policy = policy
+						err := p.startLoaded(attempt, gen, prepared, info, quality, handoff)
+						if err == nil {
+							p.loading = false
+						}
+						committed <- preparationResult{err: err}
+					})
+					select {
+					case result := <-committed:
+						if !result.retry {
+							return result.err
+						}
+						from = result.position
+						// 首帧准备已消费样本；回到零也必须真正复位，不能接着读旧位置。
+						if err := s.SetPosition(0); err != nil {
+							return err
+						}
+					case <-attempt.Done():
+						return attempt.Err()
 					}
-					committed <- err
-				})
-				select {
-				case err := <-committed:
-					return err
-				case <-attempt.Done():
-					return attempt.Err()
 				}
 			})
 			p.post(func() {

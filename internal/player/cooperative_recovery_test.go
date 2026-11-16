@@ -1153,6 +1153,295 @@ export function resolveCandidate(){return {stream:{url:%q}};}
 	}
 }
 
+// 重载解析尚未返回时的新定位必须保留，不能被重载前准备的旧位置覆盖。
+func TestCooperativeReloadKeepsSeekDuringLoading(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let rounds=0;
+export function playbackPlan() { rounds++; return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",trackID:"one",quality:"flac"}]}; }
+export async function resolveCandidate({signal}) {
+ if(rounds===2) await fetch(%q,{signal});
+ return {stream:{url:%s}};
+}
+`, server.URL, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.Restore(player.Session{
+		Queue: []music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}},
+		Order: []int{0, 1}, At: 0, Position: 1000,
+	})
+	finishLoading(t, p, posts)
+	p.Reload()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+waitReloadSeek:
+	for {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-entered:
+			break waitReloadSeek
+		case <-timer.C:
+			t.Fatal("没有进入重载解析等待")
+		}
+	}
+	p.Seek(3 * time.Second)
+	close(release)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Playing() || p.Err() != "" || p.Position() < 2999*time.Millisecond || p.Position() > 3001*time.Millisecond || p.Current().ID != "one" || len(p.Queue()) != 2 {
+		t.Fatalf("重载吞掉加载期间的新定位：position=%v ready=%v error=%q", p.Position(), p.Ready(), p.Err())
+	}
+}
+
+// 播完后的重载保留结束位置；明确再次播放时才从头解析新设置，不能把末尾当中断定位。
+func TestCooperativeReloadCompletedTrackWaitsForReplay(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let quality="flac";
+export function aggregate() { quality="128k"; return {ok:true}; }
+export function playbackPlan() { return {targetQuality:quality,minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",trackID:"one",quality}]}; }
+export function resolveCandidate() { return {stream:{url:quality==="flac"?%s:%s}}; }
+`, audioPath(t, "seek.flac"), audioPath(t, "seek.mp3")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	p.Seek(p.Duration())
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for p.Playing() || p.Loading() {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatal("没有观察到真实正常结束")
+		}
+	}
+	endedAt := p.Position()
+	p.Reload()
+	finishLoading(t, p, posts)
+	if p.Playing() || p.Err() != "" || p.Position() < endedAt-time.Millisecond || p.Current().ID != "one" || len(p.Queue()) != 1 {
+		t.Fatalf("结束处重载改变了结束状态：position=%v ended=%v error=%q", p.Position(), endedAt, p.Err())
+	}
+	if _, err := src.Aggregate("configure", nil); err != nil {
+		t.Fatal(err)
+	}
+	p.TogglePlay()
+	finishLoading(t, p, posts)
+	if !p.Ready() || !p.Playing() || p.Err() != "" || p.Stream().Quality != "128k" || p.Position() >= time.Second {
+		t.Fatalf("明确重播没有从头应用新设置：stream=%+v position=%v error=%q", p.Stream(), p.Position(), p.Err())
+	}
+}
+
+// 正常结束后重载再指定位置属于定位续播，不能被完成态强制改成从头重播。
+func TestCooperativeReloadCompletedTrackRespectsSeek(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",trackID:"one",quality:"flac"}]}; }
+export function resolveCandidate() { return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	p.Seek(p.Duration())
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for p.Playing() || p.Loading() {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatal("没有观察到真实正常结束")
+		}
+	}
+	p.Reload()
+	finishLoading(t, p, posts)
+	p.Seek(2 * time.Second)
+	p.TogglePlay()
+	finishLoading(t, p, posts)
+	if !p.Ready() || !p.Playing() || p.Err() != "" || p.Position() < 1999*time.Millisecond || p.Position() >= 2500*time.Millisecond || p.Current().ID != "one" || len(p.Queue()) != 1 {
+		t.Fatalf("完成态重载吞掉明确定位：position=%v ready=%v error=%q", p.Position(), p.Ready(), p.Err())
+	}
+}
+
+// 同曲重新加载应用新设置，但不能返还本次播放已经用掉的自动恢复机会。
+func TestCooperativeReloadKeepsUsedRecoveryChance(t *testing.T) {
+	audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cuts := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := int(requests.Add(1)) - 1
+		w.Header().Set("Content-Length", fmt.Sprint(len(audio)))
+		w.Write(audio[:len(audio)/2])
+		w.(http.Flusher).Flush()
+		if i < len(cuts) {
+			select {
+			case <-cuts[i]:
+			case <-r.Context().Done():
+			}
+		}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let rounds=0;
+export function aggregate() { return {rounds}; }
+export function playbackPlan() { rounds++; return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",trackID:"one",quality:"flac"}]}; }
+export function resolveCandidate() { return {stream:{url:%q}}; }
+`, server.URL))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	close(cuts[0])
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for requests.Load() < 2 || !p.Ready() || p.Loading() {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatalf("首轮自动恢复没有完成：%q", p.Err())
+		}
+	}
+	p.Reload()
+	finishLoading(t, p, posts)
+	if !p.Playing() || !p.Ready() || requests.Load() != 3 {
+		t.Fatalf("重载没有重新打开当前项：requests=%d error=%q", requests.Load(), p.Err())
+	}
+	close(cuts[2])
+	for p.Playing() || p.Loading() {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatal("重载后的第二次中断没有停止")
+		}
+	}
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Rounds int `json:"rounds"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Rounds != 3 || requests.Load() != 3 || p.Current().ID != "one" || len(p.Queue()) != 2 || p.Err() == "" {
+		t.Fatalf("同曲重载返还恢复机会或改变队列：rounds=%d requests=%d queue=%+v error=%q", state.Rounds, requests.Load(), p.Queue(), p.Err())
+	}
+}
+
+// 手动重载取消在途恢复，并使用新音质重新解析；旧轮迟到结果不能覆盖重载。
+func TestCooperativeReloadCancelsRecoveryAndAppliesQuality(t *testing.T) {
+	audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut, entered, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			close(entered)
+			<-r.Context().Done()
+			close(canceled)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(audio)))
+		w.Write(audio[:len(audio)/2])
+		w.(http.Flusher).Flush()
+		select {
+		case <-cut:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let rounds=0, quality="flac";
+export function aggregate() { quality="128k"; return {ok:true}; }
+export function playbackPlan() { rounds++; return {targetQuality:quality,minimumQuality:"128k",candidates:[
+{id:"a",platform:quality==="flac"?"wy":"tx",trackID:"one",quality}]}; }
+export async function resolveCandidate({signal}) {
+ if(rounds===2) await fetch(%q+"/resolve",{signal});
+ return {stream:{url:quality==="flac"?%q+"/audio":%s}};
+}
+`, server.URL, server.URL, audioPath(t, "seek.mp3")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	close(cut)
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+waitReloadRecovery:
+	for {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-entered:
+			break waitReloadRecovery
+		case <-timer.C:
+			t.Fatal("没有进入待取消的恢复请求")
+		}
+	}
+	if _, err := src.Aggregate("configure", nil); err != nil {
+		t.Fatal(err)
+	}
+	p.Reload()
+	select {
+	case <-canceled:
+	case <-timer.C:
+		t.Fatal("同曲重载没有取消旧恢复的真实请求")
+	}
+	finishLoading(t, p, posts)
+	if !p.Ready() || !p.Playing() || p.Err() != "" || p.Stream().Quality != "128k" || p.Stream().Platform != "tx" || p.Current().ID != "one" || len(p.Queue()) != 2 {
+		t.Fatalf("重载未应用新音质或被旧恢复覆盖：stream=%+v current=%+v error=%q", p.Stream(), p.Current(), p.Err())
+	}
+}
+
 // 恢复中暂停取消真实请求；之后手动续播不能返还本次播放已用的恢复机会。
 func TestCooperativeCanceledRecoveryDoesNotReturnChance(t *testing.T) {
 	audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))

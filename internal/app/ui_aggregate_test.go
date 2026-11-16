@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +153,43 @@ func TestAggregateSettingsSubmitAsOneValidatedChange(t *testing.T) {
 		t.Fatalf("非法修改破坏上一份设置: %q", got)
 	}
 	_ = a
+}
+
+// 设置中的重载重新打开当前曲目，但不改变队列、进度或原来的暂停状态。
+func TestAggregateSettingsReloadKeepsCurrentTrackAndPosition(t *testing.T) {
+	a, _, tt, post := aggregateApp(t)
+	streamSource := newFakeSource(a.library.id)
+	audioPath, err := filepath.Abs(filepath.Join("..", "player", "testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan struct{}, 8)
+	streamSource.stream = func(id, quality string) (*music.Stream, error) {
+		opened <- struct{}{}
+		return &music.Stream{URL: "file:///" + filepath.ToSlash(audioPath)}, nil
+	}
+	a.pl.Source = func(string) music.Source { return streamSource }
+	a.pl.Restore(player.Session{
+		Queue: []music.Track{{ID: "one", Source: a.library.id}, {ID: "two", Source: a.library.id}},
+		Order: []int{0, 1}, At: 0, Position: 1000,
+	})
+	until(t, post, func() bool { return a.pl.Ready() && !a.pl.Loading() })
+	<-opened
+	tt.Frame()
+	until(t, post, func() bool { return a.aggregateEdits[a.library].loaded })
+	tt.Frame()
+	if err := tt.Click("Reload Current Track"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, post, func() bool { return a.pl.Ready() && !a.pl.Loading() })
+	select {
+	case <-opened:
+	default:
+		t.Fatal("重载没有重新打开当前曲目")
+	}
+	if a.pl.Playing() || a.pl.Current().ID != "one" || len(a.pl.Queue()) != 2 || a.pl.Queue()[1].ID != "two" || a.pl.Position() < 990*time.Millisecond {
+		t.Fatalf("重载改变了播放意图、位置或队列：playing=%v position=%v queue=%+v", a.pl.Playing(), a.pl.Position(), a.pl.Queue())
+	}
 }
 
 // 标题相同不构成录音证据；用户在实际列表中明确选两首曲目后才能关联。
