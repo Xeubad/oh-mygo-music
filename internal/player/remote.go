@@ -133,7 +133,7 @@ func (p *Player) loadRemote(gen int, src music.Source, at, skipped, dir int, pla
 			p.loading = false
 			if err != nil {
 				p.remote = nil
-				p.loadFailed(src.Info().ID, err, at, skipped, dir)
+				p.loadFailed(src.Info().ID, err, skipped, dir)
 				return
 			}
 			r.started, r.running = true, true

@@ -267,8 +267,19 @@ func (p *Player) EndRadio() {
 	p.endRadio()
 	if p.at >= 0 && p.at+1 < len(p.order) {
 		kept := make([]music.Track, p.at+1)
+		var failed map[int]bool
 		for i, k := range p.order[:p.at+1] {
 			kept[i] = p.queue[k]
+			if p.playback != nil && p.playback.failed[k] {
+				if failed == nil {
+					failed = make(map[int]bool)
+				}
+				failed[i] = true
+			}
+		}
+		if p.playback != nil {
+			// 截断按播放顺序重建索引，失败记录只跟随保留下来的原队列位置。
+			p.playback.failed = failed
 		}
 		p.queue, p.order = kept, make([]int, len(kept))
 		for i := range p.order {
@@ -856,7 +867,7 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 				}
 				if err != nil {
 					p.loading = false
-					p.loadFailed(t.Source, err, at, skipped, dir)
+					p.loadFailed(t.Source, err, skipped, dir)
 				}
 			})
 			return
@@ -872,7 +883,7 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 			}
 			p.loading = false
 			if err != nil {
-				p.loadFailed(t.Source, err, at, skipped, dir)
+				p.loadFailed(t.Source, err, skipped, dir)
 				return
 			}
 			p.startLoaded(context.Background(), gen, s, info, quality, nil)
@@ -965,6 +976,7 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 		if p.playback != nil {
 			// 成功开播截断连续失败链，但同一次播放的恢复机会不能因此返还。
 			p.playback.skipped = 0
+			p.playback.failed = nil
 		}
 		if handoff != nil && info.PlaybackID != "" {
 			// 只记录已成功开播的位置，重复入队的同 ID 曲目不能继承这个版本。
@@ -1017,10 +1029,10 @@ func (p *Player) loadLyrics(gen int, src music.Source, t music.Track) {
 	}()
 }
 
-// loadFailed says why the track at order[at] can't play, and skips it the way
+// loadFailed says why the current track can't play, and skips it the way
 // dir goes, unless it stays, nothing in the queue can play, or the listener has
 // to do something first, which would stop the next track too.
-func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
+func (p *Player) loadFailed(source string, err error, skipped, dir int) {
 	if errors.Is(err, errCandidateInvalidated) {
 		// 撤销关联或退出属于用户改变来源资格，停留当前项等待新的播放意图。
 		p.err, p.playing = "", false
@@ -1052,9 +1064,20 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 		}
 	}
 	if dir != stay && skipped+1 < limit {
-		next := (at + dir + len(p.order)) % len(p.order)
-		p.loadSkipping(next, skipped+1, dir, p.playing, 0)
-		return
+		failed := p.playback.failed
+		if failed == nil {
+			failed = make(map[int]bool)
+			p.playback.failed = failed
+		}
+		failed[p.order[p.at]] = true
+		// 重排只改变顺序，不开始新的失败区间；跳过已失败位置，但保留重复入队的独立位置。
+		for step := 1; step < len(p.order); step++ {
+			next := (p.at + dir*step + len(p.order)) % len(p.order)
+			if !failed[p.order[next]] {
+				p.loadPlayback(next, skipped+1, dir, p.playing, 0, &playbackAttempt{dir: dir, skipped: skipped + 1, failed: failed})
+				return
+			}
+		}
 	}
 	p.playing = false
 	p.sync()

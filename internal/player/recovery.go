@@ -14,6 +14,8 @@ import (
 // 一次歌曲播放与一次加载不同；恢复须沿用本次机会和进入歌曲时的播放意图。
 type playbackAttempt struct {
 	dir, skipped int
+	// 按队列位置而非曲目 ID 去重，重复入队的同一首仍是独立位置。
+	failed       map[int]bool
 	recoveryUsed bool
 	completed    bool // 只有正常结束才允许随后从头播放领取新机会。
 	policy       playbackPolicy
@@ -158,7 +160,7 @@ func (p *Player) interruptedAt(err error, timing *recoveryTiming) {
 		source := p.track.Source
 		p.stop()
 		p.pending = from
-		p.loadFailed(source, &cooperativeFailure{err: err, limit: playback.policy.failureLimit}, p.at, playback.skipped, playback.dir)
+		p.loadFailed(source, &cooperativeFailure{err: err, limit: playback.policy.failureLimit}, playback.skipped, playback.dir)
 		return
 	}
 	playback.recoveryUsed = true
