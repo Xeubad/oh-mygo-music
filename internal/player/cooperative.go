@@ -20,6 +20,11 @@ type cooperativeFailure struct {
 func (f *cooperativeFailure) Error() string { return f.err.Error() }
 func (f *cooperativeFailure) Unwrap() error { return f.err }
 
+// 仅保存已经打开核验的低档地址；流立即关闭，后续档位须重新打开并核验。
+type lowerQualityResult struct{ info music.Stream }
+
+func (r *lowerQualityResult) Error() string { return "player: audio is below requested quality" }
+
 func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSource, track music.Track, quality string, commit func(context.Context, *music.Stream, stream) error) (info *music.Stream, result stream, failure error) {
 	roundID := fmt.Sprintf("playback-%d", roundSequence.Add(1))
 	started := time.Now()
@@ -49,21 +54,35 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 	defer roundCancel()
 	candidateBudget := positiveBudget(plan.CandidateTimeoutMs, 5*time.Second)
 	last := error(music.ErrUnavailable)
-	seen := map[string]bool{}
+	seen := map[[4]string]bool{}
+	// 后备只能活在当前轮次；用完整身份及实际档位索引，不改变计划的候选顺序。
+	fallbacks := map[[4]string]music.Stream{}
 	for _, candidate := range plan.Candidates {
 		if err := round.Err(); err != nil {
 			return nil, nil, err
 		}
-		key := candidate.Platform + "\x00" + candidate.AccountID + "\x00" + candidate.TrackID + "\x00" + candidate.Quality
-		if seen[key] {
+		identity := [4]string{candidate.Platform, candidate.AccountID, candidate.TrackID, candidate.Quality}
+		if seen[identity] {
 			continue
 		}
-		seen[key] = true
+		seen[identity] = true
 		if rank := qualityRank(candidate.Quality); rank > 0 && rank < qualityRank(plan.MinimumQuality) {
 			continue
 		}
 		attempt, cancel := context.WithTimeout(round, candidateBudget)
-		info, s, err := openCandidate(attempt, src, track, roundID, candidate, plan.MinimumQuality)
+		var info *music.Stream
+		var s stream
+		var err error
+		if cached, ok := fallbacks[identity]; ok {
+			delete(fallbacks, identity)
+			info, s, err = openCandidateStream(attempt, track, candidate, plan.MinimumQuality, cached)
+		} else {
+			info, s, err = openCandidate(attempt, src, track, roundID, candidate, plan.MinimumQuality)
+		}
+		var lower *lowerQualityResult
+		if errors.As(err, &lower) && attempt.Err() == nil {
+			fallbacks[[4]string{candidate.Platform, candidate.AccountID, candidate.TrackID, lower.info.Quality}] = lower.info
+		}
 		if err == nil && commit != nil {
 			// 地址和解码成功尚未完成本轮；主线程排队及启动仍用原候选截止。
 			dl, _ := s.source()
@@ -105,7 +124,14 @@ func openCandidate(ctx context.Context, src music.CooperativeSource, track music
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	info := resolved.Stream
+	return openCandidateStream(ctx, track, candidate, minimum, resolved.Stream)
+}
+
+func openCandidateStream(ctx context.Context, track music.Track, candidate music.PlaybackCandidate, minimum string, info music.Stream) (*music.Stream, stream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	var err error
 	var dl *download
 	if path, local := music.PathOf(info.URL); local {
 		dl, err = openFile(path)
@@ -124,9 +150,7 @@ func openCandidate(ctx context.Context, src music.CooperativeSource, track music
 		return nil, nil, err
 	}
 	actual, codec, bitrate := mediaQuality(s)
-	// 高级名称没有可证实的参数映射时不能当作已满足，让计划继续普通 FLAC 路径。
-	// 达到下限不等于可以提前降档；当前档还有来源时不能被较低结果抢先。
-	if qualityRank(candidate.Quality) == 0 || actual == "" || qualityRank(actual) < qualityRank(minimum) || qualityRank(actual) < qualityRank(candidate.Quality) {
+	if actual == "" || qualityRank(actual) < qualityRank(minimum) {
 		stop()
 		s.Close()
 		return nil, nil, errors.New("player: audio quality could not be verified")
@@ -137,6 +161,11 @@ func openCandidate(ctx context.Context, src music.CooperativeSource, track music
 	}
 	// 不采用解析响应中的来源和音质标签，实际来源取本轮冻结候选。
 	info.Type, info.Quality, info.BitRate, info.Platform = codec, actual, bitrate, candidate.Platform
+	// 高级名称没有参数映射时也只能留作普通后备，不能抢在普通 FLAC 路径前开播。
+	if qualityRank(candidate.Quality) == 0 || qualityRank(actual) < qualityRank(candidate.Quality) {
+		s.Close()
+		return nil, nil, &lowerQualityResult{info: info}
+	}
 	return &info, s, nil
 }
 

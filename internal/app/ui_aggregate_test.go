@@ -278,6 +278,37 @@ func TestAggregateUISelectsExactSourceFromMergedTrack(t *testing.T) {
 	}
 }
 
+// 已声明的高级目标可从现有设置保存；最低音质仍采用可核验的普通档位。
+func TestAggregateSettingsCanChooseDeclaredAdvancedTarget(t *testing.T) {
+	a, src, tt, post := aggregateApp(t)
+	if _, err := src.Aggregate("commitSnapshot", map[string]any{
+		"platform": "wy", "accountID": "a", "listID": "liked", "complete": true, "refreshedAt": 1,
+		"tracks": []any{map[string]any{"id": "one", "qualities": []string{"immersive", "flac", "128k"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	edit := a.aggregateEdits[a.library]
+	until(t, post, func() bool { return edit != nil && edit.loaded })
+	tt.Frame()
+	if err := tt.Click("Reload aggregate status"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, post, func() bool { return !edit.busy })
+	tt.Frame()
+	clickSettingRole(t, tt, ui.RolePopUpButton, "Target Quality")
+	if err := tt.Click("immersive"); err != nil {
+		t.Fatalf("已声明的高级目标不能选择：%v", err)
+	}
+	if err := tt.Click("Save Aggregate Settings"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, post, func() bool { return !edit.busy })
+	if target := aggregateTarget(t, src); target != "immersive" {
+		t.Fatalf("界面未保存选定高级目标：%q，错误：%s", target, edit.err)
+	}
+}
+
 // 候选平台顺序可由用户在现有设置行中调整并持久化。
 func TestAggregateSettingsCanReorderPlatforms(t *testing.T) {
 	a, src, tt, post := aggregateApp(t)

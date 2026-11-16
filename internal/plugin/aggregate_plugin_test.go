@@ -36,11 +36,11 @@ func TestAggregatePluginLoadsReadOnly(t *testing.T) {
 	if p.Can("playbackPlan") && p.Can("resolveCandidate") {
 		id := `aggregate:{"version":1,"identity":{"platform":"wy","accountID":"a","trackID":"one"},"sources":[{"platform":"wy","accountID":"a","trackID":"one"}]}`
 		plan, err := p.PlaybackPlan(context.Background(), id, "flac", "round-setup")
-		if err != nil || plan == nil || len(plan.Candidates) == 0 {
-			t.Fatalf("已有队列身份不能生成本机候选计划: plan=%+v, err=%v", plan, err)
+		if err != nil || plan == nil || len(plan.Candidates) != 0 {
+			t.Fatalf("没有支持声明的来源不应虚构可尝试的音质: plan=%+v, err=%v", plan, err)
 		}
-		// 计划可离线生成；未经接入的解析能力必须明确报设置缺失，不能伪造可播放地址。
-		_, err = p.ResolveCandidate(context.Background(), id, "round-setup", plan.Candidates[0])
+		// 未经接入的解析能力必须明确报设置缺失，不能伪造可播放地址。
+		_, err = p.ResolveCandidate(context.Background(), id, "round-setup", music.PlaybackCandidate{Platform: "wy", AccountID: "a", TrackID: "one", Quality: "flac"})
 		if !errors.Is(err, music.ErrSetup) {
 			t.Fatalf("未验证平台没有明确阻止解析: %v", err)
 		}
@@ -216,7 +216,7 @@ func TestAggregatePluginOldQueueStopsUsingLoggedOutAccount(t *testing.T) {
 	left := music.AggregateSource{Platform: "wy", AccountID: "a", TrackID: "wy-one"}
 	right := music.AggregateSource{Platform: "tx", AccountID: "b", TrackID: "tx-one"}
 	for _, source := range []music.AggregateSource{left, right} {
-		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Recording"}}}); err != nil {
+		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Recording", "qualities": []string{"flac"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -352,7 +352,7 @@ func TestAggregatePluginManualLinkRevocationPersistsUntilReconfirmed(t *testing.
 func TestAggregatePluginPlaybackPlanUsesConfiguredBudgetsAndHonorsQualityFloor(t *testing.T) {
 	p := loadAggregate(t)
 	for _, source := range []music.AggregateSource{{Platform: "wy", AccountID: "a", TrackID: "song-flac"}, {Platform: "tx", AccountID: "b", TrackID: "song-320k"}} {
-		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Song"}}}); err != nil {
+		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Song", "qualities": []string{"flac"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -518,7 +518,7 @@ func TestAggregatePluginJoinsManualLinksThroughLaterSource(t *testing.T) {
 		{Platform: "wy", AccountID: "c", TrackID: "bridge"},
 	}
 	for _, source := range sources {
-		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Recording"}}}); err != nil {
+		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Recording", "qualities": []string{"flac"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -566,7 +566,7 @@ func TestAggregatePluginReorderingChangesCandidateOrderWithoutChangingAnchor(t *
 	left := music.AggregateSource{Platform: "wy", AccountID: "a", TrackID: "raw-01"}
 	right := music.AggregateSource{Platform: "tx", AccountID: "b", TrackID: "01"}
 	for _, source := range []music.AggregateSource{left, right} {
-		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID}}}); err != nil {
+		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "qualities": []string{"flac"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -608,7 +608,7 @@ func TestAggregatePluginHomeSplitsManualGroupsByFrozenAnchor(t *testing.T) {
 	left := music.AggregateSource{Platform: "wy", AccountID: "a", TrackID: "raw-01"}
 	right := music.AggregateSource{Platform: "tx", AccountID: "b", TrackID: "01"}
 	for _, source := range []music.AggregateSource{left, right} {
-		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Song"}}}); err != nil {
+		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": source.TrackID, "name": "Song", "qualities": []string{"flac"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -650,7 +650,7 @@ func TestAggregatePluginPlaybackPlanFreezesAndOnlyRevokesCandidates(t *testing.T
 	left := music.AggregateSource{Platform: "wy", AccountID: "a", TrackID: "raw-01"}
 	right := music.AggregateSource{Platform: "tx", AccountID: "b", TrackID: "01"}
 	for _, s := range []music.AggregateSource{left, right} {
-		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": s.Platform, "accountID": s.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": s.TrackID, "name": "Song"}}}); err != nil {
+		if _, err := p.Aggregate("commitSnapshot", map[string]any{"platform": s.Platform, "accountID": s.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1, "tracks": []any{map[string]any{"id": s.TrackID, "name": "Song", "qualities": []string{"flac"}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}

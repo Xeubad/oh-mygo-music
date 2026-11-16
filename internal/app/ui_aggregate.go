@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/egoist/mygo/ui"
 	"mygo-music/internal/music"
@@ -23,8 +24,14 @@ type aggregateList struct {
 	Selected    bool   `json:"selected"`
 }
 
+type aggregateQualityTarget struct {
+	Quality   string   `json:"quality"`
+	Platforms []string `json:"platforms"`
+}
+
 type aggregateReply struct {
-	Settings struct {
+	QualityTargets []aggregateQualityTarget `json:"qualityTargets"`
+	Settings       struct {
 		TargetQuality           string   `json:"targetQuality"`
 		MinimumQuality          string   `json:"minimumQuality"`
 		CandidateTimeoutMs      int      `json:"candidateTimeoutMs"`
@@ -60,6 +67,7 @@ type aggregateEdit struct {
 	order           []string
 	key             string // 仅编辑期间持有；永远不从凭据库回填到界面。
 	credentialState string
+	qualityTargets  []aggregateQualityTarget
 }
 
 var aggregateTimingFields = []struct{ key, label string }{
@@ -75,6 +83,7 @@ func (e *aggregateEdit) apply(reply aggregateReply) {
 	s := reply.Settings
 	e.target, e.minimum = s.TargetQuality, s.MinimumQuality
 	e.order = append([]string(nil), s.PlatformOrder...)
+	e.qualityTargets = append([]aggregateQualityTarget(nil), reply.QualityTargets...)
 	e.values = map[string]string{
 		"candidateTimeoutMs":      strconv.Itoa(s.CandidateTimeoutMs),
 		"roundTimeoutMs":          strconv.Itoa(s.RoundTimeoutMs),
@@ -158,9 +167,16 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 			return
 		}
 		qualities := []string{"flac", "320k", "256k", "128k", "64k", "32k"}
+		targets := append([]string(nil), qualities...)
+		for _, target := range e.qualityTargets {
+			targets = append(targets, target.Quality)
+		}
 		aggregateField(c, "Target Quality", func() {
-			ui.Select(c.Key("target"), &e.target, qualities).Label(T("Target Quality")).Width(180).Disabled(e.busy)
+			ui.Select(c.Key("target"), &e.target, targets).Label(T("Target Quality")).Width(180).Disabled(e.busy)
 		})
+		for _, target := range e.qualityTargets {
+			ui.Text(c, fmt.Sprintf(T("%s — declared by %s; actual audio is verified before playback."), target.Quality, strings.Join(target.Platforms, ", "))).FontSize(11.5).TextColor(p.muted)
+		}
 		aggregateField(c, "Minimum Quality", func() {
 			ui.Select(c.Key("minimum"), &e.minimum, qualities).Label(T("Minimum Quality")).Width(180).Disabled(e.busy)
 		})

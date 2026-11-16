@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -163,6 +164,125 @@ export function resolveCandidate({candidate}) { return {stream:{url:candidate.id
 		t.Fatalf("unverified advanced quality bypassed ordinary FLAC: ready=%v stream=%+v error=%q", p.Ready(), p.Stream(), p.Err())
 	}
 	p.TogglePlay()
+}
+
+// 较低但合格的结果只在同来源对应档位轮到时复用，不能重复解析或抢先开播。
+func TestCooperativeReusesVerifiedLowerQualityOnlyAtItsTurn(t *testing.T) {
+	calls := make(chan string, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- r.URL.Path
+		w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"wy-flac",platform:"wy",accountID:"a",trackID:"one",quality:"flac"},
+{id:"tx-flac",platform:"tx",accountID:"b",trackID:"two",quality:"flac"},
+{id:"wy-128k",platform:"wy",accountID:"a",trackID:"one",quality:"128k"}]}; }
+export async function resolveCandidate({candidate,signal}) {
+ await fetch(%q + "/" + candidate.id, {signal});
+ if(candidate.id !== "wy-flac") throw new Error("resolver called:"+candidate.id);
+ return {stream:{url:%s,type:"flac",quality:"flac"}};
+}
+`, server.URL, audioPath(t, "seek.mp3")))
+	p, posts := cooperativePlayer(src)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream().Quality != "128k" || p.Stream().Platform != "wy" {
+		t.Fatalf("同档耗尽后没有复用已核验结果: ready=%v stream=%+v error=%q", p.Ready(), p.Stream(), p.Err())
+	}
+	defer p.TogglePlay()
+	var got []string
+	for len(calls) > 0 {
+		got = append(got, <-calls)
+	}
+	if len(got) != 2 || got[0] != "/wy-flac" || got[1] != "/tx-flac" {
+		t.Fatalf("后备越过未完成的 FLAC 来源，或重复解析了同轮结果: %v", got)
+	}
+}
+
+// 后备地址必须重新打开；失效后继续下一来源，不能播放此前已丢弃的媒体。
+func TestCooperativeExpiredFallbackContinuesNextSource(t *testing.T) {
+	var opened atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if opened.Add(1) != 1 {
+			http.Error(w, "expired", http.StatusForbidden)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join("testdata", "seek.mp3"))
+	}))
+	defer server.Close()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+export function playbackPlan(){return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"wy-flac",platform:"wy",accountID:"a",trackID:"one",quality:"flac"},
+{id:"wy-128k",platform:"wy",accountID:"a",trackID:"one",quality:"128k"},
+{id:"tx-128k",platform:"tx",accountID:"b",trackID:"two",quality:"128k"}]};}
+export function resolveCandidate({candidate}) {
+ if(candidate.id==="wy-128k") throw new Error("fallback resolved twice");
+ return {stream:{url:candidate.id==="wy-flac"?%q:%s}};
+}
+`, server.URL, audioPath(t, "seek.mp3")))
+	p, posts := cooperativePlayer(src)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream().Platform != "tx" || p.Stream().Quality != "128k" || opened.Load() != 2 {
+		t.Fatalf("失效后备没有重新检查或阻止下一来源: ready=%v stream=%+v opens=%d error=%q", p.Ready(), p.Stream(), opened.Load(), p.Err())
+	}
+	p.TogglePlay()
+}
+
+// 新播放轮次不得沿用上一轮的解析地址，即使歌曲与候选身份完全相同。
+func TestCooperativeFallbackDoesNotSurviveIntoAnotherRound(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let rounds=0;
+export function playbackPlan(){rounds++;return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"flac",platform:"wy",accountID:"a",trackID:"one",quality:"flac"},
+{id:"128k",platform:"wy",accountID:"a",trackID:"one",quality:"128k"}]};}
+export function resolveCandidate({candidate}) {
+ if(rounds>1) throw new Error("new round needs fresh resolution");
+ if(candidate.id==="128k") throw new Error("fallback resolved twice");
+ return {stream:{url:%s}};
+}
+`, audioPath(t, "seek.mp3")))
+	p, posts := cooperativePlayer(src)
+	tracks := []music.Track{{ID: "one", Source: "cooperative"}}
+	p.PlayTrack(tracks, 0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream().Quality != "128k" {
+		t.Fatalf("首轮未建立合格后备: stream=%+v error=%q", p.Stream(), p.Err())
+	}
+	p.PlayTrack(tracks, 0)
+	finishLoading(t, p, posts)
+	if p.Ready() || p.Playing() || p.Err() != "new round needs fresh resolution" {
+		t.Fatalf("新轮复用了旧地址: ready=%v playing=%v error=%q", p.Ready(), p.Playing(), p.Err())
+	}
+}
+
+// 即使已有合格后备，整轮耗尽后也不能重新打开它；保留当前项并结束首次播放。
+func TestCooperativeRoundTimeoutDoesNotOpenCachedFallback(t *testing.T) {
+	var opened atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opened.Add(1)
+		http.ServeFile(w, r, filepath.Join("testdata", "seek.mp3"))
+	}))
+	defer server.Close()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+export function playbackPlan(){return {targetQuality:"flac",minimumQuality:"128k",candidateTimeoutMs:1000,roundTimeoutMs:500,candidates:[
+{id:"wy-flac",platform:"wy",accountID:"a",trackID:"one",quality:"flac"},
+{id:"tx-flac",platform:"tx",accountID:"b",trackID:"two",quality:"flac"},
+{id:"wy-128k",platform:"wy",accountID:"a",trackID:"one",quality:"128k"}]};}
+export function resolveCandidate({candidate,signal}) {
+ if(candidate.id==="wy-flac") return {stream:{url:%q}};
+ if(candidate.id==="tx-flac") return new Promise((resolve,reject)=>signal.addEventListener("abort",()=>reject(new Error("aborted")),{once:true}));
+ throw new Error("expired fallback was resolved");
+}
+`, server.URL))
+	p, posts := cooperativePlayer(src)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	if p.Ready() || p.Playing() || p.Stream() != nil || p.Err() == "" || p.Current().ID != "one" || opened.Load() != 1 {
+		t.Fatalf("超时后复用了后备或改变当前项：ready=%v playing=%v stream=%+v opens=%d current=%+v error=%q", p.Ready(), p.Playing(), p.Stream(), opened.Load(), p.Current(), p.Err())
+	}
 }
 
 // 聚合候选必须由当前播放轮次掌控，不能被旧预取接口提前访问。
