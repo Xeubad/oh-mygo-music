@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -92,7 +93,18 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 					track := &section.Tracks[trackIndex]
 					ui.Column(c.Key([2]int{sectionIndex, trackIndex})).Gap(2).Children(func() {
 						// 播放器收到原 section 的完整切片，筛选只隐藏行，不改队列候选及顺序。
-						a.trackRow(c, section.Tracks, trackIndex, false, "")
+						a.trackRowPlay(c, section.Tracks, trackIndex, false, "", func() {
+							if view.busy {
+								return
+							}
+							queue, err := aggregateQueueTracks(section.Tracks, view.sourceChoices)
+							if err != nil {
+								view.err = err.Error()
+								return
+							}
+							view.err = ""
+							a.pl.PlayTrack(queue, trackIndex)
+						})
 						ui.Row(c.Key("aggregate-source-" + track.ID)).Gap(8).AlignItems(ui.Center).Children(func() {
 							ui.Text(c, aggregateTrackSources(track)).FontSize(11).TextColor(p.muted).SingleLine().Grow(1)
 							if track.AggregateManual {
@@ -218,7 +230,14 @@ func aggregateViewSource(c *ui.Context, view *aggregateView, track *music.Track)
 	selected := view.sourceChoices[identity]
 	if selected == "" || !containsAggregateSource(sources, selected) {
 		selected = aggregateSourceKey(sources[0])
-		view.sourceChoices[identity] = selected
+		// 默认显示与入队锚点一致，否则点选当前显示项会被误判为未作选择。
+		var frozen struct {
+			Version  int                   `json:"version"`
+			Identity music.AggregateSource `json:"identity"`
+		}
+		if strings.HasPrefix(track.ID, "aggregate:") && json.Unmarshal([]byte(strings.TrimPrefix(track.ID, "aggregate:")), &frozen) == nil && frozen.Version == 1 && containsAggregateSource(sources, aggregateSourceKey(frozen.Identity)) {
+			selected = aggregateSourceKey(frozen.Identity)
+		}
 	}
 	labels := make([]string, 0, len(sources))
 	byLabel := make(map[string]music.AggregateSource, len(sources))
@@ -230,10 +249,42 @@ func aggregateViewSource(c *ui.Context, view *aggregateView, track *music.Track)
 	current := aggregateIdentityLabel(byKeyAggregateSource(sources, selected))
 	ui.Select(c.Key("aggregate-source-choice-"+identity), &current, labels).Label(T("Recording Source")).Width(260)
 	if source, ok := byLabel[current]; ok {
-		view.sourceChoices[identity] = aggregateSourceKey(source)
+		// 默认展示不算显式选择，不能用来源排列覆盖插件保存的稳定锚点。
+		if current != aggregateIdentityLabel(byKeyAggregateSource(sources, selected)) {
+			view.sourceChoices[identity] = aggregateSourceKey(source)
+		}
 		return source
 	}
 	return sources[0]
+}
+
+// 只改新队列副本的锚点；选择器不能把当前页面之外的来源注入冻结候选。
+func aggregateQueueTracks(tracks []music.Track, choices map[string]string) ([]music.Track, error) {
+	queue := append([]music.Track(nil), tracks...)
+	for i := range queue {
+		track := &queue[i]
+		choice := choices[aggregateTrackIdentity(track)]
+		if choice == "" {
+			continue
+		}
+		var frozen struct {
+			Version  int                     `json:"version"`
+			Identity music.AggregateSource   `json:"identity"`
+			Sources  []music.AggregateSource `json:"sources"`
+		}
+		if !strings.HasPrefix(track.ID, "aggregate:") || json.Unmarshal([]byte(strings.TrimPrefix(track.ID, "aggregate:")), &frozen) != nil || frozen.Version != 1 || !containsAggregateSource(frozen.Sources, choice) || !containsAggregateSource(track.AggregateSources, choice) {
+			return nil, errors.New(T("The selected recording source is no longer available. Select the track again."))
+		}
+		frozen.Identity = byKeyAggregateSource(frozen.Sources, choice)
+		encoded, err := json.Marshal(frozen)
+		if err != nil {
+			return nil, err
+		}
+		track.ID = "aggregate:" + string(encoded)
+		// 选择版本只是入队意图，不能冒充该位置已经成功播放。
+		track.PlaybackID = ""
+	}
+	return queue, nil
 }
 
 func uniqueAggregateSources(sources []music.AggregateSource) []music.AggregateSource {

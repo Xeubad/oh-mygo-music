@@ -477,6 +477,11 @@ func sameTrack(x, y *music.Track) bool {
 // trackRow is a row of the list tracks, its track i, which plays the list from
 // there as it's clicked.
 func (a *app) trackRow(c *ui.Context, tracks []music.Track, i int, covers bool, pid string) {
+	a.trackRowPlay(c, tracks, i, covers, pid, func() { a.pl.PlayTrack(tracks, i) })
+}
+
+// 聚合列表可单独准备入队身份，行展示与菜单仍使用原始来源记录。
+func (a *app) trackRowPlay(c *ui.Context, tracks []music.Track, i int, covers bool, pid string, play func()) {
 	p := a.pal
 	tr := &tracks[i]
 	w, _ := c.Size()
@@ -539,7 +544,7 @@ func (a *app) trackRow(c *ui.Context, tracks []music.Track, i int, covers bool, 
 		ui.Text(c, clock(tr.Length())).FontSize(12.5).FontFeatures("tnum").TextColor(p.faint).Width(44).TextAlign(ui.End)
 	})
 	if row.Clicked() && !tr.Unavailable {
-		a.pl.PlayTrack(tracks, i)
+		play()
 	}
 }
 

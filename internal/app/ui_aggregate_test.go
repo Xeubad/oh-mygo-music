@@ -9,6 +9,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"mygo-music/internal/music"
+	"mygo-music/internal/player"
 	"mygo-music/internal/plugin"
 )
 
@@ -34,6 +35,18 @@ func aggregateApp(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) 
 		t.Fatalf("聚合插件能力未被探测：exports aggregate=%v", src.Can("aggregate"))
 	}
 	post := posts(a)
+	a.pl = player.New(func(fn func()) { post <- fn })
+	a.pl.Source = a.sourceByID
+	// Close 允许后续请求重新启动插件，必须先收齐本用例启动的异步任务。
+	t.Cleanup(func() {
+		until(t, post, func() bool {
+			edit, view := a.aggregateEdits[a.library], a.aggregateViews[a.library]
+			return (edit == nil || !edit.busy) && (view == nil || !view.busy && !view.loadingLists) && !a.pl.Loading()
+		})
+		if a.pl.Playing() {
+			a.pl.TogglePlay()
+		}
+	})
 	tt := ui.NewTester(func(c *ui.Context) { a.pluginSettings(c, a.library, paletteFor(c.Theme())) }, 760, 1200)
 	return a, src, tt, post
 }
@@ -275,6 +288,149 @@ func TestAggregateUISelectsExactSourceFromMergedTrack(t *testing.T) {
 	}
 	if !exactLink {
 		t.Fatalf("关联使用了未选中的另一来源：%+v", linked.Sections[0].Tracks[0].AggregateLinks)
+	}
+}
+
+// 具体来源选择只决定新队列的版本锚点，不限制同版候选、不改同档平台顺序或原始列表。
+func TestAggregateSelectedSourceAnchorsFullQueue(t *testing.T) {
+	a, src, tt, _ := aggregateFixture(t)
+	left := music.AggregateSource{Platform: "tx", AccountID: "b", TrackID: "tx-one"}
+	right := music.AggregateSource{Platform: "wy", AccountID: "a", TrackID: "wy-one"}
+	other := music.AggregateSource{Platform: "kg", AccountID: "c", TrackID: "kg-two"}
+	for _, source := range []music.AggregateSource{left, right, other} {
+		name := "Joined recording"
+		if source.Platform == "kg" {
+			name = "Another recording"
+		}
+		if _, err := src.Aggregate("commitSnapshot", map[string]any{
+			"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1,
+			"tracks": []any{map[string]any{"id": source.TrackID, "name": name, "qualities": []string{"flac"}}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pair := map[string]any{"left": left, "right": right}
+	if _, err := src.Aggregate("confirmLink", pair); err != nil {
+		t.Fatal(err)
+	}
+	page, err := src.Home()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.library.home = page
+	tt.Frame()
+	a.aggregateViews[a.library].platform = "wy"
+	tt.Frame()
+	clickSettingRole(t, tt, ui.RolePopUpButton, "Recording Source")
+	if err := tt.Click(`wy · "a" · "wy-one"`); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Joined recording"); err != nil {
+		t.Fatal(err)
+	}
+	queue := a.pl.Queue()
+	if len(queue) != len(page.Sections[0].Tracks) {
+		t.Fatalf("来源选择或筛选截断队列：%+v", queue)
+	}
+	var queued music.Track
+	for i, track := range queue {
+		if track.Name != page.Sections[0].Tracks[i].Name {
+			t.Fatalf("来源选择重排队列：%+v", queue)
+		}
+		if track.Name == "Joined recording" {
+			queued = track
+			if track.ID == page.Sections[0].Tracks[i].ID {
+				t.Fatal("显式选择没有改变新队列的版本锚点")
+			}
+		}
+	}
+	var identity struct {
+		Version  int
+		Identity music.AggregateSource
+		Sources  []music.AggregateSource
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(queued.ID, "aggregate:")), &identity); err != nil {
+		t.Fatal(err)
+	}
+	if identity.Version != 1 || !sameAggregateSource(identity.Identity, right) || len(identity.Sources) != 2 || queued.PlaybackID != "" {
+		t.Fatalf("选择来源丢失冻结集合或冒充已播：%+v %+v", identity, queued)
+	}
+	raw, err := src.Aggregate("playbackPlan", map[string]any{"id": queued.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan music.PlaybackPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Candidates) != 2 || plan.Candidates[0].Platform != "tx" || plan.Candidates[1].Platform != "wy" {
+		t.Fatalf("版本锚点错误限制候选或改变平台顺序：%s", raw)
+	}
+	if _, err := src.Aggregate("revokeLink", pair); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = src.Aggregate("playbackPlan", map[string]any{"id": queued.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Candidates) != 1 || plan.Candidates[0].Platform != "wy" {
+		t.Fatalf("拆分后的未播项没有跟随所选来源：%s", raw)
+	}
+}
+
+// 未操作来源选择器时，展示排序和筛选不能代替用户选择或改写插件的稳定锚点。
+func TestAggregateUnselectedSourceKeepsStableQueueAnchor(t *testing.T) {
+	a, src, tt, _ := aggregateFixture(t)
+	left := music.AggregateSource{Platform: "tx", AccountID: "b", TrackID: "tx-one"}
+	right := music.AggregateSource{Platform: "wy", AccountID: "a", TrackID: "wy-one"}
+	for _, source := range []music.AggregateSource{left, right} {
+		if _, err := src.Aggregate("commitSnapshot", map[string]any{
+			"platform": source.Platform, "accountID": source.AccountID, "listID": "liked", "complete": true, "refreshedAt": 1,
+			"tracks": []any{map[string]any{"id": source.TrackID, "name": "Stable recording"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := src.Aggregate("confirmLink", map[string]any{"left": left, "right": right}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Aggregate("configure", map[string]any{"platformOrder": []string{"wy", "tx", "kg", "kw", "mg", "qs"}}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := src.Home()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.library.home = page
+	tt.Frame()
+	a.aggregateViews[a.library].platform = "wy"
+	tt.Frame()
+	if err := tt.Click("Stable recording"); err != nil {
+		t.Fatal(err)
+	}
+	queue := a.pl.Queue()
+	if len(queue) != 1 || queue[0].ID != page.Sections[0].Tracks[0].ID || queue[0].PlaybackID != "" {
+		t.Fatalf("未选择来源却改写版本锚点：%+v", queue)
+	}
+	// 平台首位不一定是默认版本，不能因选择器已显示该平台而吞掉用户选择。
+	clickSettingRole(t, tt, ui.RolePopUpButton, "Recording Source")
+	if err := tt.Click(`wy · "a" · "wy-one"`); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Stable recording"); err != nil {
+		t.Fatal(err)
+	}
+	var frozen struct{ Identity music.AggregateSource }
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(a.pl.Queue()[0].ID, "aggregate:")), &frozen); err != nil {
+		t.Fatal(err)
+	}
+	if !sameAggregateSource(frozen.Identity, right) {
+		t.Fatalf("显式选择被默认显示值吞掉：%+v", frozen.Identity)
 	}
 }
 

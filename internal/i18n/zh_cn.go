@@ -42,6 +42,7 @@ var zhCN = map[string]string{
 	"Selected as first track":        "已选为第一首",
 	"Manually linked":                "人工确认关联",
 	"Recording Source":               "录音来源",
+	"The selected recording source is no longer available. Select the track again.": "所选录音来源已不可用，请重新选择曲目。",
 	"%s — declared by %s; actual audio is verified before playback.": "%s：%s 声明支持；播放前仍需核验实际音频。",
 	"Loading cached lists…":   "正在读取本机列表…",
 	"Include Cached List":     "纳入聚合",
