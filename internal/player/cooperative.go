@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 )
 
 var roundSequence atomic.Uint64
+
+// 用户撤销关联导致的失效不属于歌曲失败，不能消耗连续失败额度或推进队列。
+var errCandidateInvalidated = errors.New("player: candidate invalidated")
 
 type cooperativeFailure struct {
 	err   error
@@ -25,7 +29,7 @@ type lowerQualityResult struct{ info music.Stream }
 
 func (r *lowerQualityResult) Error() string { return "player: audio is below requested quality" }
 
-func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSource, track music.Track, quality string, commit func(context.Context, *music.Stream, stream) error) (info *music.Stream, result stream, failure error) {
+func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSource, track music.Track, quality string, commit func(context.Context, *music.Stream, stream, func(func() error) error) error) (info *music.Stream, result stream, failure error) {
 	roundID := fmt.Sprintf("playback-%d", roundSequence.Add(1))
 	started := time.Now()
 	// 读取设置本身也受默认整轮约束，不能在候选开始前无限等待。
@@ -70,29 +74,43 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 			continue
 		}
 		attempt, cancel := context.WithTimeout(round, candidateBudget)
+		guard := guardCandidate(attempt, src, track.ID, roundID, candidate)
+		guarded := guard.ctx
 		var info *music.Stream
 		var s stream
 		var err error
+		if err = guarded.Err(); err != nil {
+			err = context.Cause(guarded)
+			guard.stop()
+			cancel()
+			last = err
+			continue
+		}
 		if cached, ok := fallbacks[identity]; ok {
 			delete(fallbacks, identity)
-			info, s, err = openCandidateStream(attempt, track, candidate, plan.MinimumQuality, cached)
+			info, s, err = openCandidateStream(guarded, track, candidate, plan.MinimumQuality, cached)
 		} else {
-			info, s, err = openCandidate(attempt, src, track, roundID, candidate, plan.MinimumQuality)
+			info, s, err = openCandidate(guarded, src, track, roundID, candidate, plan.MinimumQuality)
 		}
 		var lower *lowerQualityResult
-		if errors.As(err, &lower) && attempt.Err() == nil {
+		if errors.As(err, &lower) && guarded.Err() == nil {
 			fallbacks[[4]string{candidate.Platform, candidate.AccountID, candidate.TrackID, lower.info.Quality}] = lower.info
 		}
 		if err == nil && commit != nil {
-			// 地址和解码成功尚未完成本轮；主线程排队及启动仍用原候选截止。
+			// 准备仍受原截止；主线程成功交接时同步解除下载取消，而非等后台回执。
 			dl, _ := s.source()
-			stop := context.AfterFunc(attempt, dl.Close)
-			err = commit(attempt, info, s)
-			stop()
-			if err != nil {
+			guard.protect(dl.Close)
+			err = commit(guarded, info, s, guard.commit)
+			if guard.committed() {
+				err = nil
+			} else if err != nil {
 				s.Close()
 			}
 		}
+		if err != nil && guarded.Err() != nil {
+			err = context.Cause(guarded)
+		}
+		guard.stop()
 		cancel()
 		if err != nil {
 			last = err
@@ -104,6 +122,128 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 		return info, s, nil
 	}
 	return nil, nil, last
+}
+
+// 取消与成功交接以同一把锁确定先后；已交接的流不再属于候选守卫。
+type candidateGuard struct {
+	ctx         context.Context
+	cancel      context.CancelCauseFunc
+	stopWatch   context.CancelFunc
+	done        chan struct{}
+	mu          sync.Mutex
+	accepted    bool
+	stopClose   func() bool
+	src         music.CooperativeSource
+	id, roundID string
+	candidate   music.PlaybackCandidate
+}
+
+func guardCandidate(parent context.Context, src music.CooperativeSource, id, roundID string, candidate music.PlaybackCandidate) *candidateGuard {
+	ctx, cancel := context.WithCancelCause(parent)
+	watch, stopWatch := context.WithCancel(ctx)
+	g := &candidateGuard{ctx: ctx, cancel: cancel, stopWatch: stopWatch, done: make(chan struct{}), src: src, id: id, roundID: roundID, candidate: candidate}
+	validity, ok := src.(music.CandidateValiditySource)
+	if !ok {
+		close(g.done)
+		return g
+	}
+	changes := validity.CandidateChanges()
+	if valid, err := validity.CandidateValid(ctx, id, roundID, candidate); err != nil || !valid {
+		if err == nil {
+			err = errCandidateInvalidated
+		}
+		g.invalidate(err)
+		close(g.done)
+		return g
+	}
+	go func() {
+		defer close(g.done)
+		for {
+			select {
+			case <-watch.Done():
+				return
+			case <-changes:
+				// 先重订阅再查询，查询期间的新撤销也不会被漏掉。
+				changes = validity.CandidateChanges()
+				if valid, err := validity.CandidateValid(watch, id, roundID, candidate); err != nil || !valid {
+					if err == nil {
+						err = errCandidateInvalidated
+					}
+					g.invalidate(err)
+					return
+				}
+			}
+		}
+	}()
+	return g
+}
+
+func (g *candidateGuard) invalidate(err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.accepted {
+		g.cancel(err)
+	}
+}
+
+func (g *candidateGuard) protect(closePending func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stopClose = context.AfterFunc(g.ctx, func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !g.accepted {
+			closePending()
+		}
+	})
+}
+
+func (g *candidateGuard) commit(start func() error) error {
+	finish := func() error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if err := g.ctx.Err(); err != nil {
+			return context.Cause(g.ctx)
+		}
+		if err := start(); err != nil {
+			return err
+		}
+		g.accepted = true
+		if g.stopClose != nil {
+			g.stopClose()
+		}
+		g.stopWatch()
+		return nil
+	}
+	if gate, ok := g.src.(music.CandidateCommitSource); ok {
+		valid, err := gate.CommitCandidate(g.ctx, g.id, g.roundID, g.candidate, finish)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			g.invalidate(errCandidateInvalidated)
+			return errCandidateInvalidated
+		}
+		return nil
+	}
+	return finish()
+}
+
+func (g *candidateGuard) committed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.accepted
+}
+
+func (g *candidateGuard) stop() {
+	g.stopWatch()
+	<-g.done
+	g.mu.Lock()
+	if g.stopClose != nil {
+		g.stopClose()
+	}
+	g.cancel(context.Canceled)
+	g.mu.Unlock()
 }
 
 func positiveBudget(ms int64, fallback time.Duration) time.Duration {

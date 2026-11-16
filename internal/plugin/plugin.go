@@ -166,12 +166,14 @@ type Plugin struct {
 	// level runs as it starts, and the host functions it calls take mu.
 	starting sync.Mutex
 
-	mu       sync.Mutex // guards what follows
-	settings map[string]string
-	storage  map[string]json.RawMessage
-	granted  bool // the listener let it start programs
-	vm       *vm
-	prompt   func(music.SignInPrompt)
+	mu               sync.Mutex // guards what follows
+	settings         map[string]string
+	storage          map[string]json.RawMessage
+	candidateChanges chan struct{}
+	candidateGate    chan struct{} // 独立于存储锁，最终开播等待门禁时仍可由原截止取消。
+	granted          bool          // the listener let it start programs
+	vm               *vm
+	prompt           func(music.SignInPrompt)
 }
 
 // OnSignInPrompt says what to do with what the plugin wants shown as it signs in.

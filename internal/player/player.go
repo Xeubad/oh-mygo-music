@@ -720,14 +720,14 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 			if pre != nil {
 				pre.close()
 			}
-			_, _, err = p.openCooperative(ctx, cooperative, t, quality, func(attempt context.Context, info *music.Stream, s stream) error {
+			_, _, err = p.openCooperative(ctx, cooperative, t, quality, func(attempt context.Context, info *music.Stream, s stream, handoff func(func() error) error) error {
 				committed := make(chan error, 1)
 				p.post(func() {
 					if attempt.Err() != nil || gen != p.gen {
 						committed <- context.Canceled
 						return
 					}
-					err := p.startLoaded(attempt, gen, s, info, quality)
+					err := p.startLoaded(attempt, gen, s, info, quality, handoff)
 					if err == nil {
 						p.loading = false
 					}
@@ -765,14 +765,14 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 				p.loadFailed(t.Source, err, at, skipped, dir)
 				return
 			}
-			p.startLoaded(context.Background(), gen, s, info, quality)
+			p.startLoaded(context.Background(), gen, s, info, quality, nil)
 
 		})
 	}()
 }
 
 // startLoaded 只在主线程安装已核验的流；协作调用在原截止内等待此处执行。
-func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music.Stream, quality string) (err error) {
+func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music.Stream, quality string, handoff func(func() error) error) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -817,11 +817,27 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p.playing {
-		out.Play()
+	start := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if p.playing {
+			out.Play()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if handoff != nil {
+		err = handoff(start)
+	} else {
+		err = start()
+	}
+	if err != nil {
+		return err
+	}
+	if p.playing {
 		p.fade.fade(1, fadeIn, nil)
 		p.record()
 	}
@@ -872,6 +888,12 @@ func (p *Player) loadLyrics(gen int, src music.Source, t music.Track) {
 // dir goes, unless it stays, nothing in the queue can play, or the listener has
 // to do something first, which would stop the next track too.
 func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
+	if errors.Is(err, errCandidateInvalidated) {
+		// 撤销关联或退出属于用户改变来源资格，停留当前项等待新的播放意图。
+		p.err, p.playing = "", false
+		p.sync()
+		return
+	}
 	p.err = errorText(err)
 	if errors.Is(err, music.ErrSignIn) || errors.Is(err, music.ErrSetup) || errors.Is(err, music.ErrPlaybackBlocked) {
 		p.playing = false

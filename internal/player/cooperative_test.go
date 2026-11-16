@@ -132,6 +132,219 @@ export async function resolveCandidate({signal}) {
 	}
 }
 
+// 撤销使正在解析的来源失效时，必须取消真实请求，在原轮次继续有效来源且不改队列。
+func TestCooperativeRevokingLinkCancelsInFlightCandidate(t *testing.T) {
+	entered, canceled := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer server.Close()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let revoked = false;
+export function aggregate({action}) { if(action === "revokeLink") revoked = true; return {ok:true}; }
+export function candidateValid({candidate}) { return candidate.platform !== "wy" || !revoked; }
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"first",platform:"wy",accountID:"a",trackID:"one",quality:"flac"},
+{id:"anchor",platform:"tx",accountID:"b",trackID:"two",quality:"flac"}]}; }
+export async function resolveCandidate({candidate,signal}) {
+ if(candidate.id === "first") return (await fetch(%q,{signal})).json();
+ return {stream:{url:%s}};
+}
+`, server.URL, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.PlayTrack([]music.Track{{ID: "queued", Source: "cooperative"}, {ID: "next", Source: "cooperative"}}, 0)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		p.TogglePlay()
+		t.Fatal("关联候选的解析没有开始")
+	}
+	if _, err := src.Aggregate("revokeLink", nil); err != nil {
+		p.TogglePlay()
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		p.TogglePlay()
+		server.CloseClientConnections()
+		t.Fatal("撤销关联后仍在等待失效来源的解析请求")
+	}
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream() == nil || p.Stream().Platform != "tx" || p.Err() != "" || p.Current().ID != "queued" || len(p.Queue()) != 2 {
+		t.Fatalf("撤销没有在原队列继续有效来源：ready=%v stream=%+v error=%q current=%+v queue=%+v", p.Ready(), p.Stream(), p.Err(), p.Current(), p.Queue())
+	}
+	p.TogglePlay()
+}
+
+// 撤销后整组候选失效是用户改变关联，不算歌曲失败，也不能自动扫描下一项。
+func TestCooperativeRevocationExhaustionStaysOnCurrentTrack(t *testing.T) {
+	entered, canceled := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer server.Close()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let revoked = false;
+export function aggregate() { revoked = true; return {ok:true}; }
+export function candidateValid() { return !revoked; }
+export function playbackPlan({id}) { return {targetQuality:"flac",minimumQuality:"128k",candidates:[{id,platform:"wy",trackID:id,quality:"flac"}]}; }
+export async function resolveCandidate({signal}) { return (await fetch(%q,{signal})).json(); }
+`, server.URL))
+	p, posts := cooperativePlayer(src)
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		p.TogglePlay()
+		t.Fatal("解析没有开始")
+	}
+	if _, err := src.Aggregate("revokeLink", nil); err != nil {
+		p.TogglePlay()
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		p.TogglePlay()
+		server.CloseClientConnections()
+		t.Fatal("撤销没有中止失效请求")
+	}
+	finishLoading(t, p, posts)
+	if p.Ready() || p.Playing() || p.Err() != "" || p.Current().ID != "one" || len(p.Queue()) != 2 {
+		t.Fatalf("撤销被计为最终失败或改变队列：ready=%v playing=%v error=%q current=%+v queue=%+v", p.Ready(), p.Playing(), p.Err(), p.Current(), p.Queue())
+	}
+}
+
+// 撤销已经返回但观察器仍等待查询时，已进入主线程准备的旧结果也不能开播。
+func TestCooperativeRevocationDuringPreparationCannotPlayLate(t *testing.T) {
+	checking, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(checking)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		fmt.Fprint(w, "false")
+	}))
+	defer server.Close()
+	defer close(release)
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let revoked = false, checks = 0;
+export function aggregate() { revoked = true; return {ok:true}; }
+export async function candidateValid({signal}) {
+ if (!revoked) return true;
+ if (++checks === 1) return (await fetch(%q,{signal})).json();
+ return false;
+}
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[{id:"a",platform:"wy",trackID:"a",quality:"flac"}]}; }
+export function resolveCandidate() { return {stream:{url:%s}}; }
+`, server.URL, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.Normalize = func() bool {
+		if _, err := src.Aggregate("revokeLink", nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-checking:
+		case <-time.After(2 * time.Second):
+			t.Fatal("撤销观察器没有开始校验")
+		}
+		return false
+	}
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer p.TogglePlay()
+	if p.Ready() || p.Playing() || p.Stream() != nil || p.Err() != "" || p.Current().ID != "one" || len(p.Queue()) != 2 {
+		t.Fatalf("已撤销的准备结果仍被开播：ready=%v playing=%v stream=%+v error=%q current=%+v", p.Ready(), p.Playing(), p.Stream(), p.Err(), p.Current())
+	}
+}
+
+// 主线程已交接而后台仍卡在 post 返回时，撤销和原候选截止都不能关闭播放下载。
+func TestCooperativeRevocationAfterHandoffKeepsPlayingDownload(t *testing.T) {
+	audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliver, served, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(audio)))
+		w.Write(audio[:len(audio)/2])
+		w.(http.Flusher).Flush()
+		select {
+		case <-deliver:
+			w.Write(audio[len(audio)/2:])
+			close(served)
+		case <-r.Context().Done():
+			close(canceled)
+		}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let revoked = false;
+export function aggregate() { revoked = true; return {ok:true}; }
+export function candidateValid() { return !revoked; }
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidateTimeoutMs:200,roundTimeoutMs:2000,candidates:[{id:"a",platform:"wy",trackID:"a",quality:"flac"}]}; }
+export function resolveCandidate() { return {stream:{url:%q}}; }
+`, server.URL))
+	posts, releasePost := make(chan func(), 64), make(chan struct{})
+	defer close(releasePost)
+	p := player.New(func(fn func()) {
+		posts <- fn
+		// 公开 post 边界可停住后台接收回执，不阻塞主线程执行提交。
+		<-releasePost
+	})
+	p.Source = func(string) music.Source { return src }
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || !p.Playing() {
+		t.Fatalf("未完成音频交接：%q", p.Err())
+	}
+	defer p.TogglePlay()
+	if _, err := src.Aggregate("revokeLink", nil); err != nil {
+		t.Fatal(err)
+	}
+	// 等待既定候选截止而非等待观察器调度：后台回执仍未放行，已开播的流必须脱离候选生命周期。
+	deadline := time.NewTimer(250 * time.Millisecond)
+	defer deadline.Stop()
+	select {
+	case <-canceled:
+		t.Fatal("撤销错误关闭了已开播下载")
+	case <-deadline.C:
+	}
+	close(deliver)
+	select {
+	case <-canceled:
+		t.Fatal("候选截止错误关闭了已开播下载")
+	case <-served:
+	case <-time.After(2 * time.Second):
+		t.Fatal("已开播下载未继续读取")
+	}
+	timer, tick := time.NewTimer(2*time.Second), time.NewTicker(time.Millisecond)
+	defer timer.Stop()
+	defer tick.Stop()
+	for {
+		if fraction, ok := p.Downloaded(); ok && fraction == 1 {
+			break
+		}
+		select {
+		case <-canceled:
+			t.Fatal("撤销后播放下载被取消")
+		case <-timer.C:
+			t.Fatal("撤销后没有下载完整音频")
+		case <-tick.C:
+		}
+	}
+	if !p.Ready() || !p.Playing() || p.Current().ID != "one" || p.Err() != "" {
+		t.Fatalf("交接后撤销改变了当前播放：ready=%v playing=%v error=%q", p.Ready(), p.Playing(), p.Err())
+	}
+}
+
 // 首源返回达下限的低档音频也不能抢过同档下一源的真实 FLAC。
 func TestCooperativeLowerActualQualityDoesNotPreemptFLAC(t *testing.T) {
 	src := cooperativePlugin(t, fmt.Sprintf(`

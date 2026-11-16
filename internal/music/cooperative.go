@@ -41,3 +41,16 @@ type CooperativeSource interface {
 	PlaybackPlan(ctx context.Context, id, quality, roundID string) (*PlaybackPlan, error)
 	ResolveCandidate(ctx context.Context, id, roundID string, candidate PlaybackCandidate) (*CandidateStream, error)
 }
+
+// CandidateValiditySource 只收紧已冻结的候选，不重建计划或重置本轮截止时间。
+// 变更通道关闭后须重新订阅；不具备该能力的旧来源保持原播放行为。
+type CandidateValiditySource interface {
+	CandidateChanges() <-chan struct{}
+	CandidateValid(ctx context.Context, id, roundID string, candidate PlaybackCandidate) (bool, error)
+}
+
+// CandidateCommitSource 将最终资格校验与开播串行化，消除查询通过后再撤销的窗口。
+// start 只能进行最后的开播交接，不得再次调用来源控制接口；耗时准备须在门禁外完成。
+type CandidateCommitSource interface {
+	CommitCandidate(ctx context.Context, id, roundID string, candidate PlaybackCandidate, start func() error) (valid bool, err error)
+}
