@@ -12,6 +12,7 @@ import (
 	"mygo-music/internal/local"
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
+	"mygo-music/internal/sharecard"
 )
 
 // framesDir is where MM_FRAMES says to save a look at the views, which a test
@@ -23,6 +24,35 @@ func framesDir(t *testing.T) string {
 		t.Skip()
 	}
 	return dir
+}
+
+// With MM_FRAMES set, saves the share editor at desktop and compact sizes.
+func TestShareEditorFrame(t *testing.T) {
+	dir := framesDir(t)
+	a := newTestApp()
+	a.settings.LyricsScript = "simplified"
+	track := music.Track{ID: "share-frame", Source: "fake", Name: "北方的夜 · Northern Lights", Artists: []music.Artist{{Name: "The Polar Lights"}}, URL: "https://example.com/song"}
+	cover := coverImage(ui.RGB(28, 94, 132), ui.RGB(214, 162, 78))
+	lines := lyrics.Build("[00:01]讓風慢慢經過\n[00:04]你會聽見遠方\n[00:08]我們一起出發", "[00:01]Let the evening wind pass softly.\n[00:04]You'll hear the distance.\n[00:08]Let's set out together.")
+	selected := map[int]bool{0: true, 2: true}
+	png, err := sharecard.Render(sharecard.Card{Title: track.Name, Artist: track.ArtistNames(), URL: track.URL, Cover: cover,
+		Lines: sharecard.Select(lyrics.Display(lines, lyrics.DisplayOptions{Simplify: true}), selected, true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := ui.DecodeBitmap(png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.sharing = &shareDraft{open: true, track: track, lines: lines, selected: selected, cover: cover, preview: preview, png: png}
+	for _, size := range []struct {
+		width, height int
+		name          string
+	}{{1200, 800, "share-editor.png"}, {760, 640, "share-editor-compact.png"}} {
+		tester := ui.NewTester(a.view, size.width, size.height)
+		settled(tester)
+		saveFrame(t, dir, size.name, tester.Image())
+	}
 }
 
 // With MM_FRAMES set, saves Home as it greets a listener with no music yet.
@@ -91,6 +121,42 @@ func TestNowPlayingFrame(t *testing.T) {
 	tt.Advance(2 * time.Second)
 	tt.Frame()
 	saveFrame(t, dir, "now-playing.png", tt.Image())
+}
+
+// With MM_FRAMES set, saves each rhythm style and its music-led interlude.
+func TestStageStylesFrame(t *testing.T) {
+	dir := framesDir(t)
+	a, tester, _ := playingApp()
+	a.libs[0].account = &music.Account{ID: "test", Name: "Headless"}
+	track := a.pl.Current()
+	track.Album.ImageURL = "stage-cover"
+	giveCover(a, track.Album.ImageURL, coverImage(ui.RGB(25, 92, 132), ui.RGB(210, 164, 82)))
+	a.nowPlaying, a.npPane = true, paneStage
+	a.pl.Hold(2 * time.Second)
+	tester.SetDark(true)
+	tester.SetPreferences(ui.Preferences{ReduceMotion: true})
+	settled(tester)
+	for _, style := range stageStyles {
+		a.settings.StageStyle = style.id
+		tester.Frame()
+		saveFrame(t, dir, "stage-"+map[string]string{"": "flow", "partita": "steps", "tilt": "tilt", "spotlight": "spotlight", "wave": "wave"}[style.id]+".png", tester.Image())
+	}
+	a.pl.Hold(7 * time.Second)
+	for _, style := range []string{"spotlight", "wave"} {
+		a.settings.StageStyle = style
+		tester.Frame()
+		saveFrame(t, dir, "interlude-"+style+".png", tester.Image())
+	}
+	a.pl.Hold(2 * time.Second)
+	tester.SetPreferences(ui.Preferences{})
+	for _, style := range []string{"spotlight", "wave"} {
+		a.settings.StageStyle = style
+		for _, intensity := range []string{"gentle", "standard", "lively"} {
+			a.settings.StageIntensity = intensity
+			tester.Frame()
+			saveFrame(t, dir, "stage-"+style+"-"+intensity+".png", tester.Image())
+		}
+	}
 }
 
 // With MM_FRAMES set, saves Now Playing for a local song with no cover.

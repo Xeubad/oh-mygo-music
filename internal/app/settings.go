@@ -56,9 +56,18 @@ type settings struct {
 	// LyricsStage shows lyrics on the stage, Folia's style, in Now
 	// Playing, rather than scrolling.
 	LyricsStage bool `json:"lyricsStage"`
+	// 反向字段让旧配置缺失时保持显示译文，用户明确关闭后可跨重启保留。
+	HidePlaybackTranslation bool            `json:"hidePlaybackTranslation,omitempty"`
+	HideCardTranslation     bool            `json:"hideCardTranslation,omitempty"`
+	LyricsScript            string          `json:"lyricsScript,omitempty"`
+	ChineseLyrics           map[string]bool `json:"chineseLyrics,omitempty"`
+	CardTemplate            string          `json:"cardTemplate,omitempty"`
+	CardSquare              bool            `json:"cardSquare,omitempty"`
+	CardDirectory           string          `json:"cardDirectory,omitempty"`
 	// StageStyle is how the stage sets its lyrics (stageStyles): empty for
 	// Folia's classic, or the id of another of its visualizers.
-	StageStyle string `json:"stageStyle,omitempty"`
+	StageStyle     string `json:"stageStyle,omitempty"`
+	StageIntensity string `json:"stageIntensity,omitempty"`
 	// PlayerStyle is how Now Playing shows the song playing
 	// (playerStyles): empty for its cover, or a retro player's id.
 	PlayerStyle string `json:"playerStyle,omitempty"`
@@ -94,7 +103,7 @@ type settings struct {
 }
 
 func defaultSettings() settings {
-	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048}
+	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard"}
 }
 
 func settingsPath() (string, error) {

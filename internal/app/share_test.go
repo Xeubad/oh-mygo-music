@@ -1,0 +1,224 @@
+package app
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"image/png"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/ui"
+	"mygo-music/internal/lyrics"
+	"mygo-music/internal/music"
+)
+
+// 预选按当前位置、长间奏与尾奏回退到有效歌词，时间轴缺失时取首句。
+func TestInitialShareLineFollowsPlaybackPosition(t *testing.T) {
+	lines := []lyrics.Line{
+		{At: time.Second, End: 3 * time.Second, Text: "", Words: nil},
+		{At: 2 * time.Second, End: 5 * time.Second, Text: "Composer: Artist"},
+		{At: 4 * time.Second, End: 7 * time.Second, Text: "First"},
+		{At: 10 * time.Second, End: 13 * time.Second, Text: "Second"},
+	}
+	for _, test := range []struct {
+		name     string
+		position time.Duration
+		current  bool
+		want     int
+	}{{"other song", 20 * time.Second, false, 2}, {"current line", 4500 * time.Millisecond, true, 2}, {"interlude", 8 * time.Second, true, 3}, {"outro", 20 * time.Second, true, 3}} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := initialShareLine(lines, test.position, test.current); got != test.want {
+				t.Fatalf("initial line %d, want %d", got, test.want)
+			}
+		})
+	}
+	if got := initialShareLine([]lyrics.Line{{Text: "Ambiguous"}, {Text: "Next"}}, 9*time.Second, true); got != 0 {
+		t.Fatalf("untimed lyrics start at %d, want first line", got)
+	}
+}
+
+// 列表分享另一首歌只操作分享草稿，所选文字不借用正在播放的歌词。
+func TestShareMenuKeepsPlaybackAndCopiesSelection(t *testing.T) {
+	var copied string
+	previous := copyText
+	copyText = func(text string) error { copied = text; return nil }
+	defer func() { copyText = previous }()
+	a := newTestApp()
+	posted := posts(a)
+	fake(a).lyrics = func(id string) (*music.Lyrics, error) {
+		if id != "shared" {
+			t.Errorf("lyrics requested for %q", id)
+		}
+		return &music.Lyrics{LRC: "[00:01]First\n[00:05]Second\n[00:09]Third", Translation: "[00:01]One\n[00:09]Three"}, nil
+	}
+	playing, shared := song("playing", "Playing"), song("shared", "Shared")
+	a.pl.Cue([]music.Track{playing})
+	a.pl.Hold(7 * time.Second)
+	wasPlaying := a.pl.Playing()
+	a.playlists["list"] = &music.Playlist{ID: "list", Tracks: []music.Track{shared}}
+	a.route = route{page: pagePlaylist, src: "fake", id: "list"}
+	tester := ui.NewTester(a.view, 1200, 800)
+	tester.Frame()
+	if err := tester.RightClick("Shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Share Card…"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, posted, func() bool { tester.Frame(); return tester.HasText("Third") })
+	if err := tester.Click("Select lyric 3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.Click("Copy Lyrics"); err != nil {
+		t.Fatal(err)
+	}
+	if copied != "First\nOne\n…\nThird\nThree" {
+		t.Fatalf("copied %q", copied)
+	}
+	if a.pl.Current().ID != "playing" || a.pl.Position() != 7*time.Second || a.pl.Playing() != wasPlaying {
+		t.Fatal("sharing changed playback")
+	}
+}
+
+// 取消和保存失败不改变目录，成功保存后才记住新目录并保留草稿。
+func TestShareSaveRemembersOnlySuccessfulDirectory(t *testing.T) {
+	a := newTestApp()
+	posted := posts(a)
+	a.settings.CardDirectory = "previous-directory"
+	fake(a).lyrics = func(string) (*music.Lyrics, error) { return &music.Lyrics{}, nil }
+	track := music.Track{ID: "empty", Source: "fake", Name: "An instrumental"}
+	destination := ""
+	previous := saveCardAs
+	saveCardAs = func(*app, string, string) (string, error) { return destination, nil }
+	defer func() { saveCardAs = previous }()
+	tester := ui.NewTester(func(c *ui.Context) {
+		a.pal = paletteFor(c.Theme())
+		a.songMenu(c, &track, 22, a.pal.text)
+		a.shareDialog(c)
+	}, 1200, 800)
+	tester.Frame()
+	if err := tester.Click("More"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Share Card…"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, posted, func() bool { tester.Frame(); _, ok := tester.Find("Card Preview"); return ok })
+	directory := t.TempDir()
+	for _, scenario := range []struct{ path, status, directory string }{
+		{"", "Save canceled", "previous-directory"},
+		{filepath.Join(directory, "missing", "card.png"), "Could not save image", "previous-directory"},
+		{filepath.Join(directory, "card.png"), "Image saved", directory},
+	} {
+		destination = scenario.path
+		if err := tester.Click("Save PNG"); err != nil {
+			t.Fatal(err)
+		}
+		until(t, posted, func() bool { tester.Frame(); return tester.HasText(scenario.status) })
+		if a.settings.CardDirectory != scenario.directory {
+			t.Fatalf("directory %q, want %q", a.settings.CardDirectory, scenario.directory)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "card.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := png.Decode(bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tester.Find("Card Preview"); !ok {
+		t.Fatal("saving discarded the card")
+	}
+}
+
+// 图片复制失败后可重试，复制的确是当前尺寸的最终 PNG，草稿内容仍可继续使用。
+func TestShareImageExportRetriesWithChosenSize(t *testing.T) {
+	images := make(chan []byte, 2)
+	previous := copyImage
+	failed := false
+	copyImage = func(data []byte) error {
+		images <- data
+		if !failed {
+			failed = true
+			return errors.New("clipboard unavailable")
+		}
+		return nil
+	}
+	defer func() { copyImage = previous }()
+	a := newTestApp()
+	a.settings.path = filepath.Join(t.TempDir(), "settings.json")
+	posted := posts(a)
+	fake(a).lyrics = func(string) (*music.Lyrics, error) {
+		return &music.Lyrics{LRC: "[00:01]First", Translation: "[00:01]One"}, nil
+	}
+	track := music.Track{ID: "shared", Source: "fake", Name: "Shared", URL: "https://example.com/song/1"}
+	tester := ui.NewTester(func(c *ui.Context) {
+		a.pal = paletteFor(c.Theme())
+		a.songMenu(c, &track, 22, a.pal.text)
+		a.shareDialog(c)
+	}, 1200, 800)
+	tester.Frame()
+	if err := tester.Click("More"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Share Card…"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, posted, func() bool { tester.Frame(); _, ok := tester.Find("Card Preview"); return ok })
+	if err := tester.Click("Card Size"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Square (1:1)"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, posted, func() bool { tester.Frame(); _, ok := tester.Find("Card Preview"); return ok })
+	if err := tester.Click("Card Template"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Vinyl"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, posted, func() bool { tester.Frame(); _, ok := tester.Find("Card Preview"); return ok })
+	if err := tester.Click("Show Translation"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, posted, func() bool { tester.Frame(); _, ok := tester.Find("Card Preview"); return ok })
+	if !a.settings.HideCardTranslation {
+		t.Fatal("card translation choice did not turn off")
+	}
+	for attempt := range 2 {
+		if err := tester.Click("Copy Image"); err != nil {
+			t.Fatal(err)
+		}
+		data := wait(t, images, "copied PNG")
+		decoded, err := png.Decode(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Bounds().Dx() != 1200 || decoded.Bounds().Dy() != 1200 {
+			t.Fatal(decoded.Bounds())
+		}
+		message := "Image copied"
+		if attempt == 0 {
+			message = "Could not copy image"
+		}
+		until(t, posted, func() bool { tester.Frame(); return tester.HasText(message) })
+	}
+	if !tester.HasText("First") {
+		t.Fatal("export discarded the selected lyrics")
+	}
+	data, err := os.ReadFile(a.settings.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored settings
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.CardTemplate != "vinyl" || !stored.CardSquare || !stored.HideCardTranslation {
+		t.Fatalf("card choices did not persist: %+v", stored)
+	}
+}
