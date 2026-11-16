@@ -704,6 +704,138 @@ export function resolveCandidate({id}) { throw new Error("failed:"+id); }
 	}
 }
 
+// 两首全失败时每个队列位置只尝试一次，不能为凑默认三首阈值绕回重试。
+func TestCooperativeShortQueueStopsAfterEachPositionFails(t *testing.T) {
+	src := cooperativePlugin(t, `
+let visited=[], candidates=[];
+export function aggregate() { return {visited,candidates}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"a",platform:"wy",trackID:id,quality:"flac"},
+ {id:"b",platform:"tx",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id,candidate}) { candidates.push(id+":"+candidate.id); throw new Error("failed:"+id); }
+`)
+	p, posts := cooperativePlayer(src)
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited    []string `json:"visited"`
+		Candidates []string `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[one two]" || fmt.Sprint(state.Candidates) != "[one:a one:b two:a two:b]" || p.Playing() || p.Current().ID != "two" || p.Err() != "failed:two" || len(p.Queue()) != 2 {
+		t.Fatalf("短队列绕回或候选被重复计为歌曲失败：visited=%v candidates=%v current=%+v error=%q", state.Visited, state.Candidates, p.Current(), p.Err())
+	}
+}
+
+// 可调阈值按歌曲最终失败计数；候选耗尽不提前停，高于队列长度也不绕回。
+func TestCooperativeQueueHonorsConfiguredFailureLimit(t *testing.T) {
+	for _, tc := range []struct {
+		limit   int
+		want    string
+		current string
+	}{
+		{1, "[one]", "one"},
+		{2, "[one two]", "two"},
+		{5, "[one two three four]", "four"},
+	} {
+		t.Run(fmt.Sprint(tc.limit), func(t *testing.T) {
+			src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {consecutiveFailureLimit:%d,targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"a",platform:"wy",trackID:id,quality:"flac"},
+ {id:"b",platform:"tx",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) { throw new Error("failed:"+id); }
+`, tc.limit))
+			p, posts := cooperativePlayer(src)
+			p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}, {ID: "three", Source: "cooperative"}, {ID: "four", Source: "cooperative"}}, 0)
+			finishLoading(t, p, posts)
+			raw, err := src.Aggregate("state", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state struct {
+				Visited []string `json:"visited"`
+			}
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprint(state.Visited) != tc.want || p.Playing() || p.Current().ID != tc.current || p.Err() != "failed:"+tc.current || len(p.Queue()) != 4 {
+				t.Fatalf("可调阈值未按最终失败歌曲生效：limit=%d visited=%v current=%+v error=%q", tc.limit, state.Visited, p.Current(), p.Err())
+			}
+		})
+	}
+}
+
+// 其他项成功后只在正常顺序再次轮到时重试失败项，不能立即跳回或永久屏蔽。
+func TestCooperativeFailedPositionRetriesAfterNormalQueueCycle(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[], first=0;
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ if(id==="one") first++;
+ return {consecutiveFailureLimit:2,targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) {
+ if(id==="one" && first===1 || id==="three") throw new Error("failed:"+id);
+ return {stream:{url:%s}};
+}
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.CycleRepeat()
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}, {ID: "three", Source: "cooperative"}, {ID: "four", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	if !p.Ready() || !p.Playing() || p.Current().ID != "two" {
+		t.Fatalf("没有在下一项成功开播：current=%+v error=%q", p.Current(), p.Err())
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for _, next := range []string{"four", "one"} {
+		p.Seek(p.Duration())
+		for p.Current().ID != next || !p.Ready() || p.Loading() {
+			select {
+			case fn := <-posts:
+				fn()
+			case <-timer.C:
+				t.Fatalf("成功后未按正常顺序轮转到 %s：current=%+v error=%q", next, p.Current(), p.Err())
+			}
+		}
+	}
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited []string `json:"visited"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[one two three four one]" || !p.Playing() || p.Err() != "" || len(p.Queue()) != 4 {
+		t.Fatalf("失败项被立即重试或永久屏蔽：visited=%v current=%+v error=%q", state.Visited, p.Current(), p.Err())
+	}
+}
+
 // 获取计划本身失败也属于本项最终失败，不能绕过默认连续三首限制。
 func TestCooperativePlanFailuresStopAfterThreeTracks(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
