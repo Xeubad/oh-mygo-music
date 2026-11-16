@@ -301,6 +301,7 @@ func openCandidateStream(ctx context.Context, track music.Track, candidate music
 	}
 	// 不采用解析响应中的来源和音质标签，实际来源取本轮冻结候选。
 	info.Type, info.Quality, info.BitRate, info.Platform = codec, actual, bitrate, candidate.Platform
+	info.PlaybackID = candidate.PlaybackID
 	// 高级名称没有参数映射时也只能留作普通后备，不能抢在普通 FLAC 路径前开播。
 	if qualityRank(candidate.Quality) == 0 || qualityRank(actual) < qualityRank(candidate.Quality) {
 		s.Close()

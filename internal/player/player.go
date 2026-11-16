@@ -74,6 +74,8 @@ type Player struct {
 	err        string
 	gen        int // counts loads, to drop the results of stale ones
 	loadCancel context.CancelFunc
+	// 暂停预加载尚未开播，首次播放必须重新检查撤销和原始版本资格。
+	cooperativePrepared bool
 
 	lyrics       []lyrics.Line
 	lyricsLoaded bool
@@ -483,6 +485,10 @@ func (p *Player) TogglePlay() {
 		p.sync()
 		return
 	}
+	if p.cooperativePrepared {
+		p.loadSkipping(p.at, 0, stay, true, p.Position())
+		return
+	}
 	p.playing = true
 	p.record()
 	if !p.seeking && !out.Playing() {
@@ -623,6 +629,7 @@ func (p *Player) stop() {
 		time.AfterFunc(100*time.Millisecond, out.Close)
 	}
 	p.out, p.stream, p.watch, p.info, p.remote = nil, nil, nil, nil, nil
+	p.cooperativePrepared = false
 	p.seeking = false
 	p.fade.attach(nil, 1)
 }
@@ -720,7 +727,12 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 			if pre != nil {
 				pre.close()
 			}
-			_, _, err = p.openCooperative(ctx, cooperative, t, quality, func(attempt context.Context, info *music.Stream, s stream, handoff func(func() error) error) error {
+			// 重播沿用该位置成功开播的版本；展示、分享及未播位置仍保留原始入队身份。
+			playback := t
+			if t.PlaybackID != "" {
+				playback.ID = t.PlaybackID
+			}
+			_, _, err = p.openCooperative(ctx, cooperative, playback, quality, func(attempt context.Context, info *music.Stream, s stream, handoff func(func() error) error) error {
 				committed := make(chan error, 1)
 				p.post(func() {
 					if attempt.Err() != nil || gen != p.gen {
@@ -837,7 +849,13 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 	if err != nil {
 		return err
 	}
+	p.cooperativePrepared = handoff != nil && !p.playing
 	if p.playing {
+		if handoff != nil && info.PlaybackID != "" {
+			// 只记录已成功开播的位置，重复入队的同 ID 曲目不能继承这个版本。
+			p.track.PlaybackID = info.PlaybackID
+			p.queue[p.order[p.at]].PlaybackID = info.PlaybackID
+		}
 		p.fade.fade(1, fadeIn, nil)
 		p.record()
 	}

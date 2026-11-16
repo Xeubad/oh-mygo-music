@@ -94,6 +94,138 @@ export function resolveCandidate({candidate, roundID}) {
 	p.TogglePlay()
 }
 
+// 同一聚合身份重复入队时，拆分后仅已播位置跟随实际来源，未播位置仍用入队锚点。
+func TestCooperativeSplitKeepsPlayedVersionWithoutChangingQueue(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let split = false;
+export function aggregate() { split = true; return {ok:true}; }
+export function playbackPlan({id}) {
+ const played = id === "played-wy";
+ if (id !== "queued-anchor" && !played) throw new Error("unexpected playback identity:" + id);
+ const platform = !split || played ? "wy" : "tx";
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"candidate",platform,accountID:"a",trackID:platform,quality:"flac",playbackID:platform==="wy"?"played-wy":"played-tx"}]};
+}
+export function resolveCandidate() { return {stream:{url:%s,playbackID:"untrusted-response"}}; }
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	queue := []music.Track{{ID: "queued-anchor", Source: "cooperative", Name: "first"}, {ID: "queued-anchor", Source: "cooperative", Name: "second"}}
+	p.PlayTrack(queue, 0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream().Platform != "wy" {
+		t.Fatalf("实际来源没有成功开播：%+v %q", p.Stream(), p.Err())
+	}
+	session, ok := p.Session()
+	if !ok || session.Queue[0].PlaybackID != "played-wy" || session.Queue[1].PlaybackID != "" {
+		t.Fatalf("成功播放的版本没有按队列位置隔离：%+v", session)
+	}
+	encoded, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored player.Session
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	p.TogglePlay()
+	if _, err := src.Aggregate("revokeLink", nil); err != nil {
+		t.Fatal(err)
+	}
+	p, posts = cooperativePlayer(src)
+	p.Restore(restored)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Playing() || p.Stream().Platform != "wy" {
+		t.Fatalf("会话恢复丢失已播版本或自动开播：stream=%+v error=%q", p.Stream(), p.Err())
+	}
+	p.TogglePlay()
+	finishLoading(t, p, posts)
+	if !p.Ready() || !p.Playing() || p.Stream().Platform != "wy" || p.Current().PlaybackID != "played-wy" {
+		t.Fatalf("恢复后继续播放改换了已播版本：stream=%+v current=%+v error=%q", p.Stream(), p.Current(), p.Err())
+	}
+	p.Jump(0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream().Platform != "wy" {
+		t.Fatalf("拆分后已播项改换版本：stream=%+v error=%q", p.Stream(), p.Err())
+	}
+	p.Jump(1)
+	finishLoading(t, p, posts)
+	defer p.TogglePlay()
+	if !p.Ready() || p.Stream().Platform != "tx" {
+		t.Fatalf("未播位置被同身份已播项污染：stream=%+v error=%q", p.Stream(), p.Err())
+	}
+	got := p.Queue()
+	if len(got) != 2 || got[0].ID != queue[0].ID || got[1].ID != queue[1].ID || got[0].Name != "first" || got[1].Name != "second" || p.Current().ID != "queued-anchor" {
+		t.Fatalf("拆分改变队列身份、数量或顺序：%+v", got)
+	}
+}
+
+// 恢复时仅准备的流还不是已播版本，用户首次开播后才应固定该队列位置的版本。
+func TestCooperativeResumedSessionRecordsFirstPlayedVersion(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let split = false;
+export function aggregate() { split = true; return {ok:true}; }
+export function playbackPlan({id}) {
+ const platform = !split || id === "played-wy" ? "wy" : "tx";
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"candidate",platform,trackID:platform,quality:"flac",playbackID:platform==="wy"?"played-wy":"played-tx"}]};
+}
+export function resolveCandidate() { return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.Restore(player.Session{
+		Queue: []music.Track{{ID: "queued-anchor", Source: "cooperative"}, {ID: "queued-anchor", Source: "cooperative"}},
+		Order: []int{0, 1},
+	})
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Playing() || p.Queue()[0].PlaybackID != "" {
+		t.Fatalf("暂停预加载被当作成功开播：ready=%v playing=%v queue=%+v error=%q", p.Ready(), p.Playing(), p.Queue(), p.Err())
+	}
+	p.TogglePlay()
+	finishLoading(t, p, posts)
+	defer p.TogglePlay()
+	if !p.Playing() || p.Current().PlaybackID != "played-wy" || p.Queue()[0].PlaybackID != "played-wy" || p.Queue()[1].PlaybackID != "" {
+		t.Fatalf("恢复后首次开播没有仅记录当前位置：current=%+v queue=%+v", p.Current(), p.Queue())
+	}
+	if _, err := src.Aggregate("revokeLink", nil); err != nil {
+		t.Fatal(err)
+	}
+	p.Jump(0)
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Stream().Platform != "wy" {
+		t.Fatalf("恢复后开播的版本在拆分后丢失：stream=%+v error=%q", p.Stream(), p.Err())
+	}
+}
+
+// 恢复后尚未播放的预加载不能固定版本，拆分后首次播放必须重新采用原入队锚点。
+func TestCooperativeUnplayedSessionRechecksSplitBeforeFirstPlay(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let split = false;
+export function aggregate() { split = true; return {ok:true}; }
+export function playbackPlan({id}) {
+ if (id !== "queued-anchor") throw new Error("unplayed item changed identity");
+ const platform = split ? "tx" : "wy";
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"candidate",platform,trackID:platform,quality:"flac",playbackID:"played-"+platform}]};
+}
+export function resolveCandidate() { return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.Restore(player.Session{Queue: []music.Track{{ID: "queued-anchor", Source: "cooperative"}}, Order: []int{0}})
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Playing() || p.Stream().Platform != "wy" || p.Current().PlaybackID != "" {
+		t.Fatalf("暂停预加载状态错误：stream=%+v current=%+v error=%q", p.Stream(), p.Current(), p.Err())
+	}
+	if _, err := src.Aggregate("revokeLink", nil); err != nil {
+		t.Fatal(err)
+	}
+	p.TogglePlay()
+	finishLoading(t, p, posts)
+	defer p.TogglePlay()
+	if !p.Ready() || !p.Playing() || p.Stream().Platform != "tx" || p.Current().ID != "queued-anchor" || p.Queue()[0].PlaybackID != "played-tx" {
+		t.Fatalf("首次播放沿用了拆分前的未播版本：stream=%+v current=%+v error=%q", p.Stream(), p.Current(), p.Err())
+	}
+}
+
 // 暂停正在解析的聚合项必须中止真实请求，且不跳歌、不记作失败。
 func TestCooperativePauseCancelsResolverRequest(t *testing.T) {
 	entered, canceled := make(chan struct{}), make(chan struct{})
@@ -241,7 +373,7 @@ export async function candidateValid({signal}) {
  if (++checks === 1) return (await fetch(%q,{signal})).json();
  return false;
 }
-export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[{id:"a",platform:"wy",trackID:"a",quality:"flac"}]}; }
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[{id:"a",platform:"wy",trackID:"a",quality:"flac",playbackID:"not-started"}]}; }
 export function resolveCandidate() { return {stream:{url:%s}}; }
 `, server.URL, audioPath(t, "seek.flac")))
 	p, posts := cooperativePlayer(src)
@@ -261,6 +393,9 @@ export function resolveCandidate() { return {stream:{url:%s}}; }
 	defer p.TogglePlay()
 	if p.Ready() || p.Playing() || p.Stream() != nil || p.Err() != "" || p.Current().ID != "one" || len(p.Queue()) != 2 {
 		t.Fatalf("已撤销的准备结果仍被开播：ready=%v playing=%v stream=%+v error=%q current=%+v", p.Ready(), p.Playing(), p.Stream(), p.Err(), p.Current())
+	}
+	if p.Current().PlaybackID != "" || p.Queue()[0].PlaybackID != "" || p.Queue()[1].PlaybackID != "" {
+		t.Fatalf("未开播的撤销候选污染版本记录：current=%+v queue=%+v", p.Current(), p.Queue())
 	}
 }
 

@@ -61,6 +61,8 @@ type Track struct {
 	AggregateSources []AggregateSource `json:"aggregateSources,omitempty"`
 	AggregateLinks   []AggregateLink   `json:"aggregateLinks,omitempty"`
 	AggregateManual  bool              `json:"aggregateManual,omitempty"`
+	// 该队列位置成功开播的版本；不改原始 ID，也不传播到重复入队的其他位置。
+	PlaybackID string `json:"playbackID,omitempty"`
 
 	// An episode of a podcast is a track like any other, that says which show
 	// it's of, what it's about and when it came out, as the source has it.
@@ -265,15 +267,17 @@ type NavItem struct {
 // answers for a track.
 type Stream struct {
 	// Platform 是经客户端选定并成功核验的候选平台，不是服务响应标签。
-	Platform string            `json:"platform,omitempty"`
-	URL      string            `json:"url"`
-	Type     string            `json:"type"` // mp3, flac, ogg, wav, m4a or aac
-	Quality  string            `json:"quality,omitempty"`
-	BitRate  int               `json:"bitRate,omitempty"`
-	Size     int64             `json:"size,omitempty"`
-	Peak     float64           `json:"peak,omitempty"`
-	Gain     float64           `json:"gain,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
+	Platform string `json:"platform,omitempty"`
+	// 来自冻结候选，供成功交接后记录版本；不能直接信任解析服务响应。
+	PlaybackID string            `json:"playbackID,omitempty"`
+	URL        string            `json:"url"`
+	Type       string            `json:"type"` // mp3, flac, ogg, wav, m4a or aac
+	Quality    string            `json:"quality,omitempty"`
+	BitRate    int               `json:"bitRate,omitempty"`
+	Size       int64             `json:"size,omitempty"`
+	Peak       float64           `json:"peak,omitempty"`
+	Gain       float64           `json:"gain,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
 }
 
 // Lyrics are a track's words: as LRC, the simple way, or as timed Lines, which

@@ -15,6 +15,8 @@ type PlaybackCandidate struct {
 	AccountID string `json:"accountID,omitempty"`
 	TrackID   string `json:"trackID"`
 	Quality   string `json:"quality"`
+	// 仅成功交接后记录的重播身份，不替换队列项原始 ID。
+	PlaybackID string `json:"playbackID,omitempty"`
 }
 
 // PlaybackPlan 是本轮固定的设置和候选顺序；进行中的播放不随设置改写。
