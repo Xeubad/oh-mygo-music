@@ -310,6 +310,18 @@ func (p *Plugin) PlaybackPlan(ctx context.Context, id, quality, roundID string) 
 	return &plan, nil
 }
 
+// PlaybackTiming 不创建候选轮次，只读取新检测应固定的当前时间设置。
+func (p *Plugin) PlaybackTiming(ctx context.Context) (*music.PlaybackTiming, error) {
+	if !p.Can("playbackTiming") {
+		return nil, music.ErrUnsupported
+	}
+	var timing music.PlaybackTiming
+	if err := p.callContext(ctx, "playbackTiming", map[string]any{}, &timing); err != nil {
+		return nil, err
+	}
+	return &timing, nil
+}
+
 func (p *Plugin) ResolveCandidate(ctx context.Context, id, roundID string, candidate music.PlaybackCandidate) (*music.CandidateStream, error) {
 	var result music.CandidateStream
 	if err := p.callContext(ctx, "resolveCandidate", map[string]any{"id": id, "roundID": roundID, "candidate": candidate}, &result); err != nil {

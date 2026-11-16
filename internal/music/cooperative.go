@@ -47,6 +47,18 @@ type CooperativeSource interface {
 	ResolveCandidate(ctx context.Context, id, roundID string, candidate PlaybackCandidate) (*CandidateStream, error)
 }
 
+// PlaybackTiming 只包含新检测需要的时间设置，不重新选择来源或音质。
+type PlaybackTiming struct {
+	CandidateTimeoutMs int64 `json:"candidateTimeoutMs,omitempty"`
+	StallTimeoutMs     int64 `json:"stallTimeoutMs,omitempty"`
+	RecoveryTimeoutMs  int64 `json:"recoveryTimeoutMs,omitempty"`
+}
+
+// PlaybackTimingSource 可选；旧来源继续沿用开播计划中的时间设置。
+type PlaybackTimingSource interface {
+	PlaybackTiming(ctx context.Context) (*PlaybackTiming, error)
+}
+
 // CandidateValiditySource 只收紧已冻结的候选，不重建计划或重置本轮截止时间。
 // 变更通道关闭后须重新订阅；不具备该能力的旧来源保持原播放行为。
 type CandidateValiditySource interface {

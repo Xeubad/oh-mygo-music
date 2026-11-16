@@ -15,6 +15,203 @@ import (
 	"mygo-music/internal/player"
 )
 
+// 新中断必须读取最新时间设置，不能永久沿用首次开播时的恢复预算。
+func TestCooperativeNewInterruptionUsesUpdatedTiming(t *testing.T) {
+	audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut, entered, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			close(entered)
+			<-r.Context().Done()
+			close(canceled)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(audio)))
+		w.Write(audio[:len(audio)/2])
+		w.(http.Flusher).Flush()
+		select {
+		case <-cut:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let rounds = 0;
+let timing = {candidateTimeoutMs:1000,stallTimeoutMs:20,recoveryTimeoutMs:2000};
+export function aggregate({input}) { Object.assign(timing,input); return {ok:true}; }
+export function playbackTiming() { return timing; }
+export function playbackPlan() { rounds++; return {...timing,targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",trackID:"one",quality:"flac"}]}; }
+export async function resolveCandidate({signal}) {
+ if (rounds>1) await fetch(%q+"/resolve",{signal});
+ return {stream:{url:%q+"/audio"}};
+}
+`, server.URL, server.URL))
+	p, posts := cooperativePlayer(src)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	if _, err := src.Aggregate("configure", map[string]any{"recoveryTimeoutMs": 80}); err != nil {
+		t.Fatal(err)
+	}
+	close(cut)
+	timer := time.NewTimer(400 * time.Millisecond)
+	defer timer.Stop()
+waitUpdatedRecovery:
+	for {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-entered:
+			break waitUpdatedRecovery
+		case <-timer.C:
+			t.Fatal("新中断没有启动恢复")
+		}
+	}
+	select {
+	case <-canceled:
+	case <-timer.C:
+		t.Fatal("新中断仍沿用首次开播的两秒预算，未采用更新后的八十毫秒")
+	}
+	for p.Loading() {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatal("新恢复截止后未停留当前项")
+		}
+	}
+	if p.Playing() || p.Err() == "" || p.Current().ID != "one" {
+		t.Fatalf("时间设置改变了恢复终态：current=%+v error=%q", p.Current(), p.Err())
+	}
+}
+
+// 同一次停滞随后变为明确来源错误时，仍沿用检测开始的预算，而不是重新读取设置。
+func TestCooperativeStallKeepsTimingWhenSourceFails(t *testing.T) {
+	for _, failure := range []string{"network", "decoder"} {
+		t.Run(failure, func(t *testing.T) {
+			audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cut, entered, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			snapshots := make(chan struct{}, 64)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/timing":
+					snapshots <- struct{}{}
+					return
+				case "/resolve":
+					close(entered)
+					<-r.Context().Done()
+					close(canceled)
+					return
+				}
+				w.Header().Set("Content-Length", fmt.Sprint(len(audio)))
+				w.Write(audio[:16384])
+				w.(http.Flusher).Flush()
+				select {
+				case <-cut:
+					if failure == "decoder" {
+						// 完整交付损坏帧，确保错误来自真实解码而不是 HTTP 截断。
+						damaged := append([]byte(nil), audio[16384:]...)
+						clear(damaged[16913-16384 : 16923-16384])
+						w.Write(damaged)
+					}
+				case <-r.Context().Done():
+				}
+			}))
+			defer server.Close()
+			defer server.CloseClientConnections()
+			src := cooperativePlugin(t, fmt.Sprintf(`
+let rounds=0;
+let timing={candidateTimeoutMs:2000,stallTimeoutMs:400,recoveryTimeoutMs:800};
+export function aggregate({input}) { Object.assign(timing,input); return {ok:true}; }
+export async function playbackTiming({signal}) {
+ const snapshot={...timing};
+ await fetch(%q+"/timing",{signal});
+ return snapshot;
+}
+export function playbackPlan() { rounds++; return {...timing,targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",trackID:"one",quality:"flac"}]}; }
+export async function resolveCandidate({signal}) {
+ if(rounds>1) await fetch(%q+"/resolve",{signal});
+ return {stream:{url:%q+"/audio"}};
+}
+`, server.URL, server.URL, server.URL))
+			p, posts := cooperativePlayer(src)
+			p.SetVolume(0)
+			p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+			finishLoading(t, p, posts)
+			defer func() {
+				if p.Playing() || p.Loading() {
+					p.TogglePlay()
+				}
+			}()
+			limit := time.NewTimer(3 * time.Second)
+			defer limit.Stop()
+			// 本地请求仅作时序闸门；等缓冲不再推进后再模拟用户改设置和断流。
+			var quiet *time.Timer
+			var quietC <-chan time.Time
+		waitStableDetection:
+			for {
+				select {
+				case fn := <-posts:
+					fn()
+				case <-snapshots:
+					if quiet == nil {
+						quiet = time.NewTimer(120 * time.Millisecond)
+						quietC = quiet.C
+					} else {
+						quiet.Reset(120 * time.Millisecond)
+					}
+				case <-quietC:
+					break waitStableDetection
+				case <-limit.C:
+					t.Fatal("没有观察到持续停滞的检测阶段")
+				}
+			}
+			if quiet != nil {
+				defer quiet.Stop()
+			}
+			if _, err := src.Aggregate("configure", map[string]any{"recoveryTimeoutMs": 2000}); err != nil {
+				t.Fatal(err)
+			}
+			close(cut)
+			deadline := time.NewTimer(time.Second)
+			defer deadline.Stop()
+		waitFailureRecovery:
+			for {
+				select {
+				case fn := <-posts:
+					fn()
+				case <-entered:
+					break waitFailureRecovery
+				case <-deadline.C:
+					t.Fatal("停滞转明确断流后没有恢复当前项")
+				}
+			}
+			select {
+			case <-canceled:
+			case <-deadline.C:
+				t.Fatal("同一次检测转断流时重取设置，延长了原八百毫秒预算")
+			}
+			finishLoading(t, p, posts)
+			if p.Playing() || p.Err() == "" || p.Current().ID != "one" {
+				t.Fatalf("恢复截止没有保留当前项：current=%+v error=%q", p.Current(), p.Err())
+			}
+		})
+	}
+}
+
 // 只有元数据的候选不能先报开播成功，再借自动恢复绕过首次候选截止。
 func TestCooperativeInitialPlaybackWaitsForDecodedAudio(t *testing.T) {
 	audio, err := os.ReadFile(filepath.Join("testdata", "seek.flac"))

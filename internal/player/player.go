@@ -869,13 +869,9 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 	out.OnEnd(func() {
 		p.post(func() {
 			if gen == p.gen && p.out == out {
-				if handoff != nil {
-					if failure := watch.failure(); failure != nil {
-						if p.playing {
-							p.interruptedAt(failure, time.Now())
-						}
-						return
-					}
+				if handoff != nil && watch.failure() != nil {
+					// 由监控统一固定检测快照，结束回调不能另起一套时间规则。
+					return
 				}
 				p.ended()
 			}
