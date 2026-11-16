@@ -1,6 +1,9 @@
 package player
 
 import (
+	"errors"
+	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -18,18 +21,53 @@ type watched struct {
 	now func() time.Time
 	// ended hears that a call that took starvedAfter or longer returned,
 	// for what said it's buffering to say so no more.
-	ended func()
-	since atomic.Int64 // when the call on its way began, in Unix nanoseconds, or 0
+	ended       func()
+	since       atomic.Int64 // when the call on its way began, in Unix nanoseconds, or 0
+	reading     atomic.Int64
+	positioning atomic.Bool
+	// 解码错误不能被无原因的 OnEnd 回调抹成正常结束。
+	failureMu  sync.Mutex
+	failureErr error
+	failed     chan error
 }
 
 func (w *watched) Read(dst []float32) (int, error) {
+	w.reading.Store(time.Now().UnixNano())
+	defer w.reading.Store(0)
 	defer w.begin()()
-	return w.stream.Read(dst)
+	n, err := w.stream.Read(dst)
+	if err != nil && !errors.Is(err, io.EOF) {
+		w.failureMu.Lock()
+		w.failureErr = err
+		w.failureMu.Unlock()
+		if w.failed != nil {
+			select {
+			case w.failed <- err:
+			default:
+			}
+		}
+	}
+	return n, err
 }
 
 func (w *watched) SetPosition(frame int64) error {
+	w.positioning.Store(true)
+	defer w.positioning.Store(false)
 	defer w.begin()()
-	return w.stream.SetPosition(frame)
+	err := w.stream.SetPosition(frame)
+	if err != nil {
+		// 音频层会把定位失败变成无原因结束，必须在这里保留原始错误。
+		w.failureMu.Lock()
+		w.failureErr = err
+		w.failureMu.Unlock()
+		if w.failed != nil {
+			select {
+			case w.failed <- err:
+			default:
+			}
+		}
+	}
+	return err
 }
 
 func (w *watched) begin() func() {
@@ -47,4 +85,10 @@ func (w *watched) begin() func() {
 func (w *watched) starved() bool {
 	since := w.since.Load()
 	return since != 0 && w.now().UnixNano()-since >= int64(starvedAfter)
+}
+
+func (w *watched) failure() error {
+	w.failureMu.Lock()
+	defer w.failureMu.Unlock()
+	return w.failureErr
 }

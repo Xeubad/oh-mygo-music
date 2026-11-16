@@ -2,7 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +154,43 @@ func TestAggregateSettingsSubmitAsOneValidatedChange(t *testing.T) {
 		t.Fatalf("非法修改破坏上一份设置: %q", got)
 	}
 	_ = a
+}
+
+// 设置中的重载重新打开当前曲目，但不改变队列、进度或原来的暂停状态。
+func TestAggregateSettingsReloadKeepsCurrentTrackAndPosition(t *testing.T) {
+	a, _, tt, post := aggregateApp(t)
+	streamSource := newFakeSource(a.library.id)
+	audioPath, err := filepath.Abs(filepath.Join("..", "player", "testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan struct{}, 8)
+	streamSource.stream = func(id, quality string) (*music.Stream, error) {
+		opened <- struct{}{}
+		return &music.Stream{URL: "file:///" + filepath.ToSlash(audioPath)}, nil
+	}
+	a.pl.Source = func(string) music.Source { return streamSource }
+	a.pl.Restore(player.Session{
+		Queue: []music.Track{{ID: "one", Source: a.library.id}, {ID: "two", Source: a.library.id}},
+		Order: []int{0, 1}, At: 0, Position: 1000,
+	})
+	until(t, post, func() bool { return a.pl.Ready() && !a.pl.Loading() })
+	<-opened
+	tt.Frame()
+	until(t, post, func() bool { return a.aggregateEdits[a.library].loaded })
+	tt.Frame()
+	if err := tt.Click("Reload Current Track"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, post, func() bool { return a.pl.Ready() && !a.pl.Loading() })
+	select {
+	case <-opened:
+	default:
+		t.Fatal("重载没有重新打开当前曲目")
+	}
+	if a.pl.Playing() || a.pl.Current().ID != "one" || len(a.pl.Queue()) != 2 || a.pl.Queue()[1].ID != "two" || a.pl.Position() < 990*time.Millisecond {
+		t.Fatalf("重载改变了播放意图、位置或队列：playing=%v position=%v queue=%+v", a.pl.Playing(), a.pl.Position(), a.pl.Queue())
+	}
 }
 
 // 标题相同不构成录音证据；用户在实际列表中明确选两首曲目后才能关联。
@@ -557,6 +596,78 @@ func TestAggregateCachedPlaylistCanBeSelectedFromHome(t *testing.T) {
 	}
 	if _, err := src.Aggregate("selectList", map[string]any{"platform": "wy", "accountID": "account-a", "listID": "missing", "selected": true}); err == nil {
 		t.Fatal("尚未完整缓存的列表可以纳入")
+	}
+}
+
+type aggregateRefreshSource struct {
+	*fakeSource
+	refreshes  chan string
+	refreshed  bool
+	refreshErr error
+}
+
+func (s *aggregateRefreshSource) Aggregate(action string, input map[string]any) (json.RawMessage, error) {
+	if action == "refresh" {
+		s.refreshed = true
+		s.refreshes <- action
+		return nil, s.refreshErr
+	}
+	return json.RawMessage(`[]`), nil
+}
+
+// 手动云刷新与本机重载分开；点击后采用新首页，但不能改动已排好的播放队列。
+func TestAggregateCloudRefreshPreservesQueue(t *testing.T) {
+	aggregateCloudRefreshTest(t, false)
+}
+
+// 某列表失败不应遮住其他列表已成功提交的新内容，同时清楚保留错误提示。
+func TestAggregateCloudRefreshPartialSuccessIsVisible(t *testing.T) {
+	aggregateCloudRefreshTest(t, true)
+}
+
+func aggregateCloudRefreshTest(t *testing.T, partial bool) {
+	t.Helper()
+	a := newTestApp()
+	post := posts(a)
+	src := &aggregateRefreshSource{fakeSource: fake(a), refreshes: make(chan string, 1)}
+	if partial {
+		src.refreshErr = errors.New("部分列表读取失败")
+	}
+	src.home = func() (*music.Browse, error) {
+		name := "旧快照"
+		if src.refreshed {
+			name = "已刷新歌曲"
+		}
+		return &music.Browse{Sections: []music.Section{{Tracks: []music.Track{{ID: "track", Name: name}}}}}, nil
+	}
+	a.library.src = src
+	a.library.home, _ = src.Home()
+	a.library.started = true
+	a.library.homeAt = time.Now()
+	a.route = route{page: pageHome, src: a.library.id}
+	a.pl.Restore(player.Session{Queue: []music.Track{{ID: "queued", Name: "原队列", Source: a.library.id}}, Order: []int{0}, At: 0})
+	tt := ui.NewTester(func(c *ui.Context) { a.aggregateLibrary(c, a.library, paletteFor(c.Theme()), false) }, 1100, 900)
+	tt.Frame()
+	view := a.aggregateViews[a.library]
+	until(t, post, func() bool { return view.listsLoaded && !view.loadingLists })
+	tt.Frame()
+	if err := tt.Click("Refresh Cloud Lists"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, post, func() bool { return !view.busy })
+	select {
+	case <-src.refreshes:
+	default:
+		t.Fatal("按钮只重载本机缓存，没有发起云端刷新")
+	}
+	if (view.err != "") != partial {
+		t.Fatal("云刷新没有准确反馈部分失败")
+	}
+	if a.library.home.Sections[0].Tracks[0].Name != "已刷新歌曲" {
+		t.Fatal("云刷新没有展示已成功更新的内容")
+	}
+	if current := a.pl.Current(); current == nil || current.ID != "queued" {
+		t.Fatal("云刷新改变了当前播放队列")
 	}
 }
 

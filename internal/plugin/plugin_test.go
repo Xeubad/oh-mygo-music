@@ -31,6 +31,17 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "the reason it stopped")
 		os.Exit(1)
 	}
+	if os.Getenv(echoEnv) == "diagnostic" {
+		// 同时回传原文与输出诊断，验证宿主不能为脱敏而改写插件通信。
+		sc := bufio.NewScanner(os.Stdin)
+		// 长行需要穿过真实管道分块，不能先被夹具默认的 64 KiB 上限截断。
+		sc.Buffer(make([]byte, 64*1024), 64*1024*1024)
+		for sc.Scan() {
+			fmt.Fprintln(os.Stderr, sc.Text())
+			fmt.Println("echo:" + sc.Text())
+		}
+		return
+	}
 	if os.Getenv(echoEnv) != "" {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {

@@ -136,6 +136,7 @@ type app struct {
 	lyricAt      int
 	lyricTrack   string
 	lyricDisplay lyricDisplayCache
+	stageDisplay stageLyricCache
 	sharing      *shareDraft
 	queueList    ui.ListState
 	queueAt      int // the row of the queue pane last scrolled to, -1 while it is hidden

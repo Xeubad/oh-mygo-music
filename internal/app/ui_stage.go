@@ -94,7 +94,7 @@ func spaceWords(shapes []wordShape, widths []float32, gap float32) {
 func (a *app) stage(c *ui.Context, tr *music.Track, accent ui.Color) {
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
-	lines = a.displayedLyrics(tr, lines)
+	lines = a.stageLyrics(tr, lines)
 	w, h := c.Size()
 	f := min(64, max(36, w*0.045))
 	box := ui.Box(c.Key("stage")).Grow(1)

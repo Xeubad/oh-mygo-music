@@ -9,6 +9,47 @@ import (
 	"mygo-music/internal/music"
 )
 
+// 新检测取得已保存的当前时间；无效联合修改不污染旧设置，旧快照也不会被后续保存改写。
+func TestAggregateTimingReadsAtomicSettingsWithoutChangingSnapshots(t *testing.T) {
+	p := loadAggregate(t)
+	if _, err := p.Aggregate("configure", map[string]any{
+		"candidateTimeoutMs": 100, "stallTimeoutMs": 200, "recoveryTimeoutMs": 800,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := p.PlaybackTiming(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Aggregate("configure", map[string]any{
+		"candidateTimeoutMs": 150, "stallTimeoutMs": 900, "recoveryTimeoutMs": 800,
+	}); err == nil {
+		t.Fatal("冲突时间设置被保存")
+	}
+	afterInvalid, err := p.PlaybackTiming(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterInvalid.CandidateTimeoutMs != 100 || afterInvalid.StallTimeoutMs != 200 || afterInvalid.RecoveryTimeoutMs != 800 {
+		t.Fatalf("无效修改污染了生效设置：%+v", afterInvalid)
+	}
+	if _, err := p.Aggregate("configure", map[string]any{
+		"candidateTimeoutMs": 150, "stallTimeoutMs": 300, "recoveryTimeoutMs": 900,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := p.PlaybackTiming(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.CandidateTimeoutMs != 150 || latest.StallTimeoutMs != 300 || latest.RecoveryTimeoutMs != 900 {
+		t.Fatalf("新检测没有取得联合保存后的当前时间：%+v", latest)
+	}
+	if first.CandidateTimeoutMs != 100 || first.StallTimeoutMs != 200 || first.RecoveryTimeoutMs != 800 {
+		t.Fatalf("已经取得的检测快照被后续设置改写：%+v", first)
+	}
+}
+
 // 每一档先耗尽已声明支持的同版来源，再按普通音质路径降至用户下限。
 func TestAggregateQualityPlanOrdersDeclaredSourcesBeforeDowngrading(t *testing.T) {
 	p := loadAggregate(t)

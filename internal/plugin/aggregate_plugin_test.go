@@ -23,8 +23,9 @@ func TestAggregatePluginLoadsReadOnly(t *testing.T) {
 	if account != nil {
 		t.Fatalf("合成插件不能虚构已登录的云端账号: %+v", account)
 	}
-	if p.Can("signIn") || p.Can("signOut") {
-		t.Fatal("未接入的平台不应在来源设置中暴露无效登录操作")
+	// 扫码和退出已接入；只读约束针对云端内容写入，不应隐藏有效账号入口。
+	if !p.Can("signIn") || !p.Can("signOut") {
+		t.Fatal("已接入的账号能力必须在来源设置中提供登录与退出操作")
 	}
 	page, err := p.Home()
 	if err != nil {

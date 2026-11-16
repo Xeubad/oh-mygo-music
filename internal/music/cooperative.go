@@ -8,6 +8,9 @@ import (
 // ErrPlaybackBlocked 仅由服务明确给出的全局停止原因触发，不能由裸 HTTP 状态推断。
 var ErrPlaybackBlocked = errors.New("automatic playback is blocked")
 
+// 版本身份不可靠时需用户重选，不属于歌曲失败或插件配置故障。
+var ErrRecordingSelectionRequired = errors.New("select the recording again")
+
 // PlaybackCandidate 只引用已确认同录音的既有来源，不授予额外搜索权限。
 type PlaybackCandidate struct {
 	ID        string `json:"id"`
@@ -42,6 +45,18 @@ type CandidateStream struct {
 type CooperativeSource interface {
 	PlaybackPlan(ctx context.Context, id, quality, roundID string) (*PlaybackPlan, error)
 	ResolveCandidate(ctx context.Context, id, roundID string, candidate PlaybackCandidate) (*CandidateStream, error)
+}
+
+// PlaybackTiming 只包含新检测需要的时间设置，不重新选择来源或音质。
+type PlaybackTiming struct {
+	CandidateTimeoutMs int64 `json:"candidateTimeoutMs,omitempty"`
+	StallTimeoutMs     int64 `json:"stallTimeoutMs,omitempty"`
+	RecoveryTimeoutMs  int64 `json:"recoveryTimeoutMs,omitempty"`
+}
+
+// PlaybackTimingSource 可选；旧来源继续沿用开播计划中的时间设置。
+type PlaybackTimingSource interface {
+	PlaybackTiming(ctx context.Context) (*PlaybackTiming, error)
 }
 
 // CandidateValiditySource 只收紧已冻结的候选，不重建计划或重置本轮截止时间。

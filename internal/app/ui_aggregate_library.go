@@ -33,18 +33,25 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 	}
 	ui.Column(c.Key("aggregate-library")).Gap(10).Children(func() {
 		ui.Text(c, T("MyGo Music Aggregate")).FontSize(22).FontWeight(700)
-		ui.Text(c, T("Cloud account access is not configured; local snapshots only.")).FontSize(12).TextColor(p.muted)
+		ui.Text(c, T("NetEase account lists can be refreshed after sign-in; playback is not connected.")).FontSize(12).TextColor(p.muted)
 		ui.Row(c.Key("aggregate-controls")).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Select(c.Key("aggregate-kind"), &view.kind, []string{"All", "Liked", "Playlists"}).Label(T("Content")).Width(140).Disabled(view.busy)
 			ui.Select(c.Key("aggregate-platform"), &view.platform, append([]string{"All"}, platforms...)).Label(T("Platform")).Width(120).Disabled(view.busy)
 			ui.Select(c.Key("aggregate-list"), &view.list, append([]string{"All"}, lists...)).Label(T("Source List")).Width(180).Disabled(view.busy)
 			ui.TextInput(c.Key("aggregate-query"), &view.query).Label(T("Filter Tracks")).Width(220).Disabled(view.busy)
+
+		})
+
+		ui.Row(c.Key("aggregate-refresh-controls")).Gap(8).AlignItems(ui.Center).Children(func() {
+			if ui.Button(c.Key("refresh-cloud-lists"), T("Refresh Cloud Lists")).Disabled(view.busy).Clicked() {
+				a.aggregateLibraryFetch(lib, src, true)
+			}
 			if ui.Button(c.Key("reload-local-cache"), T("Reload Cached Data")).Disabled(view.busy).Clicked() {
 				a.aggregateLibraryReload(lib, src)
 			}
 		})
 		if view.busy {
-			ui.Text(c, T("Updating recording links…")).FontSize(12).TextColor(p.muted)
+			ui.Text(c, T("Updating aggregate data…")).FontSize(12).TextColor(p.muted)
 		}
 		if view.err != "" {
 			ui.Text(c, view.err).FontSize(12).TextColor(p.accent).LineHeight(1.4)
@@ -392,6 +399,10 @@ func (a *app) aggregateLibrarySelectList(lib *library, src aggregateSource, view
 }
 
 func (a *app) aggregateLibraryReload(lib *library, src aggregateSource) {
+	a.aggregateLibraryFetch(lib, src, false)
+}
+
+func (a *app) aggregateLibraryFetch(lib *library, src aggregateSource, cloud bool) {
 	if a.aggregateViews == nil {
 		a.aggregateViews = map[*library]*aggregateView{}
 	}
@@ -405,6 +416,11 @@ func (a *app) aggregateLibraryReload(lib *library, src aggregateSource) {
 	}
 	view.busy, view.err = true, ""
 	go func() {
+		var refreshErr error
+		if cloud {
+			// 每张列表独立提交，部分失败后仍读取已成功更新的本机快照。
+			_, refreshErr = src.Aggregate("refresh", nil)
+		}
 		home, err := src.Home()
 		var raw json.RawMessage
 		var lists []aggregateList
@@ -421,6 +437,9 @@ func (a *app) aggregateLibraryReload(lib *library, src aggregateSource) {
 				return
 			}
 			view.lists, view.listsLoaded, lib.home = lists, true, home
+			if refreshErr != nil {
+				view.err = refreshErr.Error()
+			}
 		})
 	}()
 }

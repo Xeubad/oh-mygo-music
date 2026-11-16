@@ -2,6 +2,7 @@ package player_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -704,6 +705,401 @@ export function resolveCandidate({id}) { throw new Error("failed:"+id); }
 	}
 }
 
+// 加载中开启随机播放后，失败应从当前项的新位置继续，不能重复当前项而漏掉另一首。
+func TestCooperativeShuffleDuringLoadingSkipsFromCurrentPosition(t *testing.T) {
+	src := cooperativePlugin(t, `
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) { throw new Error("failed:"+id); }
+`)
+	p, posts := cooperativePlayer(src)
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 1)
+	p.ToggleShuffle()
+	finishLoading(t, p, posts)
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited []string `json:"visited"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[two one]" || p.Playing() || p.Current().ID != "one" || p.Err() != "failed:one" || len(p.Queue()) != 2 {
+		t.Fatalf("加载中重排导致重复或漏试：visited=%v current=%+v error=%q", state.Visited, p.Current(), p.Err())
+	}
+}
+
+// 关闭随机播放改变后续顺序时，同一失败区间仍应跳过已失败位置，继续尚未尝试的一首。
+func TestCooperativeShuffleKeepsFailedQueuePositions(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) {
+ if(id!=="one") throw new Error("failed:"+id);
+ return {stream:{url:%s}};
+}
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.Restore(player.Session{
+		Queue: []music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}, {ID: "three", Source: "cooperative"}},
+		Order: []int{0, 2, 1}, At: 0, Shuffle: true,
+	})
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Playing() {
+		t.Fatalf("固定乱序会话未能暂停恢复：error=%q", p.Err())
+	}
+	p.Next()
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for p.Current().ID != "two" {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatalf("没有从 three 推进到 two：current=%+v error=%q", p.Current(), p.Err())
+		}
+	}
+	p.ToggleShuffle()
+	finishLoading(t, p, posts)
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited []string `json:"visited"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[one three two one]" || !p.Ready() || !p.Playing() || p.Current().ID != "one" || p.Err() != "" || len(p.Queue()) != 3 {
+		t.Fatalf("重排丢失失败位置记录：visited=%v current=%+v ready=%v error=%q", state.Visited, p.Current(), p.Ready(), p.Err())
+	}
+}
+
+// 退出广播会按播放顺序重建队列索引，失败记录必须跟随原位置而不是误伤另一首。
+func TestCooperativeEndRadioKeepsFailedQueuePositions(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) {
+ if(id!=="three") throw new Error("failed:"+id);
+ return {stream:{url:%s}};
+}
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.Restore(player.Session{
+		Queue: []music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}, {ID: "three", Source: "cooperative"}, {ID: "four", Source: "cooperative"}},
+		Order: []int{2, 0, 3, 1}, At: 0, Shuffle: true,
+	})
+	finishLoading(t, p, posts)
+	p.AttachRadio("station", func(func([]music.Track)) {})
+	p.Next()
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for p.Current().ID != "four" {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatalf("没有从 one 推进到 four：current=%+v error=%q", p.Current(), p.Err())
+		}
+	}
+	p.EndRadio()
+	finishLoading(t, p, posts)
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited []string `json:"visited"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	q := p.Queue()
+	if fmt.Sprint(state.Visited) != "[three one four three]" || !p.Ready() || !p.Playing() || p.Current().ID != "three" || p.Err() != "" || p.Radio() != "" || len(q) != 3 || q[0].ID != "three" || q[1].ID != "one" || q[2].ID != "four" {
+		t.Fatalf("广播截断丢失失败位置归属：visited=%v current=%+v queue=%v error=%q", state.Visited, p.Current(), q, p.Err())
+	}
+}
+
+// 同曲重复入队是两个独立位置，失败去重不能按歌曲 ID 把第二项一并跳过。
+func TestCooperativeFailedDuplicateQueuePositionsStayIndependent(t *testing.T) {
+	src := cooperativePlugin(t, `
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) { throw new Error("failed:"+id); }
+`)
+	p, posts := cooperativePlayer(src)
+	p.PlayQueue([]music.Track{{ID: "same", Source: "cooperative", Name: "first"}, {ID: "same", Source: "cooperative", Name: "second"}}, 0)
+	finishLoading(t, p, posts)
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited []string `json:"visited"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[same same]" || p.Playing() || p.Current().Name != "second" || p.Err() != "failed:same" || len(p.Queue()) != 2 {
+		t.Fatalf("重复入队位置被错误合并：visited=%v current=%+v error=%q", state.Visited, p.Current(), p.Err())
+	}
+}
+
+// 普通来源失败同样延续当前失败区间，重排后不能重试前面的聚合失败项。
+func TestCooperativeShuffleKeepsFailuresAcrossLegacySource(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) {
+ if(id!=="one") throw new Error("failed:"+id);
+ return {stream:{url:%s}};
+}
+`, audioPath(t, "seek.flac")))
+	dir := t.TempDir()
+	for name, contents := range map[string]string{
+		"plugin.json": `{"id":"legacy"}`,
+		"index.js":    `let visited=[]; export function aggregate() { return {visited}; } export function stream({id}) { visited.push(id); throw new Error("failed:"+id); }`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy, err := plugin.Load(dir, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(legacy.Close)
+	p, posts := cooperativePlayer(src)
+	p.Source = func(id string) music.Source {
+		if id == "legacy" {
+			return legacy
+		}
+		return src
+	}
+	p.SetVolume(0)
+	p.Restore(player.Session{
+		// 成功后的下一项仍走协作路径，避免普通来源的合法预取混入失败区间请求记录。
+		Queue: []music.Track{{ID: "one", Source: "cooperative"}, {ID: "after", Source: "cooperative"}, {ID: "two", Source: "legacy"}, {ID: "three", Source: "cooperative"}},
+		Order: []int{0, 3, 2, 1}, At: 0, Shuffle: true,
+	})
+	finishLoading(t, p, posts)
+	if !p.Ready() || p.Playing() {
+		t.Fatalf("固定混合队列未能暂停恢复：error=%q", p.Err())
+	}
+	p.Next()
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for p.Current().ID != "two" {
+		select {
+		case fn := <-posts:
+			fn()
+		case <-timer.C:
+			t.Fatalf("没有推进到普通来源：current=%+v error=%q", p.Current(), p.Err())
+		}
+	}
+	p.ToggleShuffle()
+	finishLoading(t, p, posts)
+	for _, check := range []struct {
+		src  *plugin.Plugin
+		want string
+	}{{src, "[one three one]"}, {legacy, "[two]"}} {
+		raw, err := check.src.Aggregate("state", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var state struct {
+			Visited []string `json:"visited"`
+		}
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(state.Visited) != check.want {
+			t.Fatalf("混合来源丢失失败区间：source=%s visited=%v want=%s", check.src.Info().ID, state.Visited, check.want)
+		}
+	}
+	if !p.Ready() || !p.Playing() || p.Current().ID != "one" || p.Err() != "" || len(p.Queue()) != 4 {
+		t.Fatalf("混合来源失败后没有继续合法位置：current=%+v error=%q", p.Current(), p.Err())
+	}
+}
+
+// 两首全失败时每个队列位置只尝试一次，不能为凑默认三首阈值绕回重试。
+func TestCooperativeShortQueueStopsAfterEachPositionFails(t *testing.T) {
+	src := cooperativePlugin(t, `
+let visited=[], candidates=[];
+export function aggregate() { return {visited,candidates}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"a",platform:"wy",trackID:id,quality:"flac"},
+ {id:"b",platform:"tx",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id,candidate}) { candidates.push(id+":"+candidate.id); throw new Error("failed:"+id); }
+`)
+	p, posts := cooperativePlayer(src)
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited    []string `json:"visited"`
+		Candidates []string `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[one two]" || fmt.Sprint(state.Candidates) != "[one:a one:b two:a two:b]" || p.Playing() || p.Current().ID != "two" || p.Err() != "failed:two" || len(p.Queue()) != 2 {
+		t.Fatalf("短队列绕回或候选被重复计为歌曲失败：visited=%v candidates=%v current=%+v error=%q", state.Visited, state.Candidates, p.Current(), p.Err())
+	}
+}
+
+// 可调阈值按歌曲最终失败计数；候选耗尽不提前停，高于队列长度也不绕回。
+func TestCooperativeQueueHonorsConfiguredFailureLimit(t *testing.T) {
+	for _, tc := range []struct {
+		limit   int
+		want    string
+		current string
+	}{
+		{1, "[one]", "one"},
+		{2, "[one two]", "two"},
+		{5, "[one two three four]", "four"},
+	} {
+		t.Run(fmt.Sprint(tc.limit), func(t *testing.T) {
+			src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[];
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {consecutiveFailureLimit:%d,targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"a",platform:"wy",trackID:id,quality:"flac"},
+ {id:"b",platform:"tx",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) { throw new Error("failed:"+id); }
+`, tc.limit))
+			p, posts := cooperativePlayer(src)
+			p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}, {ID: "three", Source: "cooperative"}, {ID: "four", Source: "cooperative"}}, 0)
+			finishLoading(t, p, posts)
+			raw, err := src.Aggregate("state", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state struct {
+				Visited []string `json:"visited"`
+			}
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprint(state.Visited) != tc.want || p.Playing() || p.Current().ID != tc.current || p.Err() != "failed:"+tc.current || len(p.Queue()) != 4 {
+				t.Fatalf("可调阈值未按最终失败歌曲生效：limit=%d visited=%v current=%+v error=%q", tc.limit, state.Visited, p.Current(), p.Err())
+			}
+		})
+	}
+}
+
+// 其他项成功后只在正常顺序再次轮到时重试失败项，不能立即跳回或永久屏蔽。
+func TestCooperativeFailedPositionRetriesAfterNormalQueueCycle(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[], first=0;
+export function aggregate() { return {visited}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ if(id==="one") first++;
+ return {consecutiveFailureLimit:2,targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id,platform:"wy",trackID:id,quality:"flac"}]};
+}
+export function resolveCandidate({id}) {
+ if(id==="one" && first===1 || id==="three") throw new Error("failed:"+id);
+ return {stream:{url:%s}};
+}
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.CycleRepeat()
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}, {ID: "three", Source: "cooperative"}, {ID: "four", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	if !p.Ready() || !p.Playing() || p.Current().ID != "two" {
+		t.Fatalf("没有在下一项成功开播：current=%+v error=%q", p.Current(), p.Err())
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for _, next := range []string{"four", "one"} {
+		p.Seek(p.Duration())
+		for p.Current().ID != next || !p.Ready() || p.Loading() {
+			select {
+			case fn := <-posts:
+				fn()
+			case <-timer.C:
+				t.Fatalf("成功后未按正常顺序轮转到 %s：current=%+v error=%q", next, p.Current(), p.Err())
+			}
+		}
+	}
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited []string `json:"visited"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(state.Visited) != "[one two three four one]" || !p.Playing() || p.Err() != "" || len(p.Queue()) != 4 {
+		t.Fatalf("失败项被立即重试或永久屏蔽：visited=%v current=%+v error=%q", state.Visited, p.Current(), p.Err())
+	}
+}
+
 // 获取计划本身失败也属于本项最终失败，不能绕过默认连续三首限制。
 func TestCooperativePlanFailuresStopAfterThreeTracks(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
@@ -722,6 +1118,90 @@ export function resolveCandidate() { throw new Error("unexpected resolve"); }
 				t.Fatalf("plan failure bypassed failure limit: current=%+v playing=%v error=%q", p.Current(), p.Playing(), p.Err())
 			}
 		})
+	}
+}
+
+// 旧队列缺失可靠录音身份时必须停留并提示重选，不能当作歌曲不可用而自动跳过。
+func TestAggregateUnknownRecordingStaysOnQueuedTrack(t *testing.T) {
+	dir := os.Getenv("MM_AGGREGATE_PLUGIN")
+	if dir == "" {
+		t.Skip("设置 MM_AGGREGATE_PLUGIN 后运行真实聚合播放器验收")
+	}
+	for _, id := range []string{
+		"old-track-id",
+		"aggregate:{",
+		`aggregate:{"version":0,"sources":[]}`,
+		`aggregate:{"version":1,"identity":{"platform":"wy","accountID":"a","trackID":"missing"},"sources":[{"platform":"tx","accountID":"b","trackID":"one"}]}`,
+	} {
+		t.Run(id, func(t *testing.T) {
+			src, err := plugin.Load(dir, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(src.Close)
+			p, posts := cooperativePlayer(src)
+			queue := []music.Track{{ID: id, Source: src.Info().ID, Name: "old"}, {ID: "next-old-id", Source: src.Info().ID, Name: "next"}}
+			p.PlayQueue(queue, 0)
+			finishLoading(t, p, posts)
+			if p.Loading() || p.Playing() || p.Ready() || p.Current().ID != id || p.Err() != "聚合队列缺少可靠的版本信息，请重新选择曲目" {
+				t.Fatalf("旧身份项被跳过或缺少重选提示：current=%+v ready=%v playing=%v error=%q", p.Current(), p.Ready(), p.Playing(), p.Err())
+			}
+			got := p.Queue()
+			if len(got) != 2 || got[0].ID != id || got[1].ID != "next-old-id" || got[0].PlaybackID != "" {
+				t.Fatalf("版本不明时改变了原始队列：%+v", got)
+			}
+		})
+	}
+}
+
+// 资格校验明确报告全局封锁时立即终止，不能跳过该候选后继续解析其他来源。
+func TestCooperativeBlockedDuringCandidateValidationStopsRound(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[], checked=[], resolved=[];
+export function aggregate() { return {visited,checked,resolved}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"a",platform:"wy",trackID:id,quality:"flac"},
+ {id:"b",platform:"tx",trackID:id,quality:"flac"}]};
+}
+export function candidateValid({candidate}) {
+ checked.push(candidate.id);
+ if(candidate.id==="a") throw Object.assign(new Error("key revoked"),{code:"playbackBlocked"});
+ return true;
+}
+export function resolveCandidate({candidate}) { resolved.push(candidate.id); return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	var blocked error
+	var failedSource string
+	failures := 0
+	p.Failed = func(source string, err error) {
+		failures++
+		failedSource, blocked = source, err
+	}
+	p.SetVolume(0)
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited  []string `json:"visited"`
+		Checked  []string `json:"checked"`
+		Resolved []string `json:"resolved"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if p.Ready() || p.Playing() || p.Current().ID != "one" || p.Err() == "" || failures != 1 || failedSource != "cooperative" || !errors.Is(blocked, music.ErrPlaybackBlocked) || len(p.Queue()) != 2 || fmt.Sprint(state.Visited) != "[one]" || fmt.Sprint(state.Checked) != "[a]" || len(state.Resolved) != 0 {
+		t.Fatalf("资格校验全局封锁后仍尝试来源或推进队列：visited=%v checked=%v resolved=%v current=%+v ready=%v error=%q", state.Visited, state.Checked, state.Resolved, p.Current(), p.Ready(), p.Err())
 	}
 }
 

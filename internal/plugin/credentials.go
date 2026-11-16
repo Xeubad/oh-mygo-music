@@ -53,6 +53,7 @@ func (p *Plugin) credentialGet(_ *moejs.Realm, _ moejs.Value, args []moejs.Value
 	if !found {
 		return moejs.Undefined(), nil
 	}
+	p.diagnostics.remember(value)
 	return moejs.String(value), nil
 }
 
@@ -66,6 +67,8 @@ func (p *Plugin) credentialSet(_ *moejs.Realm, _ moejs.Value, args []moejs.Value
 	if !value.IsString() || len(value.String()) > credentialBlobLimit {
 		return moejs.Undefined(), errCredentialArgument
 	}
+	// 保存失败后脚本也可能记录本次输入，诊断保护不能以持久写入成功为前提。
+	p.diagnostics.remember(value.String())
 	target := p.credentialTarget(key)
 	// 无法确认原值时拒绝持久写入，让插件只在内存使用本次临时输入。
 	if _, _, err := systemCredentials.get(target); err != nil {

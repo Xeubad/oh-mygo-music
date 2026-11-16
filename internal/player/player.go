@@ -76,6 +76,8 @@ type Player struct {
 	loadCancel context.CancelFunc
 	// 暂停预加载尚未开播，首次播放必须重新检查撤销和原始版本资格。
 	cooperativePrepared bool
+	playback            *playbackAttempt
+	monitorCancel       context.CancelFunc
 
 	lyrics       []lyrics.Line
 	lyricsLoaded bool
@@ -167,8 +169,15 @@ func (p *Player) announce(t *music.Track, artwork []byte) {
 
 func (p *Player) ended() {
 	if p.repeat == RepeatOne {
+		if p.playback != nil {
+			// 只有真实正常结束才开启新一遍；错误仍走原播放的最终失败分支。
+			p.playback = &playbackAttempt{dir: p.playback.dir, policy: p.playback.policy}
+		}
 		p.out.Seek(0)
 		p.out.Play()
+		if p.playback != nil && p.playback.policy.candidate > 0 {
+			p.monitorDownload(p.gen, p.out, p.stream)
+		}
 		return
 	}
 	if p.at+1 >= len(p.order) && p.feed != nil {
@@ -176,6 +185,9 @@ func (p *Player) ended() {
 		return
 	}
 	if p.at+1 >= len(p.order) && p.repeat == RepeatOff {
+		if p.playback != nil {
+			p.playback.completed = true
+		}
 		p.playing = false
 		p.sync()
 		return
@@ -255,8 +267,19 @@ func (p *Player) EndRadio() {
 	p.endRadio()
 	if p.at >= 0 && p.at+1 < len(p.order) {
 		kept := make([]music.Track, p.at+1)
+		var failed map[int]bool
 		for i, k := range p.order[:p.at+1] {
 			kept[i] = p.queue[k]
+			if p.playback != nil && p.playback.failed[k] {
+				if failed == nil {
+					failed = make(map[int]bool)
+				}
+				failed[i] = true
+			}
+		}
+		if p.playback != nil {
+			// 截断按播放顺序重建索引，失败记录只跟随保留下来的原队列位置。
+			p.playback.failed = failed
 		}
 		p.queue, p.order = kept, make([]int, len(kept))
 		for i := range p.order {
@@ -444,6 +467,26 @@ func (p *Player) Jump(i int) {
 	}
 }
 
+// Reload reapplies source settings without starting a new song playback.
+func (p *Player) Reload() {
+	if p.track == nil || p.at < 0 || p.at >= len(p.order) {
+		return
+	}
+	if p.playback != nil {
+		// 重载是用户要求的新解析，不是新一遍播放；已用机会保留，旧恢复截止不继承。
+		p.playback.dir, p.playback.skipped = stay, 0
+		p.playback.recovery = nil
+		if p.playback.completed {
+			// 末尾没有可准备的首帧；释放旧音频但保留结束位置，等明确重播再解析。
+			from := p.Position()
+			p.stop()
+			p.pending = from
+			return
+		}
+	}
+	p.loadPlayback(p.at, 0, stay, p.playing, p.Position(), p.playback)
+}
+
 // TogglePlay pauses, fading out, or plays, fading in.
 func (p *Player) TogglePlay() {
 	if p.remote != nil && p.remote.started {
@@ -466,13 +509,28 @@ func (p *Player) TogglePlay() {
 			p.playing = !p.playing
 			p.sync()
 		case len(p.order) > 0:
-			// Again, as for a track that couldn't play.
-			p.loadSkipping(max(p.at, 0), 0, stay, true, p.pending)
+			from := p.pending
+			// 手动续播沿用已用机会，只有真实正常结束后的明确重播才从头开始新一遍。
+			if p.playback != nil {
+				if p.playback.completed {
+					p.playback = &playbackAttempt{dir: stay, policy: p.playback.policy}
+					from = 0
+				} else {
+					p.playback.dir, p.playback.skipped = stay, 0
+					p.playback.recovery = nil
+				}
+			}
+			p.loadPlayback(max(p.at, 0), 0, stay, true, from, p.playback)
 		}
 		return
 	}
 	out := p.out
 	if p.playing {
+		// 暂停立即隔离旧检测回调；续播不能继承暂停期间累计的停滞时间。
+		if p.monitorCancel != nil {
+			p.monitorCancel()
+			p.monitorCancel = nil
+		}
 		p.playing = false
 		p.fade.fade(0, fadeOut, func() {
 			p.post(func() {
@@ -485,17 +543,27 @@ func (p *Player) TogglePlay() {
 		p.sync()
 		return
 	}
+	// 正常播完后从头播放属于新一遍；普通暂停续播仍保留已用的恢复机会。
+	if p.playback != nil {
+		if p.playback.completed {
+			p.playback = &playbackAttempt{dir: stay, policy: p.playback.policy}
+			out.Seek(0)
+		} else {
+			p.playback.dir, p.playback.skipped = stay, 0
+			p.playback.recovery = nil
+		}
+	}
 	if p.cooperativePrepared {
-		p.loadSkipping(p.at, 0, stay, true, p.Position())
+		p.loadPlayback(p.at, 0, stay, true, p.Position(), p.playback)
 		return
 	}
 	p.playing = true
 	p.record()
 	if !p.seeking && !out.Playing() {
-		if out.Position() >= out.Duration()-time.Second {
-			out.Seek(0)
-		}
 		out.Play()
+	}
+	if p.playback != nil && p.playback.policy.candidate > 0 {
+		p.monitorDownload(p.gen, out, p.stream)
 	}
 	p.fade.fade(1, fadeIn, nil)
 	p.sync()
@@ -513,6 +581,10 @@ func (p *Player) Seek(t time.Duration) {
 	if p.remote != nil && p.remote.started {
 		p.remoteSeek(t)
 		return
+	}
+	if p.playback != nil {
+		// 拖动是当前播放的定位意图，不是从头重播；清除完成标记但保留已用恢复机会。
+		p.playback.completed = false
 	}
 	if p.out == nil {
 		p.pending = t
@@ -618,6 +690,10 @@ func (p *Player) Levels() ([Bands]float32, bool) {
 }
 
 func (p *Player) stop() {
+	if p.monitorCancel != nil {
+		p.monitorCancel()
+		p.monitorCancel = nil
+	}
 	if p.loadCancel != nil {
 		p.loadCancel()
 		p.loadCancel = nil
@@ -683,6 +759,13 @@ func (p *Player) record() {
 // loadSkipping loads the track at order[at], to play or not, from from,
 // skipping those that cannot play the way dir goes: skipped of them so far.
 func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duration) {
+	p.loadPlayback(at, skipped, dir, play, from, nil)
+}
+
+func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duration, playback *playbackAttempt) {
+	if playback == nil {
+		playback = &playbackAttempt{dir: dir, skipped: skipped}
+	}
 	t := p.queue[p.order[at]]
 	src := p.sourceOf(&t)
 	if was := p.remote; was != nil && was.started && p.playing && (src == nil || src.Info().ID != was.src.Info().ID) {
@@ -692,6 +775,7 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 	p.stop()
 	p.gen++
 	gen := p.gen
+	p.playback = playback
 	p.at = at
 	p.track = &t
 	p.loading, p.playing, p.err = true, play, ""
@@ -728,28 +812,53 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 				pre.close()
 			}
 			// 重播沿用该位置成功开播的版本；展示、分享及未播位置仍保留原始入队身份。
-			playback := t
+			requested := t
 			if t.PlaybackID != "" {
-				playback.ID = t.PlaybackID
+				requested.ID = t.PlaybackID
 			}
-			_, _, err = p.openCooperative(ctx, cooperative, playback, quality, func(attempt context.Context, info *music.Stream, s stream, handoff func(func() error) error) error {
-				committed := make(chan error, 1)
-				p.post(func() {
-					if attempt.Err() != nil || gen != p.gen {
-						committed <- context.Canceled
-						return
+			_, _, err = p.openCooperative(ctx, cooperative, requested, quality, playback.recovery, func(attempt context.Context, info *music.Stream, s stream, policy playbackPolicy, handoff func(func() error) error) error {
+				type preparationResult struct {
+					position time.Duration
+					retry    bool
+					err      error
+				}
+				for {
+					// 元数据不等于开播；定位改变时仍用同一流和候选截止重新准备，不能领取新预算。
+					prepared, err := prepareCooperativeStream(attempt, s, from)
+					if err != nil {
+						return err
 					}
-					err := p.startLoaded(attempt, gen, s, info, quality, handoff)
-					if err == nil {
-						p.loading = false
+					committed := make(chan preparationResult, 1)
+					p.post(func() {
+						if attempt.Err() != nil || gen != p.gen {
+							committed <- preparationResult{err: context.Canceled}
+							return
+						}
+						// pending 只在主线程读取；准备期间的最新定位不能被旧首帧覆盖。
+						if p.pending != from {
+							committed <- preparationResult{position: p.pending, retry: true}
+							return
+						}
+						playback.policy = policy
+						err := p.startLoaded(attempt, gen, prepared, info, quality, handoff)
+						if err == nil {
+							p.loading = false
+						}
+						committed <- preparationResult{err: err}
+					})
+					select {
+					case result := <-committed:
+						if !result.retry {
+							return result.err
+						}
+						from = result.position
+						// 首帧准备已消费样本；回到零也必须真正复位，不能接着读旧位置。
+						if err := s.SetPosition(0); err != nil {
+							return err
+						}
+					case <-attempt.Done():
+						return attempt.Err()
 					}
-					committed <- err
-				})
-				select {
-				case err := <-committed:
-					return err
-				case <-attempt.Done():
-					return attempt.Err()
 				}
 			})
 			p.post(func() {
@@ -758,7 +867,7 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 				}
 				if err != nil {
 					p.loading = false
-					p.loadFailed(t.Source, err, at, skipped, dir)
+					p.loadFailed(t.Source, err, skipped, dir)
 				}
 			})
 			return
@@ -774,7 +883,7 @@ func (p *Player) loadSkipping(at, skipped, dir int, play bool, from time.Duratio
 			}
 			p.loading = false
 			if err != nil {
-				p.loadFailed(t.Source, err, at, skipped, dir)
+				p.loadFailed(t.Source, err, skipped, dir)
 				return
 			}
 			p.startLoaded(context.Background(), gen, s, info, quality, nil)
@@ -790,7 +899,8 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 	}
 	p.stream, p.info = s, info
 	p.gain = normGain(info)
-	p.watch = &watched{stream: s, now: p.now, ended: func() { p.post(func() {}) }}
+	watch := &watched{stream: s, now: p.now, ended: func() { p.post(func() {}) }, failed: make(chan error, 1)}
+	p.watch = watch
 	out := audio.NewPlayer(p.watch)
 	p.out = out
 	from := p.pending
@@ -818,12 +928,21 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 	out.OnEnd(func() {
 		p.post(func() {
 			if gen == p.gen && p.out == out {
+				if handoff != nil && watch.failure() != nil {
+					// 由监控统一固定检测快照，结束回调不能另起一套时间规则。
+					return
+				}
 				p.ended()
 			}
 		})
 	})
 	if from > 0 {
-		out.Seek(from)
+		position := from
+		if prepared, ok := s.(*preparedStream); ok {
+			// 准备阶段向下取整到样本；交接使用同一帧，不能四舍五入后重新估算定位。
+			position = time.Duration(prepared.frame) * time.Second / time.Duration(prepared.SampleRate())
+		}
+		out.Seek(position)
 	}
 	// 主线程已进入回调也不代表及时开播，设备准备与定位后仍须重查原截止。
 	if err := ctx.Err(); err != nil {
@@ -850,7 +969,15 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 		return err
 	}
 	p.cooperativePrepared = handoff != nil && !p.playing
+	if handoff != nil && p.playing {
+		p.monitorDownload(gen, out, s)
+	}
 	if p.playing {
+		if p.playback != nil {
+			// 成功开播截断连续失败链，但同一次播放的恢复机会不能因此返还。
+			p.playback.skipped = 0
+			p.playback.failed = nil
+		}
 		if handoff != nil && info.PlaybackID != "" {
 			// 只记录已成功开播的位置，重复入队的同 ID 曲目不能继承这个版本。
 			p.track.PlaybackID = info.PlaybackID
@@ -902,10 +1029,10 @@ func (p *Player) loadLyrics(gen int, src music.Source, t music.Track) {
 	}()
 }
 
-// loadFailed says why the track at order[at] can't play, and skips it the way
+// loadFailed says why the current track can't play, and skips it the way
 // dir goes, unless it stays, nothing in the queue can play, or the listener has
 // to do something first, which would stop the next track too.
-func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
+func (p *Player) loadFailed(source string, err error, skipped, dir int) {
 	if errors.Is(err, errCandidateInvalidated) {
 		// 撤销关联或退出属于用户改变来源资格，停留当前项等待新的播放意图。
 		p.err, p.playing = "", false
@@ -913,6 +1040,12 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 		return
 	}
 	p.err = errorText(err)
+	if errors.Is(err, music.ErrRecordingSelectionRequired) {
+		// 保留旧队列和当前项供用户重新选择，不能计失败后自动扫描其他版本。
+		p.playing = false
+		p.sync()
+		return
+	}
 	if errors.Is(err, music.ErrSignIn) || errors.Is(err, music.ErrSetup) || errors.Is(err, music.ErrPlaybackBlocked) {
 		p.playing = false
 		if p.Failed != nil {
@@ -931,9 +1064,20 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 		}
 	}
 	if dir != stay && skipped+1 < limit {
-		next := (at + dir + len(p.order)) % len(p.order)
-		p.loadSkipping(next, skipped+1, dir, p.playing, 0)
-		return
+		failed := p.playback.failed
+		if failed == nil {
+			failed = make(map[int]bool)
+			p.playback.failed = failed
+		}
+		failed[p.order[p.at]] = true
+		// 重排只改变顺序，不开始新的失败区间；跳过已失败位置，但保留重复入队的独立位置。
+		for step := 1; step < len(p.order); step++ {
+			next := (p.at + dir*step + len(p.order)) % len(p.order)
+			if !failed[p.order[next]] {
+				p.loadPlayback(next, skipped+1, dir, p.playing, 0, &playbackAttempt{dir: dir, skipped: skipped + 1, failed: failed})
+				return
+			}
+		}
 	}
 	p.playing = false
 	p.sync()
@@ -943,6 +1087,11 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 // the source's error is one the app knows.
 func errorText(err error) string {
 	switch {
+	case errors.Is(err, music.ErrRecordingSelectionRequired):
+		if reason := music.Reason(err); reason != "" {
+			return reason
+		}
+		return err.Error()
 	case errors.Is(err, errNoSource):
 		return i18n.T("The plugin of this song is gone")
 	case errors.Is(err, music.ErrUnavailable):
@@ -975,7 +1124,7 @@ func (p *Player) open(src music.Source, t music.Track, quality string, pre *ahea
 		if pre != nil {
 			pre.close()
 		}
-		return p.openCooperative(context.Background(), cooperative, t, quality, nil)
+		return p.openCooperative(context.Background(), cooperative, t, quality, nil, nil)
 	}
 	var dl *download
 	var info *music.Stream

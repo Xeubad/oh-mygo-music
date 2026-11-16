@@ -74,7 +74,7 @@ func (p *Plugin) installHost(v *vm) error {
 		for i, a := range args {
 			parts[i] = a.String()
 		}
-		log.Printf("plugin %s: %s", p.manifest.ID, strings.Join(parts, " "))
+		log.Printf("plugin %s: %s", p.manifest.ID, p.diagnostics.redact(strings.Join(parts, " ")))
 		return moejs.Undefined(), nil
 	}
 	if err := rt.SetGlobal("console", map[string]any{
@@ -288,6 +288,8 @@ func (p *Plugin) webSignIn(v *vm) native {
 				if err != nil {
 					return moejs.Undefined(), err
 				}
+				// 登录结果在持久保存前也可能被脚本记录，须先纳入诊断保护。
+				p.diagnostics.remember(cookie)
 				return rt.FromGo(map[string]any{"cookie": cookie})
 			})
 		}()
@@ -364,7 +366,8 @@ func (p *Plugin) spawn(v *vm) native {
 		cmd := exec.Command(command, cmdArgs...)
 		cmd.Dir = p.dir
 		hideConsole(cmd)
-		stderr := &tailWriter{to: logWriter{p.manifest.ID}}
+		diagnostics := &logWriter{plugin: p}
+		stderr := &tailWriter{to: diagnostics}
 		cmd.Stderr = stderr
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
@@ -395,6 +398,8 @@ func (p *Plugin) spawn(v *vm) native {
 			}
 			close(pr.lines)
 			err := cmd.Wait()
+			// Wait 已等待 stderr 复制结束，此时才能安全输出未换行的最后一段。
+			diagnostics.flush()
 			v.mu.Lock()
 			delete(v.programs, pr)
 			v.mu.Unlock()
@@ -492,10 +497,48 @@ func (w *tailWriter) String() string {
 	return string(w.tail)
 }
 
-// logWriter puts what a program writes to stderr in the log, under its plugin.
-type logWriter struct{ id string }
+// logWriter 只处理诊断副本；tailWriter 保留原始 stderr 供脚本通信。
+// exec.Cmd 串行写入此 writer，Wait 返回后才刷新末行，不与 Write 并发。
+type logWriter struct {
+	plugin     *Plugin
+	line       []byte
+	discarding bool
+}
 
-func (w logWriter) Write(b []byte) (int, error) {
-	log.Printf("plugin %s: %s", w.id, strings.TrimRight(string(b), "\n"))
-	return len(b), nil
+const diagnosticLineLimit = 8 << 10
+
+func (w *logWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	for len(b) > 0 {
+		end := bytes.IndexByte(b, '\n')
+		part := b
+		if end >= 0 {
+			part = b[:end]
+		}
+		if !w.discarding {
+			if len(part) > diagnosticLineLimit-len(w.line) {
+				// 不能只输出截断前缀：凭据或签名地址可能横跨任意管道分块。
+				w.line = nil
+				w.discarding = true
+			} else {
+				w.line = append(w.line, part...)
+			}
+		}
+		if end < 0 {
+			break
+		}
+		w.flush()
+		b = b[end+1:]
+	}
+	return n, nil
+}
+
+func (w *logWriter) flush() {
+	if w.discarding {
+		log.Printf("plugin %s: [REDACTED LONG LINE]", w.plugin.manifest.ID)
+	} else if len(w.line) > 0 {
+		log.Printf("plugin %s: %s", w.plugin.manifest.ID, w.plugin.diagnostics.redact(string(w.line)))
+	}
+	w.line = w.line[:0]
+	w.discarding = false
 }
