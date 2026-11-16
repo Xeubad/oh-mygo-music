@@ -326,7 +326,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 			a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() {
 				a.paneTabs(c)
 				a.stageStyleButton(c)
-				a.lyricDisplayButton(c, tr)
+				a.stageLanguageButton(c)
 			})
 			a.stage(c, tr, accent)
 			a.stageBar(c, tr, art, accent)

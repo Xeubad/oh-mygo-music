@@ -68,6 +68,8 @@ type settings struct {
 	// Folia's classic, or the id of another of its visualizers.
 	StageStyle     string `json:"stageStyle,omitempty"`
 	StageIntensity string `json:"stageIntensity,omitempty"`
+	// 律动独立选择原文、译文或双语；空值保留原有双语呈现。
+	StageLanguage string `json:"stageLanguage,omitempty"`
 	// PlayerStyle is how Now Playing shows the song playing
 	// (playerStyles): empty for its cover, or a retro player's id.
 	PlayerStyle string `json:"playerStyle,omitempty"`
