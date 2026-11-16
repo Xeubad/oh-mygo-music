@@ -1,12 +1,17 @@
 package plugin
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
+	"log"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+
+	"mygo-music/internal/music"
 )
 
 // 凭据通过真实脚本保存后，重新加载插件仍可读取，而不依赖普通 storage。
@@ -246,6 +251,189 @@ export function signOut() { host.credentials.remove("resolver-key"); }
 	check(err)
 	store.removeErr = nativeErr
 	check(p.SignOut())
+}
+
+// 脚本把已读取凭据带入日志或解析异常时，宿主诊断仍须脱敏并保留错误分类。
+func TestCredentialsDoNotLeakThroughPlaybackDiagnostics(t *testing.T) {
+	const secret = "synthetic-diagnostic-secret-never-log"
+	previous := systemCredentials
+	systemCredentials = &memoryCredentials{values: map[string]string{}}
+	t.Cleanup(func() { systemCredentials = previous })
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+	p := load(t, plain, `
+export function signIn() {
+ host.credentials.set("resolver", "synthetic-diagnostic-secret-never-log");
+ return {};
+}
+export function resolveCandidate() {
+ const key = host.credentials.get("resolver");
+ console.error("resolve failed", key);
+ throw Object.assign(new Error("key denied: " + key), {code:"playbackBlocked"});
+}
+`)
+	if _, err := p.SignIn(); err != nil {
+		t.Fatal("合成凭据保存失败")
+	}
+	_, err := p.ResolveCandidate(context.Background(), "one", "diagnostic-round", music.PlaybackCandidate{ID: "candidate", Platform: "wy", TrackID: "one", Quality: "flac"})
+	if !errors.Is(err, music.ErrPlaybackBlocked) {
+		t.Fatal("脱敏不能丢失全局封锁分类")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+		t.Fatal("已读取凭据泄漏到解析异常或宿主日志")
+	}
+	if !strings.Contains(music.Reason(err), "key denied") || !strings.Contains(logs.String(), "resolve failed") {
+		t.Fatal("脱敏不能丢弃全部安全诊断上下文")
+	}
+}
+
+// 登录凭据常以 JSON 保存；脚本拆出 Cookie 或 token 后，诊断仍不能泄漏字段原文。
+func TestCredentialsStructuredValuesStayPrivate(t *testing.T) {
+	previous := systemCredentials
+	systemCredentials = &memoryCredentials{values: map[string]string{}}
+	t.Cleanup(func() { systemCredentials = previous })
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+	p := load(t, plain, `
+export function signIn() {
+ host.credentials.set("account", JSON.stringify({cookie:"sid=synthetic-structured-cookie", session:{token:"synthetic-structured-token"}}));
+ return {};
+}
+export function resolveCandidate() {
+ const saved = JSON.parse(host.credentials.get("account"));
+ console.error("account request failed", saved.cookie);
+ throw Object.assign(new Error("account denied: " + saved.session.token), {code:"signIn"});
+}
+`)
+	if _, err := p.SignIn(); err != nil {
+		t.Fatal("合成结构化凭据保存失败")
+	}
+	_, err := p.ResolveCandidate(context.Background(), "one", "diagnostic-round", music.PlaybackCandidate{ID: "candidate", Platform: "wy", TrackID: "one", Quality: "flac"})
+	if !errors.Is(err, music.ErrSignIn) {
+		t.Fatal("结构化凭据脱敏丢失登录错误分类")
+	}
+	for _, output := range []string{err.Error(), logs.String()} {
+		if strings.Contains(output, "synthetic-structured-cookie") || strings.Contains(output, "synthetic-structured-token") {
+			t.Fatal("拆出的登录凭据泄漏到异常或日志")
+		}
+	}
+	if !strings.Contains(music.Reason(err), "account denied") || !strings.Contains(logs.String(), "account request failed") {
+		t.Fatal("结构化凭据脱敏丢失安全诊断上下文")
+	}
+}
+
+// 网页登录返回的 Cookie 在保存前就可能被记录，宿主应先保护诊断而不改写登录结果。
+func TestCredentialsWebSignInDiagnosticsStayPrivate(t *testing.T) {
+	const cookie = "SID=synthetic-web-login-cookie"
+	previousSignIn := webSignIn
+	SetWebSignIn(func(WebSignIn) (string, error) { return cookie, nil })
+	t.Cleanup(func() { SetWebSignIn(previousSignIn) })
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+	p := load(t, `{"id":"x","permissions":{"network":["login.invalid"]}}`, `
+let saved;
+export async function signIn() {
+ const {cookie} = await host.webSignIn({url:"https://login.invalid/login", cookiesOf:"https://login.invalid/", until:["SID"]});
+ saved = cookie;
+ console.error("login response received", cookie);
+ return {id:cookie, name:"synthetic account"};
+}
+export function resolveCandidate() {
+ throw Object.assign(new Error("login rejected: " + saved), {code:"signIn"});
+}
+`)
+	account, err := p.SignIn()
+	if err != nil || account.ID != cookie {
+		t.Fatal("诊断保护改变了网页登录返回值")
+	}
+	_, err = p.ResolveCandidate(context.Background(), "one", "diagnostic-round", music.PlaybackCandidate{ID: "candidate", Platform: "wy", TrackID: "one", Quality: "flac"})
+	if !errors.Is(err, music.ErrSignIn) {
+		t.Fatal("网页登录诊断丢失登录错误分类")
+	}
+	for _, output := range []string{err.Error(), logs.String()} {
+		if strings.Contains(output, "synthetic-web-login-cookie") {
+			t.Fatal("网页登录返回的 Cookie 泄漏到异常或日志")
+		}
+	}
+	if !strings.Contains(music.Reason(err), "login rejected") || !strings.Contains(logs.String(), "login response received") {
+		t.Fatal("网页登录脱敏丢失安全诊断上下文")
+	}
+}
+
+// Cookie 常被脚本拆成单项或令牌使用，两种登录入口都不能只保护完整串。
+func TestCredentialsCookiePartsStayPrivate(t *testing.T) {
+	const cookie = "SID=synthetic-cookie-session; CSRF=synthetic-cookie-csrf"
+	for _, entry := range []struct {
+		name string
+		read string
+	}{
+		{"web", `const {cookie} = await host.webSignIn({url:"https://login.invalid/login", cookiesOf:"https://login.invalid/", until:["SID"]});`},
+		{"stored", `host.credentials.set("account", JSON.stringify({cookie:"SID=synthetic-cookie-session; CSRF=synthetic-cookie-csrf"})); const {cookie} = JSON.parse(host.credentials.get("account"));`},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			previousStore := systemCredentials
+			systemCredentials = &memoryCredentials{values: map[string]string{}}
+			t.Cleanup(func() { systemCredentials = previousStore })
+			previousSignIn := webSignIn
+			SetWebSignIn(func(WebSignIn) (string, error) { return cookie, nil })
+			t.Cleanup(func() { SetWebSignIn(previousSignIn) })
+			var logs bytes.Buffer
+			previousOutput := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousOutput) })
+			p := load(t, `{"id":"x","permissions":{"network":["login.invalid"]}}`, `
+export async function signIn() {
+ `+entry.read+`
+ console.error("cookie request failed", cookie.split(";")[0]);
+ const csrf = cookie.split(";")[1].trim().split("=")[1];
+ throw Object.assign(new Error("cookie rejected: " + csrf), {code:"signIn"});
+}
+`)
+			_, err := p.SignIn()
+			if !errors.Is(err, music.ErrSignIn) {
+				t.Fatal("Cookie 拆分脱敏丢失登录错误分类")
+			}
+			for _, output := range []string{err.Error(), logs.String()} {
+				if strings.Contains(output, "synthetic-cookie-session") || strings.Contains(output, "synthetic-cookie-csrf") {
+					t.Fatal("Cookie 拆出的单项或令牌泄漏到异常或日志")
+				}
+			}
+			if !strings.Contains(music.Reason(err), "cookie rejected") || !strings.Contains(logs.String(), "cookie request failed") {
+				t.Fatal("Cookie 拆分脱敏丢失安全诊断上下文")
+			}
+		})
+	}
+}
+
+// 临时解析密钥不经过系统凭据库，也必须在进入脚本前纳入诊断保护。
+func TestCredentialsTemporaryResolverKeyDiagnostics(t *testing.T) {
+	const secret = "synthetic-temporary-key-never-log"
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+	p := load(t, plain, `
+export function aggregate({input}) {
+ console.warn("temporary key rejected", input.value);
+ throw Object.assign(new Error("cannot use temporary key: " + input.value), {code:"setup"});
+}
+`)
+	_, err := p.Aggregate("setResolverKey", map[string]any{"value": secret, "temporary": true})
+	if !errors.Is(err, music.ErrSetup) {
+		t.Fatal("临时密钥错误的设置分类丢失")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+		t.Fatal("临时解析密钥泄漏到脚本异常或宿主日志")
+	}
+	if !strings.Contains(music.Reason(err), "cannot use temporary key") || !strings.Contains(logs.String(), "temporary key rejected") {
+		t.Fatal("临时密钥脱敏丢失安全诊断上下文")
+	}
 }
 
 // 原生验证必须显式启用，只触及随机插件命名空间，并在失败时也删除合成凭据。

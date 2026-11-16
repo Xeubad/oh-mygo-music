@@ -166,6 +166,8 @@ type Plugin struct {
 	// level runs as it starts, and the host functions it calls take mu.
 	starting sync.Mutex
 
+	diagnostics diagnosticRedactor
+
 	mu               sync.Mutex // guards what follows
 	settings         map[string]string
 	storage          map[string]json.RawMessage
@@ -373,10 +375,11 @@ func (p *Plugin) Close() {
 
 // vm is a running plugin: only its loop's goroutine touches the runtime.
 type vm struct {
-	rt     *moejs.Runtime
-	loop   *eventloop.Loop
-	api    *webapi.API
-	helper moejs.Value // calls an export and reports how it went
+	rt          *moejs.Runtime
+	loop        *eventloop.Loop
+	api         *webapi.API
+	helper      moejs.Value // calls an export and reports how it went
+	diagnostics *diagnosticRedactor
 
 	inFlight int // on the loop: calls not answered yet
 
@@ -432,7 +435,7 @@ func (p *Plugin) running() (*vm, error) {
 	// Not under mu: the top level may read its storage or settings.
 	v, err := p.start()
 	if err != nil {
-		return nil, fmt.Errorf("starting plugin %s: %w", p.manifest.ID, err)
+		return nil, fmt.Errorf("starting plugin %s: %w", p.manifest.ID, diagnosticError{err: err, redactor: &p.diagnostics})
 	}
 	p.mu.Lock()
 	p.vm = v
@@ -455,7 +458,7 @@ func (p *Plugin) start() (*vm, error) {
 	}
 	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: memoryLimit})
 	loop, err := eventloop.New(rt, eventloop.Options{
-		OnError: func(err error) { log.Printf("plugin %s: %v", p.manifest.ID, err) },
+		OnError: func(err error) { log.Printf("plugin %s: %s", p.manifest.ID, p.diagnostics.redact(err.Error())) },
 	})
 	if err != nil {
 		return nil, err
@@ -467,7 +470,7 @@ func (p *Plugin) start() (*vm, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &vm{rt: rt, loop: loop, api: api, programs: map[*program]bool{}}
+	v := &vm{rt: rt, loop: loop, api: api, programs: map[*program]bool{}, diagnostics: &p.diagnostics}
 	if err := p.installHost(v); err != nil {
 		api.Close()
 		return nil, err
@@ -573,7 +576,7 @@ func (v *vm) ask(method string, params []byte, got func(answer)) moejs.Value {
 		return moejs.Undefined(), nil
 	})
 	badFn := rt.Function("bad", 2, func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-		done(answer{err: asError(moejs.Arg(args, 0).String(), moejs.Arg(args, 1).String())})
+		done(answer{err: asError(moejs.Arg(args, 0).String(), v.diagnostics.redact(moejs.Arg(args, 1).String()))})
 		return moejs.Undefined(), nil
 	})
 	abort, err := rt.CallFunction(v.helper, moejs.Undefined(), fn, arg, okFn, badFn)

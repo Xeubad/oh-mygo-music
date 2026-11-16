@@ -10,6 +10,12 @@ import (
 // Aggregate 是聚合来源的可选控制接口；普通来源不需要实现这些本机设置操作。
 // 返回公开状态，避免界面读取插件普通存储或凭据来拼装自己的业务状态。
 func (p *Plugin) Aggregate(action string, input map[string]any) (json.RawMessage, error) {
+	if action == "setResolverKey" {
+		// 临时密钥不经过凭据库，必须在脚本有机会记录输入之前保护诊断。
+		if value, ok := input["value"].(string); ok {
+			p.diagnostics.remember(value)
+		}
+	}
 	if action == "revokeLink" || action == "logout" {
 		unlock, err := p.lockCandidateGate(context.Background())
 		if err != nil {
