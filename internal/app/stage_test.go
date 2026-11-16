@@ -1,6 +1,9 @@
 package app
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,6 +13,83 @@ import (
 	"mygo-music/internal/music"
 	"mygo-music/internal/player"
 )
+
+// 从菜单切换新增样式和强度后，保存重载仍保留选择、火花和原歌词时间。
+func TestStageChoicesSurviveRestart(t *testing.T) {
+	a, tester, _ := playingApp()
+	a.settings.path = filepath.Join(t.TempDir(), "settings.json")
+	a.settings.StageSparks = true
+	a.nowPlaying, a.npPane = true, paneStage
+	tester.Move(600, 400)
+	tester.Advance(time.Second)
+	for _, choice := range []string{"Spotlight", "Gentle", "Sound Wave", "Lively", "Balanced"} {
+		if err := tester.Click("Stage Style"); err != nil {
+			t.Fatal(err)
+		}
+		if err := tester.ChooseMenuItem(choice); err != nil {
+			t.Fatal(err)
+		}
+		tester.Frame()
+		wantIntensity := map[string]string{"Gentle": "gentle", "Lively": "lively", "Balanced": "standard"}[choice]
+		if wantIntensity != "" && a.settings.StageIntensity != wantIntensity {
+			t.Fatalf("chose %s: intensity %q, want %q", choice, a.settings.StageIntensity, wantIntensity)
+		}
+	}
+	data, err := os.ReadFile(a.settings.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := newTestApp()
+	if err := json.Unmarshal(data, &restarted.settings); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.settings.StageStyle != "wave" || !restarted.settings.StageSparks {
+		t.Fatalf("lost choices after restart: %+v", restarted.settings)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored["stageIntensity"] != "standard" {
+		t.Fatalf("lost intensity: %s", data)
+	}
+	if lines, _ := a.pl.Lyrics(); lines[1].At != 10*time.Second || lines[1].Words[0].Start != 10*time.Second {
+		t.Fatal("display choices changed lyric timing")
+	}
+}
+
+// 五种律动使用简体与译文的统一播放显示，声波强度只影响动效。
+func TestStageStylesUseDisplayedLyrics(t *testing.T) {
+	a, tester, _ := playingApp()
+	a.settings.LyricsScript = "simplified"
+	a.settings.ChineseLyrics = map[string]bool{}
+	a.settings.ChineseLyrics[a.lyricKey(a.pl.Current())] = true
+	a.pl.SetLyrics(lyrics.Build("[00:01]我們一起看風景\n[00:10]那是我們的旅程", "[00:01]讓我們一起看風景\n[00:10]那是我們的旅程"))
+	a.pl.Hold(2 * time.Second)
+	a.nowPlaying, a.npPane = true, paneStage
+	tester.SetPreferences(ui.Preferences{ReduceMotion: true})
+	for _, style := range []string{"", "partita", "tilt", "spotlight", "wave"} {
+		a.settings.StageStyle = style
+		tester.Frame()
+		if !tester.HasText("我们一起看风景") || !tester.HasText("让我们一起看风景") {
+			t.Errorf("style %q did not use the shared display: %q", style, tester.Texts())
+		}
+	}
+}
+
+// 减少动态效果时只在当前或下一句真实歌词边界后重绘。
+func TestStageBoundaryWaitTracksLyrics(t *testing.T) {
+	lines := []lyrics.Line{
+		{At: time.Second, End: 5 * time.Second, Words: []lyrics.Word{{Start: time.Second, End: 2 * time.Second}, {Start: 3 * time.Second, End: 4 * time.Second}}},
+		{At: 10 * time.Second, End: 14 * time.Second, Words: []lyrics.Word{{Start: 10 * time.Second, End: 12 * time.Second}}},
+	}
+	if got := stageBoundaryWait(lines, 0, 2500*time.Millisecond); got != 520*time.Millisecond {
+		t.Fatalf("wait %s, want next word at 3s", got)
+	}
+	if got := stageBoundaryWait(lines, 0, 5*time.Second); got != 1020*time.Millisecond {
+		t.Fatalf("wait %s, want bounded idle wait", got)
+	}
+}
 
 // Choosing a style from the stage's menu sets its lyrics in it, and
 // choosing Flow goes back to the classic.

@@ -1,0 +1,101 @@
+package plugin
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+
+	"github.com/MoeForge/moejs"
+)
+
+// Windows GENERIC 凭据 blob 最多 5*512 字节，在公共边界检查以保持测试与系统一致。
+const credentialBlobLimit = 5 * 512
+
+// 只允许操作系统保护的存储；测试也只在这个边界替换，不绕过真实 JS 宿主。
+type credentialStore interface {
+	get(target string) (string, bool, error)
+	set(target, value string) error
+	remove(target string) error
+}
+
+var systemCredentials credentialStore = platformCredentials{}
+
+var (
+	errCredentialsUnavailable = errors.New("system credential store unavailable")
+	errCredentialsUnsupported = errors.New("system credentials unsupported on this platform")
+	errCredentialArgument     = errors.New("credentials require a nonempty string key and a string value of at most 2560 bytes")
+)
+
+func (p *Plugin) credentialTarget(key string) string {
+	// Windows 目标名不区分大小写，分别哈希插件和键，避免大小写及分隔符跨域碰撞。
+	id := sha256.Sum256([]byte(p.manifest.ID))
+	name := sha256.Sum256([]byte(key))
+	return "MyGo-Music/Plugin/" + hex.EncodeToString(id[:]) + "/" + hex.EncodeToString(name[:])
+}
+
+func credentialKey(args []moejs.Value) (string, error) {
+	key := moejs.Arg(args, 0)
+	if !key.IsString() || key.String() == "" {
+		return "", errCredentialArgument
+	}
+	return key.String(), nil
+}
+
+func (p *Plugin) credentialGet(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	key, err := credentialKey(args)
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	value, found, err := systemCredentials.get(p.credentialTarget(key))
+	if err != nil {
+		return moejs.Undefined(), credentialError(err)
+	}
+	if !found {
+		return moejs.Undefined(), nil
+	}
+	return moejs.String(value), nil
+}
+
+func (p *Plugin) credentialSet(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	key, err := credentialKey(args)
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	value := moejs.Arg(args, 1)
+	// 不把 undefined、对象等隐式转成秘密，也不在校验错误中回显用户输入。
+	if !value.IsString() || len(value.String()) > credentialBlobLimit {
+		return moejs.Undefined(), errCredentialArgument
+	}
+	target := p.credentialTarget(key)
+	// 无法确认原值时拒绝持久写入，让插件只在内存使用本次临时输入。
+	if _, _, err := systemCredentials.get(target); err != nil {
+		return moejs.Undefined(), credentialError(err)
+	}
+	err = systemCredentials.set(target, value.String())
+	return moejs.Undefined(), credentialError(err)
+}
+
+func (p *Plugin) credentialRemove(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	key, err := credentialKey(args)
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	target := p.credentialTarget(key)
+	// 与临时密钥的写保护一致：库不可读绝不靠删除重置，保留原值待恢复。
+	if _, _, err := systemCredentials.get(target); err != nil {
+		return moejs.Undefined(), credentialError(err)
+	}
+	err = systemCredentials.remove(target)
+	return moejs.Undefined(), credentialError(err)
+}
+
+func credentialError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errCredentialsUnsupported) {
+		return errCredentialsUnsupported
+	}
+	// 原生错误可能带目标、账户或密钥；不将其拼入脚本异常或宿主日志。
+	return errCredentialsUnavailable
+}

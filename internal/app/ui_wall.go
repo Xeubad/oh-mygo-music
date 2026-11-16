@@ -166,6 +166,7 @@ func (a *app) wallSong(c *ui.Context, tr *music.Track, art *artwork, top, h floa
 			})
 			a.artistLinks(c, tr, white.Alpha(0.6), white, true).FontSize(14).SingleLine()
 			lines, _ := pl.Lyrics()
+			lines = a.displayedLyrics(tr, lines)
 			if len(lines) == 0 {
 				return
 			}

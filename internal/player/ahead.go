@@ -56,6 +56,10 @@ func (p *Player) getAhead(quality string) {
 	if src == nil || src.Info().Playback == music.PlaybackRemote || p.Cache.has(t.Source, t.ID, quality) {
 		return
 	}
+	if _, cooperative := src.(music.CooperativeSource); cooperative && src.Can("playbackPlan") && src.Can("resolveCandidate") {
+		// 旧 Stream 预取没有轮次和取消，不能绕过聚合候选准入与原预算。
+		return
+	}
 	a := &ahead{source: t.Source, id: t.ID, quality: quality, done: make(chan struct{})}
 	p.ahead = a
 	go func() {

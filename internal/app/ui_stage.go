@@ -94,6 +94,7 @@ func spaceWords(shapes []wordShape, widths []float32, gap float32) {
 func (a *app) stage(c *ui.Context, tr *music.Track, accent ui.Color) {
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
+	lines = a.displayedLyrics(tr, lines)
 	w, h := c.Size()
 	f := min(64, max(36, w*0.045))
 	box := ui.Box(c.Key("stage")).Grow(1)
@@ -124,7 +125,11 @@ func (a *app) stage(c *ui.Context, tr *music.Track, accent ui.Color) {
 		if a.settings.StageStyle == "tilt" {
 			lead = tiltLead
 		}
-		stageNextFrame(c, lines, cur, pos, lead)
+		if c.Preferences().ReduceMotion {
+			c.After(stageBoundaryWait(lines, cur, pos))
+		} else {
+			stageNextFrame(c, lines, cur, pos, lead)
+		}
 	}
 
 	// Japanese lyrics are drawn in a Japanese font, kanji and kana alike;
@@ -142,10 +147,10 @@ func (a *app) stage(c *ui.Context, tr *music.Track, accent ui.Color) {
 			}
 			switch {
 			case cur < 0:
-				a.interlude(c, pos, 0, lines[0].At)
+				a.interlude(c, tr, accent, pos, 0, lines[0].At)
 			case cur+1 < len(lines) && pos > lines[cur].End+time.Second && lines[cur+1].At-lines[cur].End > 4*time.Second:
 				// A long break before the next line.
-				a.interlude(c, pos, lines[cur].End, lines[cur+1].At)
+				a.interlude(c, tr, accent, pos, lines[cur].End, lines[cur+1].At)
 			default:
 				a.stageLine(c, &lines[cur], pos, f, w, h, 1, accent)
 			}
@@ -161,6 +166,27 @@ func (a *app) stage(c *ui.Context, tr *music.Track, accent ui.Color) {
 			})
 		})
 	})
+}
+
+// Reduce Motion keeps lyric changes but sleeps between word boundaries.
+func stageBoundaryWait(lines []lyrics.Line, current int, position time.Duration) time.Duration {
+	wait := time.Second
+	for index := max(current, 0); index <= min(current+1, len(lines)-1); index++ {
+		line := lines[index]
+		for _, word := range line.Words {
+			for _, boundary := range []time.Duration{word.Start, word.End} {
+				if boundary > position {
+					wait = min(wait, boundary-position)
+				}
+			}
+		}
+		for _, boundary := range []time.Duration{line.At, line.End} {
+			if boundary > position {
+				wait = min(wait, boundary-position)
+			}
+		}
+	}
+	return max(20*time.Millisecond, wait+20*time.Millisecond)
 }
 
 // stageNextFrame asks for the next frame of the stage as soon as it
@@ -200,12 +226,21 @@ func stageNextFrame(c *ui.Context, lines []lyrics.Line, cur int, pos, lead time.
 // stageLine shows the words of l as they are at pos, the whole line at
 // opacity fade.
 func (a *app) stageLine(c *ui.Context, l *lyrics.Line, pos time.Duration, f, w, h, fade float32, accent ui.Color) {
+	if len(l.Words) == 0 {
+		ui.Column(c.Key(l.At)).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Padding(32, 64).Opacity(fade).PassThrough().Children(func() {
+			ui.Text(c, l.Text).FontSize(f).FontWeight(700).TextAlign(ui.Center).TextColor(white)
+		})
+		return
+	}
 	switch a.settings.StageStyle {
 	case "partita":
 		a.partitaLine(c, l, pos, f, h, fade, accent)
 		return
 	case "tilt":
-		tiltLine(c, l, pos, w, fade, accent, a.settings.StageSparks)
+		tiltLine(c, l, pos, w, fade, accent, a.settings.StageSparks, a.stageMotion(c))
+		return
+	case "spotlight", "wave":
+		a.stageFocusLine(c, l, pos, f, fade, accent)
 		return
 	}
 	seed := float64(l.At / time.Millisecond)
@@ -215,7 +250,7 @@ func (a *app) stageLine(c *ui.Context, l *lyrics.Line, pos time.Duration, f, w, 
 	lift := []float32{-0.14, 0, 0.12}[int(seed*2)%3] * h
 
 	ui.Row(c.Key(l.At)).Absolute().Top(0).Left(0).Right(0).Bottom(0).Padding(0, w*0.1).
-		Wrap().Justify(justify).AlignContent(ui.Center).AlignItems(ui.Center).Translate(0, lift).
+		Wrap().Justify(justify).AlignContent(ui.Center).AlignItems(ui.Center).Translate(0, lift*a.stageMotion(c)).
 		Opacity(fade).PassThrough().Children(func() {
 		for i, word := range l.Words {
 			a.stageWord(c.Key(i), word, shapes[i], pos, f, accent)
@@ -259,16 +294,18 @@ func (a *app) stageWord(c *ui.Context, word lyrics.Word, s wordShape, pos time.D
 		glow = 1 - clamp01(after/0.9)
 	}
 
-	box := ui.Box(c).MarginEnd(s.margin).Translate(x, y).Rotate(rotate).Scale(scale, scale).Opacity(opacity)
+	motion := a.stageMotion(c)
+	scale = 1 + (scale-1)*motion
+	box := ui.Box(c).MarginEnd(s.margin).Translate(x*motion, y*motion).Rotate(rotate*motion).Scale(scale, scale).Opacity(opacity)
 	box.Children(func() {
 		text := ui.Text(c.Key("body"), word.Text).FontSize(f).FontWeight(800).NoWrap().TextColor(color)
-		if blur > 0.3 {
-			text.Blur(blur)
+		if blur*motion > 0.3 {
+			text.Blur(blur * motion)
 		}
 		if glow > 0.01 {
 			// The glow: the word again, in light, blurred around it.
 			ui.Text(c.Key("glow"), word.Text).Absolute().Top(0).Left(0).FontSize(f).FontWeight(800).NoWrap().
-				TextColor(accent.Alpha(0.85 * glow)).Blur(f * 0.2).PassThrough()
+				TextColor(accent.Alpha(min(1, 0.85*glow*motion))).Blur(f * 0.2).PassThrough()
 		}
 	})
 	if a.settings.StageSparks {
@@ -276,15 +313,23 @@ func (a *app) stageWord(c *ui.Context, word lyrics.Word, s wordShape, pos time.D
 	}
 }
 
-// interlude shows three dots breathing through a break, filling as the
-// next line nears.
-func (a *app) interlude(c *ui.Context, pos, from, to time.Duration) {
+// 间奏按播放位置衔接下一句；暂停或 Seek 不依赖壁钟，热评仍由上层淡入覆盖。
+func (a *app) interlude(c *ui.Context, track *music.Track, accent ui.Color, pos, from, to time.Duration) {
 	progress := clamp01(float32((pos - from).Seconds() / max(0.1, (to-from).Seconds())))
-	breath := 1 + 0.12*float32(math.Sin(float64(c.Now().UnixMilli())/420))
-	ui.Row(c.Key("interlude")).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Gap(18).PassThrough().Children(func() {
-		for i := range 3 {
-			lit := clamp01(progress*3 - float32(i))
-			ui.Box(c.Key(i)).Size(16, 16).Radius(8).Background(white.Alpha(0.2+0.7*lit)).Scale(breath, breath)
+	motion := a.stageMotion(c)
+	energy := float32(0)
+	if bands, available := a.pl.Levels(); available {
+		for _, value := range bands {
+			energy += value / float32(len(bands))
 		}
+	}
+	breath := 1 + motion*(0.018*float32(math.Sin(pos.Seconds()*1.1))+0.045*clamp01(energy))
+	ui.Column(c.Key("interlude")).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Gap(26).PassThrough().Children(func() {
+		ui.Box(c.Key("interlude-cover")).Scale(breath, breath).Children(func() { a.cover(c, track.Album.ImageURL, 400, 164, 18) })
+		ui.Box(c).Size(164, 2).Draw(func(p *ui.Painter, bounds ui.Rect) {
+			p.Fill(bounds, white.Alpha(0.15), 1)
+			bounds.W *= progress
+			p.Fill(bounds, accent.Alpha(0.8), 1)
+		})
 	})
 }

@@ -29,6 +29,21 @@ type Album struct {
 	Saved bool `json:"saved,omitempty"`
 }
 
+// AggregateSource is the raw account/list identity behind an aggregate track.
+type AggregateSource struct {
+	Platform  string `json:"platform"`
+	AccountID string `json:"accountID"`
+	TrackID   string `json:"trackID"`
+	ListID    string `json:"listID,omitempty"`
+	ListName  string `json:"listName,omitempty"`
+}
+
+// AggregateLink is an explicit manual relation edge between two source tracks.
+type AggregateLink struct {
+	Left  AggregateSource `json:"left"`
+	Right AggregateSource `json:"right"`
+}
+
 type Track struct {
 	ID string `json:"id"`
 	// Source is the ID of the source the track came from, which it plays
@@ -42,6 +57,12 @@ type Track struct {
 	URL string `json:"url,omitempty"`
 	// Unavailable says the listener can't play it, for a source that knows.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// 聚合曲目保留可播放来源的原始平台、账号、曲目 ID 与列表归属。
+	AggregateSources []AggregateSource `json:"aggregateSources,omitempty"`
+	AggregateLinks   []AggregateLink   `json:"aggregateLinks,omitempty"`
+	AggregateManual  bool              `json:"aggregateManual,omitempty"`
+	// 该队列位置成功开播的版本；不改原始 ID，也不传播到重复入队的其他位置。
+	PlaybackID string `json:"playbackID,omitempty"`
 
 	// An episode of a podcast is a track like any other, that says which show
 	// it's of, what it's about and when it came out, as the source has it.
@@ -245,14 +266,18 @@ type NavItem struct {
 // Stream is audio the app plays itself: what a source of PlaybackStream
 // answers for a track.
 type Stream struct {
-	URL     string            `json:"url"`
-	Type    string            `json:"type"` // mp3, flac, ogg, wav, m4a or aac
-	Quality string            `json:"quality,omitempty"`
-	BitRate int               `json:"bitRate,omitempty"`
-	Size    int64             `json:"size,omitempty"`
-	Peak    float64           `json:"peak,omitempty"`
-	Gain    float64           `json:"gain,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
+	// Platform 是经客户端选定并成功核验的候选平台，不是服务响应标签。
+	Platform string `json:"platform,omitempty"`
+	// 来自冻结候选，供成功交接后记录版本；不能直接信任解析服务响应。
+	PlaybackID string            `json:"playbackID,omitempty"`
+	URL        string            `json:"url"`
+	Type       string            `json:"type"` // mp3, flac, ogg, wav, m4a or aac
+	Quality    string            `json:"quality,omitempty"`
+	BitRate    int               `json:"bitRate,omitempty"`
+	Size       int64             `json:"size,omitempty"`
+	Peak       float64           `json:"peak,omitempty"`
+	Gain       float64           `json:"gain,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
 }
 
 // Lyrics are a track's words: as LRC, the simple way, or as timed Lines, which

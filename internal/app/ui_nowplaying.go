@@ -326,6 +326,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 			a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() {
 				a.paneTabs(c)
 				a.stageStyleButton(c)
+				a.lyricDisplayButton(c, tr)
 			})
 			a.stage(c, tr, accent)
 			a.stageBar(c, tr, art, accent)
@@ -346,7 +347,12 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 		// the controls.
 		side = max(coverSize, 280)
 		padX := npSideX(w)
-		a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() { a.paneTabs(c) })
+		a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() {
+			a.paneTabs(c)
+			if tr.ShowID == "" {
+				a.lyricDisplayButton(c, tr)
+			}
+		})
 		ui.Row(c).Grow(1).Padding(0, padX, 44, padX).Gap(72).AlignItems(ui.Stretch).Children(func() {
 			ui.Column(c).Width(side).Gap(0).Children(func() {
 				// The column sits in the middle of its room, but never
@@ -614,6 +620,7 @@ func (a *app) paneTab(c *ui.Context, i int, label string) {
 func (a *app) lyricsPane(c *ui.Context, tr *music.Track, h float32) {
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
+	lines = a.displayedLyrics(tr, lines)
 	if len(lines) == 0 {
 		col := ui.Column(c).Grow(1)
 		if loaded {

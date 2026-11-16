@@ -368,6 +368,19 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
+		row(T("Chinese Lyrics"), T("Use the same text in lyrics, visualizers and share cards"), func() {
+			labels, selected := make([]string, len(lyricScripts)), 0
+			for index, option := range lyricScripts {
+				labels[index] = option.label
+				if s.LyricsScript == option.id {
+					selected = index
+				}
+			}
+			if index, changed := choice(c, "lyrics-script", T("Chinese Lyrics"), labels, selected); changed {
+				s.LyricsScript = lyricScripts[index].id
+				a.saveLyricChoices()
+			}
+		})
 		row(T("Now Playing Style"), T("Show the song playing as its cover, or as a record or a cassette turning as it plays"), func() {
 			labels := make([]string, len(playerStyles))
 			at := 0
@@ -676,6 +689,7 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 		for _, st := range info.Settings {
 			a.sourceSetting(c.Key(st.Key), lib, st, p)
 		}
+		a.aggregateSettings(c.Key("aggregate"), lib, p)
 	})
 }
 
