@@ -101,6 +101,10 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 			guard.stop()
 			cancel()
 			last = err
+			// 全局停止同样可能来自资格校验，不能将其当作单个来源失效后继续。
+			if errors.Is(err, music.ErrPlaybackBlocked) {
+				return nil, nil, err
+			}
 			continue
 		}
 		if cached, ok := fallbacks[identity]; ok {

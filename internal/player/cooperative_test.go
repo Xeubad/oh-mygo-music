@@ -2,6 +2,7 @@ package player_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -887,6 +888,57 @@ func TestAggregateUnknownRecordingStaysOnQueuedTrack(t *testing.T) {
 				t.Fatalf("版本不明时改变了原始队列：%+v", got)
 			}
 		})
+	}
+}
+
+// 资格校验明确报告全局封锁时立即终止，不能跳过该候选后继续解析其他来源。
+func TestCooperativeBlockedDuringCandidateValidationStopsRound(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+let visited=[], checked=[], resolved=[];
+export function aggregate() { return {visited,checked,resolved}; }
+export function playbackPlan({id}) {
+ visited.push(id);
+ return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+ {id:"a",platform:"wy",trackID:id,quality:"flac"},
+ {id:"b",platform:"tx",trackID:id,quality:"flac"}]};
+}
+export function candidateValid({candidate}) {
+ checked.push(candidate.id);
+ if(candidate.id==="a") throw Object.assign(new Error("key revoked"),{code:"playbackBlocked"});
+ return true;
+}
+export function resolveCandidate({candidate}) { resolved.push(candidate.id); return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+	p, posts := cooperativePlayer(src)
+	var blocked error
+	var failedSource string
+	failures := 0
+	p.Failed = func(source string, err error) {
+		failures++
+		failedSource, blocked = source, err
+	}
+	p.SetVolume(0)
+	p.PlayQueue([]music.Track{{ID: "one", Source: "cooperative"}, {ID: "two", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	raw, err := src.Aggregate("state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Visited  []string `json:"visited"`
+		Checked  []string `json:"checked"`
+		Resolved []string `json:"resolved"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if p.Ready() || p.Playing() || p.Current().ID != "one" || p.Err() == "" || failures != 1 || failedSource != "cooperative" || !errors.Is(blocked, music.ErrPlaybackBlocked) || len(p.Queue()) != 2 || fmt.Sprint(state.Visited) != "[one]" || fmt.Sprint(state.Checked) != "[a]" || len(state.Resolved) != 0 {
+		t.Fatalf("资格校验全局封锁后仍尝试来源或推进队列：visited=%v checked=%v resolved=%v current=%+v ready=%v error=%q", state.Visited, state.Checked, state.Resolved, p.Current(), p.Ready(), p.Err())
 	}
 }
 
