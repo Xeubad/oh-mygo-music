@@ -8,6 +8,9 @@ import (
 // ErrPlaybackBlocked 仅由服务明确给出的全局停止原因触发，不能由裸 HTTP 状态推断。
 var ErrPlaybackBlocked = errors.New("automatic playback is blocked")
 
+// 版本身份不可靠时需用户重选，不属于歌曲失败或插件配置故障。
+var ErrRecordingSelectionRequired = errors.New("select the recording again")
+
 // PlaybackCandidate 只引用已确认同录音的既有来源，不授予额外搜索权限。
 type PlaybackCandidate struct {
 	ID        string `json:"id"`

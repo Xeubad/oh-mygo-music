@@ -526,6 +526,8 @@ func asError(code, message string) error {
 		known = music.ErrUnavailable
 	case "playbackBlocked":
 		known = music.ErrPlaybackBlocked
+	case "recordingSelectionRequired":
+		known = music.ErrRecordingSelectionRequired
 	case "unsupported":
 		known = music.ErrUnsupported
 	default:

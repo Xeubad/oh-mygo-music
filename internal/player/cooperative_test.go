@@ -725,6 +725,39 @@ export function resolveCandidate() { throw new Error("unexpected resolve"); }
 	}
 }
 
+// 旧队列缺失可靠录音身份时必须停留并提示重选，不能当作歌曲不可用而自动跳过。
+func TestAggregateUnknownRecordingStaysOnQueuedTrack(t *testing.T) {
+	dir := os.Getenv("MM_AGGREGATE_PLUGIN")
+	if dir == "" {
+		t.Skip("设置 MM_AGGREGATE_PLUGIN 后运行真实聚合播放器验收")
+	}
+	for _, id := range []string{
+		"old-track-id",
+		"aggregate:{",
+		`aggregate:{"version":0,"sources":[]}`,
+		`aggregate:{"version":1,"identity":{"platform":"wy","accountID":"a","trackID":"missing"},"sources":[{"platform":"tx","accountID":"b","trackID":"one"}]}`,
+	} {
+		t.Run(id, func(t *testing.T) {
+			src, err := plugin.Load(dir, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(src.Close)
+			p, posts := cooperativePlayer(src)
+			queue := []music.Track{{ID: id, Source: src.Info().ID, Name: "old"}, {ID: "next-old-id", Source: src.Info().ID, Name: "next"}}
+			p.PlayQueue(queue, 0)
+			finishLoading(t, p, posts)
+			if p.Loading() || p.Playing() || p.Ready() || p.Current().ID != id || p.Err() != "聚合队列缺少可靠的版本信息，请重新选择曲目" {
+				t.Fatalf("旧身份项被跳过或缺少重选提示：current=%+v ready=%v playing=%v error=%q", p.Current(), p.Ready(), p.Playing(), p.Err())
+			}
+			got := p.Queue()
+			if len(got) != 2 || got[0].ID != id || got[1].ID != "next-old-id" || got[0].PlaybackID != "" {
+				t.Fatalf("版本不明时改变了原始队列：%+v", got)
+			}
+		})
+	}
+}
+
 // 明确的全局密钥封锁不是单曲失败，自动队列也必须停在当前项。
 func TestCooperativeBlockedStopsQueue(t *testing.T) {
 	src := cooperativePlugin(t, `

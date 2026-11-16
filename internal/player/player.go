@@ -913,6 +913,12 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 		return
 	}
 	p.err = errorText(err)
+	if errors.Is(err, music.ErrRecordingSelectionRequired) {
+		// 保留旧队列和当前项供用户重新选择，不能计失败后自动扫描其他版本。
+		p.playing = false
+		p.sync()
+		return
+	}
 	if errors.Is(err, music.ErrSignIn) || errors.Is(err, music.ErrSetup) || errors.Is(err, music.ErrPlaybackBlocked) {
 		p.playing = false
 		if p.Failed != nil {
@@ -943,6 +949,11 @@ func (p *Player) loadFailed(source string, err error, at, skipped, dir int) {
 // the source's error is one the app knows.
 func errorText(err error) string {
 	switch {
+	case errors.Is(err, music.ErrRecordingSelectionRequired):
+		if reason := music.Reason(err); reason != "" {
+			return reason
+		}
+		return err.Error()
 	case errors.Is(err, errNoSource):
 		return i18n.T("The plugin of this song is gone")
 	case errors.Is(err, music.ErrUnavailable):
