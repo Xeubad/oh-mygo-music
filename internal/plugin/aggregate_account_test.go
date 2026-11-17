@@ -11,7 +11,14 @@ import (
 	"mygo-music/internal/music"
 )
 
-// 仅替换 HTTP 与系统凭据边界，账号建立仍经过真实扫码适配器和插件公开接口。
+// 离线账号用例只加速扫码的 2 秒轮询等待，不改变 HTTP 截止或后台刷新间隔；
+// 仍经过真实二维码状态、账号确认和凭据写入，不能改走 web 登录绕过这些检查。
+const neteaseAccountPollingClock = `
+const setTimeout = (callback, delay, ...args) =>
+  globalThis.setTimeout(callback, delay === 2000 ? 1 : delay, ...args);
+`
+
+// 仅替换 HTTP、轮询时钟与系统凭据边界，账号建立仍经过真实扫码适配器和插件公开接口。
 func neteaseAccountTest(t *testing.T, serve func(*http.Request) (string, error)) (*Plugin, *memoryCredentials) {
 	t.Helper()
 	store := &memoryCredentials{values: map[string]string{}}
@@ -43,7 +50,7 @@ func neteaseAccountTest(t *testing.T, serve func(*http.Request) (string, error))
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	})
-	p := loadAggregate(t)
+	p := loadAggregateWithPrelude(t, neteaseAccountPollingClock)
 	if _, err := p.SignIn(); err != nil {
 		t.Fatalf("建立受控账号失败：%v", err)
 	}
@@ -573,7 +580,7 @@ func TestAggregateAccountNeteaseQRProtectsSession(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	})
-	p := loadAggregate(t)
+	p := loadAggregateWithPrelude(t, neteaseAccountPollingClock)
 	prompts := 0
 	p.OnSignInPrompt(func(prompt music.SignInPrompt) {
 		if strings.Contains(prompt.QR, "synthetic-qr-key") {

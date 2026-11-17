@@ -735,6 +735,12 @@ func TestAggregatePluginSnapshotsAreAccountScoped(t *testing.T) {
 
 func loadAggregate(t *testing.T) *Plugin {
 	t.Helper()
+	return loadAggregateWithPrelude(t, "")
+}
+
+// prelude 仅用于替换测试的系统边界；默认仍加载未改写的正式插件代码。
+func loadAggregateWithPrelude(t *testing.T, prelude string) *Plugin {
+	t.Helper()
 	dir := os.Getenv("MM_AGGREGATE_PLUGIN")
 	if dir == "" {
 		t.Skip("设置 MM_AGGREGATE_PLUGIN 后运行跨仓库真实插件验收")
@@ -759,5 +765,5 @@ func loadAggregate(t *testing.T) *Plugin {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return load(t, string(manifest), string(code))
+	return load(t, string(manifest), prelude+string(code))
 }
