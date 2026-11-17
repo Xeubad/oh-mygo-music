@@ -398,7 +398,7 @@ func (p *Player) commitTransitions() {
 		p.recorded = ""
 		p.err = ""
 		p.loading = false
-		p.lyrics, p.lyricsLoaded = nil, false
+		p.lyrics, p.lyricsSource, p.lyricsLoaded = nil, nil, false
 		if p.info != nil && p.info.PlaybackID != "" {
 			p.track.PlaybackID = p.info.PlaybackID
 			p.queue[preparation.index].PlaybackID = p.info.PlaybackID

@@ -514,6 +514,16 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 			}
 		})
 		a.playbackTransitionSettings(c, row, block)
+		betterLyricsDescription := T("Share the current track, position and source lyrics on this computer")
+		if a.betterLyricsStatus != "" {
+			betterLyricsDescription = a.betterLyricsStatus
+		}
+		row(T("Share with BetterLyrics"), betterLyricsDescription, func() {
+			if ui.Switch(c.Key("betterlyrics"), &s.BetterLyricsIntegration).Label(T("Share with BetterLyrics")).Changed() {
+				a.changed()
+				a.setBetterLyricsIntegration()
+			}
+		})
 		if a.anyCan("comments") {
 			settingsHeading(c, block, T("Playback Content"), iconComment)
 			row(T("Top Comments in Quiet Parts"), T("In intros, breaks and outros, a song's top comments show in place of the lyrics"), func() {

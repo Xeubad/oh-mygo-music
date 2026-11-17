@@ -83,6 +83,7 @@ type Player struct {
 	monitorCancel       context.CancelFunc
 
 	lyrics       []lyrics.Line
+	lyricsSource *music.Lyrics
 	lyricsLoaded bool
 
 	// pending holds a seek asked for while the track loads.
@@ -457,6 +458,19 @@ func (p *Player) Repeat() RepeatMode { return p.repeat }
 
 // Lyrics returns the current track's lyrics, and whether they have loaded.
 func (p *Player) Lyrics() ([]lyrics.Line, bool) { return p.lyrics, p.lyricsLoaded }
+
+// LyricsSource returns a copy of the source's original lyrics and whether they have loaded.
+func (p *Player) LyricsSource() (*music.Lyrics, bool) {
+	if p.lyricsSource == nil {
+		return nil, p.lyricsLoaded
+	}
+	source := *p.lyricsSource
+	source.Lines = append([]music.LyricLine(nil), source.Lines...)
+	for i := range source.Lines {
+		source.Lines[i].Words = append([]music.LyricWord(nil), source.Lines[i].Words...)
+	}
+	return &source, p.lyricsLoaded
+}
 
 // Downloaded returns the share of the current track downloaded so far, or
 // false before it has started to.
@@ -904,7 +918,7 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 	p.track = &t
 	p.loading, p.playing, p.err = true, play, ""
 	p.awaiting = false
-	p.lyrics, p.lyricsLoaded = nil, false
+	p.lyrics, p.lyricsSource, p.lyricsLoaded = nil, nil, false
 	p.pending = from
 	if !playback.recorded {
 		p.recorded = ""
@@ -1185,15 +1199,20 @@ func (p *Player) loadLyrics(gen int, src music.Source, t music.Track) {
 	expected := p.playback
 	go func() {
 		var lines []lyrics.Line
+		var source *music.Lyrics
 		if src != nil && src.Can("lyrics") {
 			if l, err := src.Lyrics(t.ID); err == nil && l != nil {
+				source = l
 				lines = lyrics.FromSource(l)
 			}
 		}
 		p.post(func() {
 			if gen == p.gen && p.playback == expected {
-				p.lyrics = lines
+				p.lyrics, p.lyricsSource = lines, source
 				p.lyricsLoaded = true
+				if p.Changed != nil {
+					p.Changed()
+				}
 			}
 		})
 	}()

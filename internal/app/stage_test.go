@@ -155,6 +155,10 @@ func TestTimedLyricsReachTheStage(t *testing.T) {
 	if lines, _ := a.pl.Lyrics(); len(lines) != 2 || lines[0].Text != "hello world" {
 		t.Fatalf("lines %+v", lines)
 	}
+	original, loaded := a.pl.LyricsSource()
+	if !loaded || original == nil || original.Lines[0].Words[0].Start != 1000 || original.Lines[0].Words[1].End != 3000 {
+		t.Fatalf("original lyrics did not preserve word times: %+v", original)
+	}
 
 	a.pl.Hold(2500 * time.Millisecond)
 	a.nowPlaying, a.npPane = true, paneStage

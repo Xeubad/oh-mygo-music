@@ -8,10 +8,12 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"mygo-music/internal/betterlyrics"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/local"
 	"mygo-music/internal/music"
@@ -120,6 +122,11 @@ type app struct {
 	settingsSearchBox     ui.Handle
 	settingsUnderTop      bool // the settings' page has scrolled under its top edge
 	playbackSettingsError string
+	betterLyricsServer    *betterlyrics.Server
+	betterLyricsTimer     *time.Timer
+	betterLyricsTrackKey  string
+	betterLyricsTrackID   uint64
+	betterLyricsStatus    string
 
 	suggestions suggestState // what the search field's query may be after
 
@@ -374,7 +381,10 @@ func Run() error {
 		a.pl.Changed = func() {
 			a.keepSession()
 			a.syncCaptions()
+			a.publishBetterLyrics()
+			a.scheduleBetterLyricsSync()
 		}
+		a.setBetterLyricsIntegration()
 		a.volume = a.settings.Volume
 		a.mutedFrom = a.settings.MutedFrom
 		if a.volume < 0 || a.volume > 1 {
@@ -454,6 +464,7 @@ func Run() error {
 	// Windows leaves an icon in the notification area after its app until
 	// the pointer passes over it.
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.stopBetterLyricsIntegration()
 		if a.tray != nil {
 			a.tray.Destroy()
 		}

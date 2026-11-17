@@ -98,6 +98,8 @@ type settings struct {
 	// the lyrics (quietComment), for a source with comments: the listener
 	// turns it on.
 	HotComments bool `json:"hotComments"`
+	// BetterLyricsIntegration shares playback and source lyrics over loopback when enabled.
+	BetterLyricsIntegration bool `json:"betterLyricsIntegration"`
 	// Fog fills Now Playing's backdrop with fog of the cover's color,
 	// rising and swelling with the bass: an experiment the listener turns
 	// on.
