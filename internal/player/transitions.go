@@ -163,6 +163,12 @@ func (output *transitionOutput) Read(dst []float32) (int, error) {
 			return count, io.EOF
 		}
 		current := output.current
+		if count > 0 && current.offset >= len(current.buffer) && current.err == nil {
+			if buffered, ok := current.decoder.(*transitionBuffer); ok && !buffered.ready() {
+				// 先交付已混好的首帧，不能因等待后续下载把交接和故障恢复一起卡住。
+				return count, nil
+			}
+		}
 		// Read 只发生在解码线程；等网络时释放状态锁，音量/暂停/取消仍能立即处理。
 		output.mu.Unlock()
 		frame, valid, failure := current.readFrame()

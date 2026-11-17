@@ -289,7 +289,7 @@ func TestTransitionPlayerPauseBeforeBufferedHandoff(t *testing.T) {
 			advanceTransitionPlayer(current, posted, 480)
 		}
 		out := current.out.(*transitionTestOutput)
-		count, _ := out.decoder.Read(make([]float32, 48000*2))
+		count := readTransitionSamples(t, out.decoder, make([]float32, 48000*2))
 		out.decoded = out.frame.Load() + int64(count/2)
 		current.TogglePlay()
 		for step := 0; step < 8; step++ {
@@ -327,10 +327,7 @@ func TestTransitionPlayerRefreshKeepsBufferedHandoff(t *testing.T) {
 			pumpTransitionPosts(posted)
 		}
 		out := current.out.(*transitionTestOutput)
-		count, _ := out.decoder.Read(make([]float32, (3*48000+1)*2))
-		if count < (3*48000+1)*2 {
-			t.Fatalf("过渡缓冲不足: %d", count/2)
-		}
+		count := readTransitionSamples(t, out.decoder, make([]float32, (3*48000+1)*2))
 		out.decoded = int64(count / 2)
 		before := current.transition
 		current.RefreshTransitions()
@@ -552,6 +549,20 @@ func pumpTransitionPosts(posted chan func()) {
 			return
 		}
 	}
+}
+
+func readTransitionSamples(t *testing.T, decoder audio.Decoder, samples []float32) int {
+	t.Helper()
+	count := 0
+	// 解码允许短读；需要预填指定区间的测试应像设备一样继续读取，才能真正跨过交接点。
+	for count < len(samples) {
+		read, err := decoder.Read(samples[count:])
+		count += read
+		if err != nil || read == 0 {
+			t.Fatalf("过渡缓冲未填满: count=%d want=%d error=%v", count, len(samples), err)
+		}
+	}
+	return count
 }
 
 func advanceTransitionPlayer(current *Player, posted chan func(), frames int) {
