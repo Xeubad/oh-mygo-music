@@ -499,7 +499,7 @@ var zhCN = map[string]string{
 	"Source List":         "来源列表",
 	"Filter Tracks":       "筛选曲目",
 	"Refresh Cloud Lists": "刷新云端列表",
-	"Refresh NetEase lists after sign-in, then configure the NetEase resolver key to play.": "登录后刷新网易云列表，配置网易解析密钥即可播放。",
+	"Choose the account platform in plugin settings before refreshing. NetEase uses its own resolver key; QQ uses the general key.": "刷新前请在插件设置中选择账号平台；网易使用专用解析密钥，QQ 使用通用解析密钥。",
 	"Updating aggregate data…":                             "正在更新聚合数据…",
 	"Reload Cached Data":                                   "重载本机缓存",
 	"Select a second track to confirm the same recording.": "再选择一首曲目以确认是同一录音。",

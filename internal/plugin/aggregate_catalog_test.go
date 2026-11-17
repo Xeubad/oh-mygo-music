@@ -17,6 +17,10 @@ import (
 type aggregateCatalogTransport func(*http.Request) (*http.Response, error)
 
 func (f aggregateCatalogTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// 插件关闭后仍可能有已取消的 HTTP goroutine 到达此处；不能借全局替身串入下一个测试。
+	if err := r.Context().Err(); err != nil {
+		return nil, err
+	}
 	return f(r)
 }
 

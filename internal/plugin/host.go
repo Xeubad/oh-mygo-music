@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -136,6 +137,14 @@ func (p *Plugin) installHost(v *vm) error {
 			return moejs.Undefined(), nil
 		}),
 		"crypto": map[string]any{
+			// OAuth state 必须来自系统安全随机源，不能退回脚本 Math.random。
+			"randomHex": moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) {
+				var value [32]byte
+				if _, err := rand.Read(value[:]); err != nil {
+					return moejs.Undefined(), errors.New("secure random source is unavailable")
+				}
+				return moejs.String(hex.EncodeToString(value[:])), nil
+			}),
 			"md5": moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 				sum := md5.Sum([]byte(moejs.Arg(args, 0).String()))
 				return moejs.String(hex.EncodeToString(sum[:])), nil

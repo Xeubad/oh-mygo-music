@@ -38,7 +38,7 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 		}
 	}).Gap(10).Children(func() {
 		ui.Text(c, T("MyGo Music Aggregate")).FontSize(22).FontWeight(700)
-		ui.Text(c, T("Refresh NetEase lists after sign-in, then configure the NetEase resolver key to play.")).FontSize(12).TextColor(p.muted)
+		ui.Text(c, T("Choose the account platform in plugin settings before refreshing. NetEase uses its own resolver key; QQ uses the general key.")).FontSize(12).TextColor(p.muted)
 		ui.Row(c.Key("aggregate-controls")).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Select(c.Key("aggregate-kind"), &view.kind, []string{"All", "Liked", "Playlists"}).Label(T("Content")).Width(140).Disabled(view.busy)
 			ui.Select(c.Key("aggregate-platform"), &view.platform, append([]string{"All"}, platforms...)).Label(T("Platform")).Width(120).Disabled(view.busy)
