@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"mygo-music/internal/music"
@@ -16,12 +17,19 @@ type aggregateSource interface {
 }
 
 type aggregateList struct {
-	Platform    string `json:"platform"`
-	AccountID   string `json:"accountID"`
-	ListID      string `json:"listID"`
-	ListName    string `json:"listName"`
-	RefreshedAt int64  `json:"refreshedAt"`
-	Selected    bool   `json:"selected"`
+	Platform     string `json:"platform"`
+	AccountID    string `json:"accountID"`
+	ListID       string `json:"listID"`
+	ListName     string `json:"listName"`
+	RefreshedAt  int64  `json:"refreshedAt"`
+	Selected     bool   `json:"selected"`
+	RefreshState string `json:"refreshState"`
+}
+
+type aggregateRefresh struct {
+	State         string `json:"state"`
+	Version       *int64 `json:"version"` // 缺失与版本 0 不同，旧插件不能触发无限重取。
+	NextRefreshAt int64  `json:"nextRefreshAt"`
 }
 
 type aggregateQualityTarget struct {
@@ -30,6 +38,7 @@ type aggregateQualityTarget struct {
 }
 
 type aggregateReply struct {
+	Refresh        aggregateRefresh         `json:"refresh"`
 	QualityTargets []aggregateQualityTarget `json:"qualityTargets"`
 	Settings       struct {
 		TargetQuality           string   `json:"targetQuality"`
@@ -45,6 +54,9 @@ type aggregateReply struct {
 	ResolverCredential struct {
 		State string `json:"state"`
 	} `json:"resolverCredential"`
+	ResolverCredentials map[string]struct {
+		State string `json:"state"`
+	} `json:"resolverCredentials"`
 }
 
 type aggregateView struct {
@@ -57,17 +69,27 @@ type aggregateView struct {
 	loadingLists         bool
 	busy                 bool
 	err                  string
+	refresh              aggregateRefresh
+	refreshErr           string
+	refreshVersion       *int64
+	revision             uint64 // 手动操作使在途后台快照失效，避免较旧回执倒写。
+	polling              bool
+	pollUnsupported      bool
+	nextPoll             time.Time
+	owner                aggregateSource
+	page                 route
 }
 
 type aggregateEdit struct {
-	loaded, busy    bool
-	err             string
-	target, minimum string
-	values          map[string]string
-	order           []string
-	key             string // 仅编辑期间持有；永远不从凭据库回填到界面。
-	credentialState string
-	qualityTargets  []aggregateQualityTarget
+	loaded, busy             bool
+	err                      string
+	target, minimum          string
+	values                   map[string]string
+	order                    []string
+	key                      string // 仅编辑期间持有；永远不从凭据库回填到界面。
+	credentialState          string
+	wyKey, wyCredentialState string // 网易与通用服务分开持有，不能跨服务回填或清空草稿。
+	qualityTargets           []aggregateQualityTarget
 }
 
 var aggregateTimingFields = []struct{ key, label string }{
@@ -130,8 +152,13 @@ func (a *app) aggregateCommand(lib *library, e *aggregateEdit, action string, in
 			}
 			e.loaded = true
 			e.credentialState = reply.ResolverCredential.State
+			e.wyCredentialState = reply.ResolverCredentials["wy"].State
 			if action == "setResolverKey" || action == "clearResolverKey" {
-				e.key = ""
+				if input["platform"] == "wy" {
+					e.wyKey = ""
+				} else {
+					e.key = ""
+				}
 			}
 		})
 	}()
@@ -243,6 +270,20 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 				a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"value": e.key, "temporary": true})
 			}
 		})
+		if e.wyCredentialState != "" {
+			aggregateField(c, T("NetEase Resolver Key"), func() {
+				ui.TextInput(c.Key("wy-key"), &e.wyKey).Label(T("NetEase Resolver Key")).Password().Width(260).Disabled(e.busy)
+			})
+			ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.wyCredentialState]).FontSize(11.5).TextColor(p.muted)
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c.Key("save-wy-key"), T("Save NetEase Key Securely")).Disabled(e.busy || e.wyKey == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": false})
+				}
+				if ui.Button(c.Key("temporary-wy-key"), T("Use NetEase Key Once")).Disabled(e.busy || e.wyKey == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": true})
+				}
+			})
+		}
 		if e.err != "" {
 			ui.Text(c, e.err).FontSize(12).TextColor(p.accent).LineHeight(1.4)
 		}

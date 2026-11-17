@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"mygo-music/internal/music"
@@ -14,10 +15,15 @@ import (
 func neteaseAccountTest(t *testing.T, serve func(*http.Request) (string, error)) (*Plugin, *memoryCredentials) {
 	t.Helper()
 	store := &memoryCredentials{values: map[string]string{}}
+	var ready atomic.Bool
 	previousStore, previousTransport := systemCredentials, http.DefaultTransport
 	systemCredentials = store
 	t.Cleanup(func() { systemCredentials = previousStore; http.DefaultTransport = previousTransport })
 	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
+		// 初始化账号时先完成空喜欢刷新，场景计数与阻塞点只观察测试正式操作。
+		if !ready.Load() && r.URL.Path == "/eapi/song/like/get" {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":200,"ids":[]}`)), Request: r}, nil
+		}
 		header := make(http.Header)
 		var body string
 		var err error
@@ -41,6 +47,10 @@ func neteaseAccountTest(t *testing.T, serve func(*http.Request) (string, error))
 	if _, err := p.SignIn(); err != nil {
 		t.Fatalf("建立受控账号失败：%v", err)
 	}
+	if _, err := p.Aggregate("refresh", nil); err != nil {
+		t.Fatalf("完成初始化刷新失败：%v", err)
+	}
+	ready.Store(true)
 	return p, store
 }
 
@@ -157,6 +167,65 @@ func TestAggregateAccountNeteasePlaylistSnapshotRequiresSelection(t *testing.T) 
 	home, err = p.Home()
 	if err != nil || len(home.Sections[0].Tracks) != 1 || home.Sections[0].Tracks[0].AggregateSources[0].TrackID != "101" {
 		t.Fatal("选择歌单后未按原始身份加入聚合")
+	}
+}
+
+// 复现本次 177/179 的数量形态：账号快照与手动刷新都必须保留全部身份和尾部占位。
+func TestAggregateAccountNeteasePlaylistCountDriftSurvivesRefresh(t *testing.T) {
+	ids := make([]map[string]any, 0, 179)
+	songs := make([]map[string]any, 0, 178)
+	for i := 0; i < 179; i++ {
+		ids = append(ids, map[string]any{"id": 1000 + i})
+	}
+	for i := 177; i >= 0; i-- {
+		songs = append(songs, map[string]any{"id": 1000 + i, "name": "合成歌曲"})
+	}
+	playlistBody, err := json.Marshal(map[string]any{"code": 200, "playlist": map[string]any{"id": 900, "name": "合成歌单", "trackCount": 177, "trackIds": ids}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailsBody, err := json.Marshal(map[string]any{"code": 200, "songs": songs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	playlistRequests := 0
+	p, _ := neteaseAccountTest(t, func(r *http.Request) (string, error) {
+		if !strings.Contains(r.Header.Get("Cookie"), "MUSIC_U=synthetic-account-cookie") {
+			t.Error("账号请求没有使用本次受控凭据")
+		}
+		switch r.URL.Path {
+		case "/eapi/v6/playlist/detail":
+			playlistRequests++
+			return string(playlistBody), nil
+		case "/eapi/v3/song/detail":
+			return string(detailsBody), nil
+		case "/eapi/song/like/get":
+			return `{"code":200,"ids":[]}`, nil
+		default:
+			t.Errorf("意外请求：%s", r.URL.Path)
+			return `{"code":404}`, nil
+		}
+	})
+	full, err := p.Playlist("catalog:wy:playlist:900")
+	if err != nil || full == nil || full.TrackCount != 179 || len(full.Tracks) != 179 {
+		t.Fatalf("账号完整身份列表被统计数误拒或裁剪：%v", err)
+	}
+	if full.Tracks[0].ID != "catalog:wy:track:1000" || full.Tracks[178].ID != "catalog:wy:track:1178" || !full.Tracks[178].Unavailable {
+		t.Fatal("账号读取丢失原始顺序或尾部不可用位置")
+	}
+	if _, err := p.Aggregate("selectList", map[string]any{"platform": "wy", "accountID": "700", "listID": "900", "selected": true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Aggregate("refresh", nil); err != nil {
+		t.Fatalf("统计数量差异不能让手动刷新失败：%v", err)
+	}
+	raw, err := p.Aggregate("snapshot", map[string]any{"platform": "wy", "accountID": "700", "listID": "900"})
+	var snapshot struct {
+		Selected bool          `json:"selected"`
+		Tracks   []music.Track `json:"tracks"`
+	}
+	if err != nil || json.Unmarshal(raw, &snapshot) != nil || !snapshot.Selected || len(snapshot.Tracks) != 179 || snapshot.Tracks[178].ID != "1178" || !snapshot.Tracks[178].Unavailable || playlistRequests != 2 {
+		t.Fatal("明确选择后的刷新没有保留完整账号快照")
 	}
 }
 
@@ -477,7 +546,9 @@ func TestAggregateAccountNeteaseQRProtectsSession(t *testing.T) {
 	const secret = "synthetic-aggregate-account-cookie"
 	requests := 0
 	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
-		requests++
+		if r.URL.Path != "/eapi/song/like/get" {
+			requests++
+		}
 		if r.Method != http.MethodPost || r.URL.Hostname() != "interface.music.163.com" {
 			t.Error("扫码登录离开已核对的上游请求边界")
 		}
@@ -494,6 +565,8 @@ func TestAggregateAccountNeteaseQRProtectsSession(t *testing.T) {
 				t.Error("账号确认没有使用本次扫码获得的凭据")
 			}
 			body = `{"code":200,"profile":{"userId":700,"nickname":"测试账号"}}`
+		case "/eapi/song/like/get":
+			body = `{"code":200,"ids":[]}`
 		default:
 			t.Errorf("登录发生意外请求：%s", r.URL.Path)
 			body = `{"code":404}`

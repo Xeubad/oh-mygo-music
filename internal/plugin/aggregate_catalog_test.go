@@ -96,6 +96,65 @@ func TestAggregateCatalogNeteaseRejectsTruncatedPlaylist(t *testing.T) {
 	}
 }
 
+// 统计数小于完整身份列表时不能误判截断，也不能为凑数裁掉尾部歌曲。
+func TestAggregateCatalogNeteasePlaylistKeepsIDsBeyondReportedCount(t *testing.T) {
+	previous := http.DefaultTransport
+	requests := 0
+	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
+		requests++
+		var body string
+		switch r.URL.Path {
+		case "/eapi/v6/playlist/detail":
+			body = `{"code":200,"playlist":{"id":900,"name":"统计不同的歌单","trackCount":1,"trackIds":[{"id":101},{"id":102},{"id":103}]}}`
+		case "/eapi/v3/song/detail":
+			body = `{"code":200,"songs":[{"id":103,"name":"尾部歌曲"},{"id":101,"name":"第一首"}]}`
+		default:
+			t.Errorf("意外请求：%s", r.URL.Path)
+			body = `{"code":404}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	p := loadAggregate(t)
+	got, err := p.Playlist("catalog:wy:playlist:900")
+	if err != nil {
+		t.Fatalf("完整身份多于统计数时不应误报截断：%v", err)
+	}
+	if got == nil || got.TrackCount != 3 || len(got.Tracks) != 3 {
+		t.Fatal("必须保留原始身份列表的全部三个位置，不能按统计数裁剪")
+	}
+	for i, id := range []string{"101", "102", "103"} {
+		if got.Tracks[i].ID != "catalog:wy:track:"+id {
+			t.Fatalf("第 %d 个身份丢失或顺序改变", i)
+		}
+	}
+	if !got.Tracks[1].Unavailable || got.Tracks[2].Name != "尾部歌曲" || requests != 2 {
+		t.Fatal("缺失详情应保留不可用位置，尾部有效歌曲必须补齐，且不额外请求")
+	}
+}
+
+// 身份条数超过统计值也不一定完整：重复身份不能掩盖真正缺少的歌曲。
+func TestAggregateCatalogNeteaseRejectsDuplicatesMaskingMissingIDs(t *testing.T) {
+	previous := http.DefaultTransport
+	detailRequests := 0
+	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
+		body := `{"code":200,"playlist":{"id":900,"trackCount":3,"trackIds":[{"id":101},{"id":101},{"id":102},{"id":102}]}}`
+		if r.URL.Path == "/eapi/v3/song/detail" {
+			detailRequests++
+			body = `{"code":200,"songs":[{"id":101,"name":"第一首"},{"id":102,"name":"第二首"}]}`
+		} else if r.URL.Path != "/eapi/v6/playlist/detail" {
+			t.Errorf("意外请求：%s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	p := loadAggregate(t)
+	got, err := p.Playlist("catalog:wy:playlist:900")
+	if !errors.Is(err, music.ErrUnavailable) || got != nil || detailRequests != 0 {
+		t.Fatal("重复身份凑足行数时仍须拒绝缺项，且不能继续读取详情")
+	}
+}
+
 // 缺少服务原始总数时，上游回退到已读数量；聚合不能据此证明歌单完整。
 func TestAggregateCatalogNeteaseRequiresOriginalTrackCount(t *testing.T) {
 	previous := http.DefaultTransport

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -23,15 +24,19 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 		a.aggregateViews = map[*library]*aggregateView{}
 	}
 	view := a.aggregateViews[lib]
-	if view == nil {
+	if view == nil || view.owner != nil && (view.owner != src || view.page != a.route) {
 		view = &aggregateView{}
 		a.aggregateViews[lib] = view
 	}
+	view.owner, view.page = src, a.route
+	a.aggregateLibraryPoll(c, lib, src, view)
 	platforms, lists := aggregateFilterOptions(lib.home)
-	if !view.listsLoaded && !view.loadingLists {
-		a.aggregateLibraryLoadLists(lib, src, view)
-	}
-	ui.Column(c.Key("aggregate-library")).Gap(10).Children(func() {
+	ui.Column(c.Key(view)).OnUnmount(func() {
+		// 页面消失后不再续订；旧请求即使稍后回执，也不能写入重新打开的视图。
+		if a.aggregateViews[lib] == view {
+			delete(a.aggregateViews, lib)
+		}
+	}).Gap(10).Children(func() {
 		ui.Text(c, T("MyGo Music Aggregate")).FontSize(22).FontWeight(700)
 		ui.Text(c, T("NetEase account lists can be refreshed after sign-in; playback is not connected.")).FontSize(12).TextColor(p.muted)
 		ui.Row(c.Key("aggregate-controls")).Gap(8).AlignItems(ui.Center).Children(func() {
@@ -53,6 +58,12 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 		if view.busy {
 			ui.Text(c, T("Updating aggregate data…")).FontSize(12).TextColor(p.muted)
 		}
+		if message := aggregateRefreshMessage(view.refresh.State); message != "" {
+			ui.Text(c, message).FontSize(12).TextColor(p.muted).LineHeight(1.4)
+		}
+		if view.refreshErr != "" {
+			ui.Text(c, view.refreshErr).FontSize(12).TextColor(p.accent).LineHeight(1.4)
+		}
 		if view.err != "" {
 			ui.Text(c, view.err).FontSize(12).TextColor(p.accent).LineHeight(1.4)
 		}
@@ -60,18 +71,26 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 			ui.Text(c, T("Loading cached lists…")).FontSize(12).TextColor(p.muted)
 		}
 		for _, cached := range view.lists {
-			if cached.ListID == "liked" {
-				continue
+			if cached.ListID != "liked" {
+				title := T("Include Cached List")
+				if cached.Selected {
+					title = T("Exclude Cached List")
+				}
+				if ui.Button(c.Key("cached-list-"+cached.Platform+cached.AccountID+cached.ListID), title+" "+cached.ListName).Disabled(view.busy || view.loadingLists).Clicked() {
+					a.aggregateLibrarySelectList(lib, src, view, cached, !cached.Selected)
+				}
 			}
+			// 失败和刷新中不覆盖成功时间；喜欢列表也必须能看见自己的缓存新旧。
 			label := cached.Platform + " · " + cached.ListName
-			title := T("Include Cached List")
-			if cached.Selected {
-				title = T("Exclude Cached List")
-			}
-			if ui.Button(c.Key("cached-list-"+cached.Platform+cached.AccountID+cached.ListID), title+" "+cached.ListName).Disabled(view.busy || view.loadingLists).Clicked() {
-				a.aggregateLibrarySelectList(lib, src, view, cached, !cached.Selected)
+			if cached.RefreshedAt > 0 {
+				label += " · " + T("Last successful refresh") + ": " + time.UnixMilli(cached.RefreshedAt).Local().Format("2006-01-02 15:04")
+			} else {
+				label += " · " + T("No successful cache yet")
 			}
 			ui.Text(c, label).FontSize(11).TextColor(p.muted)
+			if message := aggregateRefreshMessage(cached.RefreshState); message != "" {
+				ui.Text(c, message).FontSize(11).TextColor(p.muted)
+			}
 		}
 		if len(view.selected) > 0 {
 			ui.Row(c.Key("aggregate-link-selection")).Gap(8).AlignItems(ui.Center).Children(func() {
@@ -157,6 +176,21 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 			ui.Text(c, T("No tracks match these filters.")).FontSize(13).TextColor(p.muted)
 		}
 	})
+}
+
+func aggregateRefreshMessage(state string) string {
+	switch state {
+	case "refreshing":
+		return T("Refreshing in the background; showing the last successful cache.")
+	case "error":
+		return T("Refresh failed; cached data has not been updated.")
+	case "signIn":
+		return T("Sign in again; showing the last successful cache.")
+	case "success":
+		return T("Cached data is up to date.")
+	default:
+		return ""
+	}
 }
 
 func aggregateFilterOptions(page *music.Browse) (platforms, lists []string) {
@@ -349,6 +383,93 @@ func aggregateIdentityLabel(source music.AggregateSource) string {
 	return source.Platform + " · " + string(account) + " · " + string(track)
 }
 
+// 只由可见页的帧续订，无 ticker 或常驻 goroutine；状态接口本身不访问云端。
+func (a *app) aggregateLibraryPoll(c *ui.Context, lib *library, src aggregateSource, view *aggregateView) {
+	if view.pollUnsupported {
+		return
+	}
+	now := c.Now()
+	if !now.Before(view.nextPoll) {
+		view.nextPoll = now.Add(3 * time.Second)
+		if !view.polling && !view.busy && !view.loadingLists {
+			a.aggregateLibraryReadRefresh(lib, src, view)
+		}
+	}
+	c.After(view.nextPoll.Sub(now))
+}
+
+func (a *app) aggregateLibraryCurrent(lib *library, view *aggregateView) bool {
+	return a.aggregateViews[lib] == view && (view.owner == nil ||
+		(a.library == lib && any(lib.src) == any(view.owner) && a.route == view.page))
+}
+
+func (a *app) aggregateLibraryReadRefresh(lib *library, src aggregateSource, view *aggregateView) {
+	view.polling = true
+	loadLists := !view.listsLoaded
+	view.loadingLists = loadLists
+	version, revision := view.refreshVersion, view.revision
+	go func() {
+		raw, statusErr := src.Aggregate("refreshStatus", nil)
+		var refresh aggregateRefresh
+		unsupported := errors.Is(statusErr, music.ErrUnsupported)
+		if statusErr == nil {
+			// 老插件可能返回 [] / {ok:true}，不能把缺失版本当作不断变化的版本。
+			statusText := strings.TrimSpace(string(raw))
+			unsupported = len(statusText) == 0 || statusText[0] != '{'
+			if !unsupported {
+				statusErr = json.Unmarshal(raw, &refresh)
+				unsupported = statusErr == nil && refresh.Version == nil
+			}
+		} else if strings.Contains(strings.ToLower(statusErr.Error()), "unknown action") || strings.Contains(strings.ToLower(statusErr.Error()), "unsupported") {
+			unsupported = true
+		}
+		changed := statusErr == nil && !unsupported && (version == nil || *version != *refresh.Version)
+		var home *music.Browse
+		var lists []aggregateList
+		var dataErr error
+		if changed {
+			home, dataErr = src.Home()
+			if dataErr == nil && home == nil {
+				dataErr = errors.New(T("Aggregate cache is unavailable; showing previous data."))
+			}
+		}
+		if (loadLists || changed) && dataErr == nil {
+			raw, dataErr = src.Aggregate("lists", nil)
+			if dataErr == nil {
+				dataErr = json.Unmarshal(raw, &lists)
+			}
+		}
+		a.post(func() {
+			if !a.aggregateLibraryCurrent(lib, view) {
+				return
+			}
+			view.polling, view.loadingLists = false, false
+			// 手动重载可能已提交更新结果；只结束旧探测，不再倒写其数据或状态。
+			if view.revision != revision {
+				return
+			}
+			view.pollUnsupported = unsupported
+			view.refreshErr = ""
+			if statusErr != nil && !unsupported {
+				view.refreshErr = T("Unable to read refresh status; showing cached data: ") + statusErr.Error()
+			} else if !unsupported {
+				view.refresh = refresh
+			}
+			if dataErr != nil {
+				view.refreshErr = T("Cached data has not been updated: ") + dataErr.Error()
+				return
+			}
+			if loadLists || changed {
+				view.lists, view.listsLoaded = lists, true
+			}
+			if changed {
+				// 只替换浏览快照；播放器已经冻结的队列、位置与播放状态都不触碰。
+				lib.home, view.refreshVersion = home, refresh.Version
+			}
+		})
+	}()
+}
+
 func (a *app) aggregateLibraryLoadLists(lib *library, src aggregateSource, view *aggregateView) {
 	view.loadingLists = true
 	go func() {
@@ -358,6 +479,10 @@ func (a *app) aggregateLibraryLoadLists(lib *library, src aggregateSource, view 
 			err = json.Unmarshal(raw, &lists)
 		}
 		a.post(func() {
+			// 离页、换来源或重建视图后，旧任务不能再提交浏览快照。
+			if !a.aggregateLibraryCurrent(lib, view) {
+				return
+			}
 			view.loadingLists = false
 			if err != nil {
 				view.err = err.Error()
@@ -373,6 +498,7 @@ func (a *app) aggregateLibrarySelectList(lib *library, src aggregateSource, view
 		return
 	}
 	view.busy, view.err = true, ""
+	view.revision++
 	go func() {
 		_, err := src.Aggregate("selectList", map[string]any{"platform": cached.Platform, "accountID": cached.AccountID, "listID": cached.ListID, "selected": selected})
 		var raw json.RawMessage
@@ -388,6 +514,10 @@ func (a *app) aggregateLibrarySelectList(lib *library, src aggregateSource, view
 			home, err = src.Home()
 		}
 		a.post(func() {
+			// 离页、换来源或重建视图后，旧任务不能再提交浏览快照。
+			if !a.aggregateLibraryCurrent(lib, view) {
+				return
+			}
 			view.busy = false
 			if err != nil {
 				view.err = err.Error()
@@ -415,6 +545,7 @@ func (a *app) aggregateLibraryFetch(lib *library, src aggregateSource, cloud boo
 		return
 	}
 	view.busy, view.err = true, ""
+	view.revision++
 	go func() {
 		var refreshErr error
 		if cloud {
@@ -431,6 +562,10 @@ func (a *app) aggregateLibraryFetch(lib *library, src aggregateSource, cloud boo
 			err = json.Unmarshal(raw, &lists)
 		}
 		a.post(func() {
+			// 离页、换来源或重建视图后，旧任务不能再提交浏览快照。
+			if !a.aggregateLibraryCurrent(lib, view) {
+				return
+			}
 			view.busy = false
 			if err != nil {
 				view.err = err.Error()
@@ -449,14 +584,19 @@ func (a *app) aggregateLibraryAction(lib *library, src aggregateSource, view *ag
 		return
 	}
 	view.busy, view.err = true, ""
+	view.revision++
 	view.selected = nil
 	go func() {
 		_, err := src.Aggregate(action, input)
 		var home *music.Browse
 		if err == nil {
-			home, err = lib.src.Home()
+			home, err = src.Home()
 		}
 		a.post(func() {
+			// 离页、换来源或重建视图后，旧任务不能再提交浏览快照。
+			if !a.aggregateLibraryCurrent(lib, view) {
+				return
+			}
 			view.busy = false
 			if err != nil {
 				view.err = err.Error()

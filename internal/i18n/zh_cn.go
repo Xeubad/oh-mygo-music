@@ -2,6 +2,9 @@ package i18n
 
 // zhCN is the app's text in Simplified Chinese, by its English.
 var zhCN = map[string]string{
+	"NetEase Resolver Key": "网易解析密钥",
+	"Save NetEase Key Securely": "安全保存网易密钥",
+	"Use NetEase Key Once": "临时使用网易密钥",
 	"Candidate Timeout (ms)":          "单候选超时（毫秒）",
 	"Round Timeout (ms)":              "整轮超时（毫秒）",
 	"Stall Detection (ms)":            "卡顿检测（毫秒）",
@@ -508,9 +511,18 @@ var zhCN = map[string]string{
 	"Recording Source":                                     "录音来源",
 	"The selected recording source is no longer available. Select the track again.": "所选录音来源已不可用，请重新选择曲目。",
 	"%s — declared by %s; actual audio is verified before playback.":                "%s：%s 声明支持；播放前仍需核验实际音频。",
-	"Loading cached lists…": "正在读取本机列表…",
-	"Include Cached List":   "纳入聚合",
-	"Exclude Cached List":   "移出聚合",
+	"Loading cached lists…":   "正在读取本机列表…",
+	"Include Cached List":     "纳入聚合",
+	"Exclude Cached List":     "移出聚合",
+	"Last successful refresh": "上次成功",
+	"No successful cache yet": "尚无成功缓存",
+	"Refreshing in the background; showing the last successful cache.": "正在后台刷新；继续显示上次成功的缓存。",
+	"Refresh failed; cached data has not been updated.":                "刷新失败，旧缓存尚未更新。",
+	"Sign in again; showing the last successful cache.":                "需要重新登录；继续显示上次成功的缓存。",
+	"Cached data is up to date.":                                       "缓存已更新。",
+	"Aggregate cache is unavailable; showing previous data.":           "聚合缓存暂时不可用，继续显示旧数据。",
+	"Unable to read refresh status; showing cached data: ":             "无法读取刷新状态，继续显示本机缓存：",
+	"Cached data has not been updated: ":                               "缓存尚未更新：",
 
 	"Gentle":                             "舒缓",
 	"Balanced":                           "标准",
