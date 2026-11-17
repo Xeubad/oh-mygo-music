@@ -64,6 +64,8 @@ type settings struct {
 	CardTemplate            string          `json:"cardTemplate,omitempty"`
 	CardSquare              bool            `json:"cardSquare,omitempty"`
 	CardDirectory           string          `json:"cardDirectory,omitempty"`
+	// ShareServerURL is the user's own HTTPS service; its token is stored in the OS credential store.
+	ShareServerURL string `json:"shareServerUrl,omitempty"`
 	// StageStyle is how the stage sets its lyrics (stageStyles): empty for
 	// Folia's classic, or the id of another of its visualizers.
 	StageStyle     string `json:"stageStyle,omitempty"`

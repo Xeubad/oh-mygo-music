@@ -1,6 +1,7 @@
 package player
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -16,20 +17,46 @@ import (
 // of their own: kept in the cache, a file on disk, or at its source.
 type Song struct {
 	// Type is its file's: one of songTypes, as its source said.
-	Type string
-	file *os.File      // kept in the cache, or on disk
-	st   *music.Stream // or else where it streams from
+	Type     string
+	file     *os.File      // kept in the cache, or on disk
+	st       *music.Stream // or else where it streams from
+	prepared stream
 }
 
 // FindSong finds track t of src at quality, to save, as the player would play
 // it: kept in the cache, or as src streams it. It blocks, for src is asked; run
 // it off the main thread, and close what it returns, or save it.
 func (p *Player) FindSong(src music.Source, t music.Track, quality string) (*Song, error) {
+	return p.FindSongContext(context.Background(), src, t, quality)
+}
+
+func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.Track, quality string) (*Song, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f, st, ok := p.Cache.find(t.Source, t.ID, quality); ok {
-		return &Song{Type: st.Type, file: f}, nil
+		if t.PlaybackID == "" || st.PlaybackID == t.PlaybackID {
+			return &Song{Type: st.Type, file: f}, nil
+		}
+		f.Close()
 	}
 	if src == nil {
 		return nil, errNoSource
+	}
+	if cooperative, ok := src.(music.CooperativeSource); ok && src.Can("playbackPlan") && src.Can("resolveCandidate") {
+		requested := t
+		if t.PlaybackID != "" {
+			requested.ID = t.PlaybackID
+		}
+		info, prepared, err := p.openCooperative(ctx, cooperative, requested, quality, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if t.PlaybackID != "" && info.PlaybackID != t.PlaybackID {
+			prepared.Close()
+			return nil, music.ErrRecordingSelectionRequired
+		}
+		return &Song{Type: songType(info.Type), st: info, prepared: prepared}, nil
 	}
 	st, err := src.Stream(t.ID, quality)
 	if err != nil {
@@ -37,6 +64,9 @@ func (p *Player) FindSong(src music.Source, t music.Track, quality string) (*Son
 	}
 	if st == nil || st.URL == "" {
 		return nil, music.ErrUnavailable
+	}
+	if t.PlaybackID != "" && st.PlaybackID != t.PlaybackID {
+		return nil, music.ErrRecordingSelectionRequired
 	}
 	s := &Song{Type: songType(st.Type), st: st}
 	if path, ok := music.PathOf(st.URL); ok {
@@ -62,6 +92,10 @@ func songType(typ string) string {
 
 // Close lets go of the song, unsaved.
 func (s *Song) Close() {
+	if s.prepared != nil {
+		s.prepared.Close()
+		s.prepared = nil
+	}
 	if s.file != nil {
 		s.file.Close()
 	}
@@ -71,12 +105,20 @@ func (s *Song) Close() {
 // comes into a file of its own beside path first, so one cut short leaves path
 // as it was.
 func (s *Song) SaveTo(path string) error {
+	return s.SaveToContext(context.Background(), path)
+}
+
+// SaveToContext 允许分享取消时终止网络读取，不影响原有下载入口。
+func (s *Song) SaveToContext(ctx context.Context, path string) error {
 	defer s.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.part")
 	if err != nil {
 		return err
 	}
-	err = s.copy(tmp)
+	err = s.copyContext(ctx, tmp)
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -91,11 +133,23 @@ func (s *Song) SaveTo(path string) error {
 
 // copy writes all of the song to w.
 func (s *Song) copy(w io.Writer) error {
-	if s.file != nil {
-		_, err := io.Copy(w, s.file)
+	return s.copyContext(context.Background(), w)
+}
+
+func (s *Song) copyContext(ctx context.Context, w io.Writer) error {
+	if s.prepared != nil {
+		// 直接复制已验证候选的原始下载，不能重新请求临时 URL 导致版本或字节变化。
+		download, _ := s.prepared.source()
+		stop := context.AfterFunc(ctx, download.Close)
+		defer stop()
+		_, err := io.Copy(w, contextReader{ctx: ctx, reader: &downloadReader{d: download}})
 		return err
 	}
-	req, err := http.NewRequest("GET", s.st.URL, nil)
+	if s.file != nil {
+		_, err := io.Copy(w, contextReader{ctx: ctx, reader: s.file})
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", s.st.URL, nil)
 	if err != nil {
 		return err
 	}
@@ -113,4 +167,16 @@ func (s *Song) copy(w io.Writer) error {
 	}
 	_, err = io.Copy(w, res.Body)
 	return err
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }

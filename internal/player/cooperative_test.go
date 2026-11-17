@@ -1,6 +1,7 @@
 package player_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,38 @@ import (
 	"mygo-music/internal/player"
 	"mygo-music/internal/plugin"
 )
+
+// 聚合分享也必须走已核验的协作取流，不能调用未实现的旧 stream 或换成其他录音。
+func TestFindSongPreservesCooperativeRecording(t *testing.T) {
+	source := cooperativePlugin(t, fmt.Sprintf(`
+export function stream() { throw new Error("legacy stream must not be used"); }
+export function playbackPlan({id}) {
+ if(id !== "played-recording") throw new Error("lost played recording");
+ return {minimumQuality:"128k", candidates:[{id:"one",platform:"wy",accountID:"a",trackID:"raw",quality:"flac",playbackID:"played-recording"}]};
+}
+export function resolveCandidate() { return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+	current, _ := cooperativePlayer(source)
+	song, err := current.FindSong(source, music.Track{ID: "queued-recording", Source: "cooperative", PlaybackID: "played-recording"}, "lossless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "shared.flac")
+	if err := song.SaveTo(output); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/seek.flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if song.Type != "flac" || !bytes.Equal(got, want) {
+		t.Fatal("shared media differs from verified recording")
+	}
+}
 
 func cooperativePlugin(t *testing.T, source string) *plugin.Plugin {
 	t.Helper()

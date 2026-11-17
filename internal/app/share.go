@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"image"
 	"slices"
 	"strings"
@@ -10,30 +11,53 @@ import (
 
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
+	"mygo-music/internal/player"
 	"mygo-music/internal/sharecard"
 )
 
 type shareDraft struct {
-	open         bool
-	track        music.Track
-	position     time.Duration
-	current      bool
-	loading      bool
-	loadError    error
-	lines        []lyrics.Line
-	selected     map[int]bool
-	loadSerial   int
-	cover        image.Image
-	coverLoading bool
-	coverError   error
-	display      lyricDisplayCache
-	renderSerial int
-	rendering    bool
-	renderError  error
-	preview      *ui.Bitmap
-	png          []byte
-	exporting    bool
-	status       string
+	open                    bool
+	track                   music.Track
+	position                time.Duration
+	current                 bool
+	loading                 bool
+	loadError               error
+	lines                   []lyrics.Line
+	selected                map[int]bool
+	selectionAnchor         int
+	hasSelectionAnchor      bool
+	loadSerial              int
+	cover                   image.Image
+	coverLoading            bool
+	coverError              error
+	timingReliable          bool
+	aggregateView           *aggregateView
+	recordingSource         *music.AggregateSource
+	pendingAggregateTrackID string
+	display                 lyricDisplayCache
+	renderSerial            int
+	rendering               bool
+	renderError             error
+	preview                 *ui.Bitmap
+	png                     []byte
+	exporting               bool
+	status                  string
+	onlineMode              string
+	onlineQuality           string
+	onlineURL               string
+	onlineID                string
+	onlineRequestKey        string
+	onlineRequestSnapshot   string
+	onlinePublishedSnapshot string
+	onlineRevision          uint64
+	onlinePublishedRevision uint64
+	onlinePublishing        bool
+	onlineError             error
+	onlineCancel            context.CancelFunc
+	clipPreview             *player.ClipPreview
+	clipPreviewCancel       context.CancelFunc
+	clipPreviewLoading      bool
+	clipPreviewSerial       int
 }
 
 func (a *app) openShare(track music.Track) {
@@ -41,9 +65,25 @@ func (a *app) openShare(track music.Track) {
 		track.Source = a.library.id
 	}
 	track.Artists = slices.Clone(track.Artists)
-	draft := &shareDraft{open: true, track: track, selected: make(map[int]bool)}
+	if a.sharing != nil {
+		a.stopSharePreview(a.sharing)
+		if a.sharing.onlineCancel != nil {
+			a.sharing.onlineCancel()
+		}
+	}
+	draft := &shareDraft{
+		open: true, track: track, selected: make(map[int]bool),
+		onlineMode: "full", onlineQuality: a.settings.Quality,
+	}
+	if len(uniqueAggregateSources(track.AggregateSources)) > 1 {
+		draft.aggregateView = &aggregateView{}
+	}
 	if current := a.pl.Current(); current != nil && a.lyricKey(current) == a.lyricKey(&track) {
 		draft.current, draft.position = true, a.pl.Position()
+		// 当前队列项已经核实的录音身份必须跟随分享，不能退回目录默认版本。
+		if current.PlaybackID != "" {
+			draft.track.PlaybackID = current.PlaybackID
+		}
 	}
 	a.sharing = draft
 	a.loadShareLyrics(draft)
@@ -74,6 +114,7 @@ func (a *app) loadShareLyrics(draft *shareDraft) {
 			draft.loading, draft.loadError = false, err
 			if err == nil {
 				draft.lines = lines
+				draft.timingReliable = reliableShareTiming(answer, lines)
 				if len(draft.selected) == 0 {
 					if index := initialShareLine(lines, draft.position, draft.current); index >= 0 {
 						draft.selected[index] = true
@@ -166,7 +207,11 @@ func (a *app) requestShareRender() {
 	}
 	serial := draft.renderSerial
 	draft.rendering = true
-	card := sharecard.Card{Title: draft.track.Name, Artist: draft.track.ArtistNames(), URL: draft.track.URL,
+	cardURL := draft.track.URL
+	if a.onlineLinkMatchesDraft(draft) {
+		cardURL = draft.onlineURL
+	}
+	card := sharecard.Card{Title: draft.track.Name, Artist: draft.track.ArtistNames(), URL: cardURL,
 		Template: a.settings.CardTemplate, Square: a.settings.CardSquare, Cover: draft.cover, Lines: a.shareFragment(draft)}
 	go func() {
 		data, err := sharecard.Render(card)

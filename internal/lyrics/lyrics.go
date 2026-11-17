@@ -17,6 +17,8 @@ import (
 type Line struct {
 	At          time.Duration
 	End         time.Duration
+	AtSource    bool // 真实歌词时间轴提供了这句的起点
+	EndSource   bool // 真实歌词时间轴提供了这句的终点
 	Text        string
 	Translation string
 	Words       []Word
@@ -54,7 +56,7 @@ func parseLRC(lrc string) []Line {
 				}
 			}
 			at := time.Duration(min)*time.Minute + time.Duration(sec)*time.Second + frac
-			out = append(out, Line{At: at, Text: text})
+			out = append(out, Line{At: at, AtSource: true, Text: text})
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At < out[j].At })
@@ -73,7 +75,10 @@ func FromSource(l *music.Lyrics) []Line {
 	ms := func(n int64) time.Duration { return time.Duration(n) * time.Millisecond }
 	out := make([]Line, 0, len(l.Lines))
 	for _, sl := range l.Lines {
-		line := Line{At: ms(sl.Start), End: ms(sl.End), Text: strings.TrimSpace(sl.Text), Translation: sl.Translation}
+		line := Line{
+			At: ms(sl.Start), End: ms(sl.End), AtSource: true, EndSource: sl.End > sl.Start,
+			Text: strings.TrimSpace(sl.Text), Translation: sl.Translation,
+		}
 		for _, w := range sl.Words {
 			line.Words = append(line.Words, Word{Text: w.Text, Start: ms(w.Start), End: ms(w.End)})
 		}

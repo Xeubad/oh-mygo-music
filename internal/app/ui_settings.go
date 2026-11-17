@@ -424,6 +424,10 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 		})
 	}
 
+	add("shares", T("Online Sharing"), iconLink, func(row settingsRow, block settingsBlock) {
+		a.onlineShareSettings(c, p, row, block)
+	})
+
 	// Only on macOS, the one with a notch player.
 	if a.notch != nil {
 		add("notch", T("Notch Player"), iconLaptop, func(row settingsRow, block settingsBlock) {

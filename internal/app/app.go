@@ -167,10 +167,18 @@ type app struct {
 	sig                   playerSig
 	quitting              bool
 
-	settings    settings
-	settingsWin *mygo.Window
-	cacheUsed   int64 // the bytes the song cache takes, -1 until measured
-	updates     bool  // the update plugin is used (useUpdater)
+	settings            settings
+	settingsWin         *mygo.Window
+	cacheUsed           int64 // the bytes the song cache takes, -1 until measured
+	updates             bool  // the update plugin is used (useUpdater)
+	shareTokenDraft     string
+	shareTokenTemp      string
+	shareTokenTempKey   string
+	shareSettingsStatus string
+	shareTokenSaving    bool
+	shareList           []shareListItem
+	shareListLoading    bool
+	shareListError      string
 
 	restored     bool   // playback picked up where it was left
 	savedSession string // the session as last kept
