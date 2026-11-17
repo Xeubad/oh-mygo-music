@@ -6,8 +6,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/egoist/mygo/audio"
-
 	"mygo-music/internal/music"
 )
 
@@ -20,6 +18,7 @@ type playbackAttempt struct {
 	completed    bool // 只有正常结束才允许随后从头播放领取新机会。
 	policy       playbackPolicy
 	recovery     *recoveryTiming
+	recorded     bool
 }
 
 // 时间参数属于本次检测和恢复快照，后续重新取计划不能延长正在等待的流程。
@@ -55,12 +54,14 @@ func currentPlaybackPolicy(ctx context.Context, source music.Source, previous pl
 	return next
 }
 
-func (p *Player) monitorDownload(gen int, out *audio.Player, s stream) {
+func (p *Player) monitorDownload(gen int, out audioOutput, s stream) {
 	if p.monitorCancel != nil {
 		p.monitorCancel()
 	}
 	dl, _ := s.source()
 	watch, previous := p.watch, p.playback.policy
+	expectedPlayback := p.playback
+	transition, voiceID := p.transition, p.transitionID
 	source := p.sourceOf(p.track)
 	ctx, cancel := context.WithCancel(context.Background())
 	p.monitorCancel = cancel
@@ -79,13 +80,32 @@ func (p *Player) monitorDownload(gen int, out *audio.Player, s stream) {
 			return &recoveryTiming{started: started, policy: currentPlaybackPolicy(ctx, source, previous)}
 		}
 		interrupt := func(err error) {
+			if transition != nil {
+				bufferedPosition := out.Position()
+				for !transition.failureAudible(voiceID, out.Position()) {
+					select {
+					case <-ctx.Done():
+						return
+					case <-tick.C:
+					}
+					if current := out.Position(); current != bufferedPosition {
+						// 有效缓冲仍在输出，这段时间不是恢复等待；保留同一停滞才保留旧快照。
+						timing = nil
+						bufferedPosition = current
+					}
+				}
+			}
 			// Read 因错误返回不是有效播放进展，不能借 reading 清零重取设置或重置预算。
 			if timing == nil || out.Position() != position {
 				timing = begin(time.Now())
 			}
 			frozen := timing
 			p.post(func() {
-				if ctx.Err() == nil && gen == p.gen && p.out == out && p.playing {
+				if ctx.Err() == nil && gen == p.gen && p.out == out && p.playing && p.playback == expectedPlayback {
+					p.commitTransitions()
+					if p.playback != expectedPlayback {
+						return
+					}
 					p.interruptedAt(err, frozen)
 				}
 			})
@@ -135,7 +155,7 @@ func (p *Player) monitorDownload(gen int, out *audio.Player, s stream) {
 				frozen := timing
 				p.post(func() {
 					defer close(resume)
-					if ctx.Err() == nil && gen == p.gen && p.out == out && p.playing && !p.seeking && !watch.positioning.Load() && watch.reading.Load() == reading && out.Position() == position {
+					if ctx.Err() == nil && gen == p.gen && p.out == out && p.playing && p.playback == expectedPlayback && !p.seeking && !watch.positioning.Load() && watch.reading.Load() == reading && out.Position() == position {
 						p.interruptedAt(io.ErrNoProgress, frozen)
 					}
 				})

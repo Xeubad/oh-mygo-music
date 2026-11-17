@@ -477,6 +477,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
+		a.playbackTransitionSettings(c, row, block)
 	})
 
 	add("cache", T("Cache"), iconDatabase, func(row settingsRow, block settingsBlock) {

@@ -9,9 +9,11 @@ import (
 // PlayNext inserts a new queue entry immediately after the current track.
 // Without a current track it starts playback instead.
 func (p *Player) PlayNext(track music.Track) {
+	p.commitTransitions()
 	if track.Unavailable {
 		return
 	}
+	p.cancelTransitionPreparation()
 	// 新入队是独立位置，不能继承另一个位置已经成功开播的版本。
 	track.PlaybackID = ""
 	if p.track == nil || p.at < 0 || p.at >= len(p.order) {
@@ -54,4 +56,5 @@ func (p *Player) PlayNext(track music.Track) {
 		p.getAhead(quality)
 	}
 	p.sync()
+	p.prepareTransition()
 }

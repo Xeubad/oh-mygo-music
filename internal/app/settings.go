@@ -9,6 +9,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"mygo-music/internal/i18n"
+	"mygo-music/internal/player"
 )
 
 // settings are the listener's choices, kept in settings.json in the user
@@ -85,7 +86,14 @@ type settings struct {
 	Shortcuts *shortcutConfig `json:"globalShortcuts,omitempty"`
 	// Normalize evens out the loudness of tracks, by what their source
 	// measured of each.
-	Normalize bool `json:"normalize"`
+	Normalize           bool `json:"normalize"`
+	CrossfadeEnabled    bool `json:"crossfadeEnabled"`
+	CrossfadeDurationMs int  `json:"crossfadeDurationMs"`
+	// 开启默认项不能省略 false，否则重启会丢失用户关闭的选择。
+	GaplessEnabled      bool `json:"gaplessEnabled"`
+	PlaybackFadeEnabled bool `json:"playbackFadeEnabled"`
+	PauseFadeOutMs      int  `json:"pauseFadeOutMs"`
+	PlayFadeInMs        int  `json:"playFadeInMs"`
 	// HotComments shows a song's top comments in its quiet parts, in place of
 	// the lyrics (quietComment), for a source with comments: the listener
 	// turns it on.
@@ -107,7 +115,21 @@ type settings struct {
 }
 
 func defaultSettings() settings {
-	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard"}
+	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard", CrossfadeDurationMs: 5000, GaplessEnabled: true, PlaybackFadeEnabled: true, PauseFadeOutMs: 180, PlayFadeInMs: 260}
+}
+
+func (s settings) playbackTransitions() player.TransitionSettings {
+	crossfade, pause, play := s.CrossfadeDurationMs, s.PauseFadeOutMs, s.PlayFadeInMs
+	if crossfade < 1000 || crossfade > 12000 {
+		crossfade = 5000
+	}
+	if pause < 50 || pause > 1000 {
+		pause = 180
+	}
+	if play < 50 || play > 1000 {
+		play = 260
+	}
+	return player.TransitionSettings{Crossfade: s.CrossfadeEnabled, CrossfadeDuration: time.Duration(crossfade) * time.Millisecond, Gapless: s.GaplessEnabled, PlaybackFade: s.PlaybackFadeEnabled, PauseFadeOut: time.Duration(pause) * time.Millisecond, PlayFadeIn: time.Duration(play) * time.Millisecond}
 }
 
 func settingsPath() (string, error) {

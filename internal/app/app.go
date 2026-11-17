@@ -115,10 +115,11 @@ type app struct {
 	query     string
 	searchBox ui.Handle
 
-	settingsPage      string // the settings' page that shows
-	settingsQuery     string // what's searched for in the settings
-	settingsSearchBox ui.Handle
-	settingsUnderTop  bool // the settings' page has scrolled under its top edge
+	settingsPage          string // the settings' page that shows
+	settingsQuery         string // what's searched for in the settings
+	settingsSearchBox     ui.Handle
+	settingsUnderTop      bool // the settings' page has scrolled under its top edge
+	playbackSettingsError string
 
 	suggestions suggestState // what the search field's query may be after
 
@@ -368,6 +369,7 @@ func Run() error {
 		a.pl.Failed = a.sourceFailed
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
+		a.pl.Transitions = func() player.TransitionSettings { return a.settings.playbackTransitions() }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
 		a.pl.Changed = func() {
 			a.keepSession()

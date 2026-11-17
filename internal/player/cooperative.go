@@ -71,7 +71,12 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 		limit = policy.failureLimit
 		deadline = timing.started.Add(policy.recovery)
 	}
-	round, roundCancel := context.WithDeadline(ctx, deadline)
+	scheduled, _ := ctx.Value(scheduledCandidateKey{}).(bool)
+	round := ctx
+	roundCancel := func() {}
+	if !scheduled {
+		round, roundCancel = context.WithDeadline(ctx, deadline)
+	}
 	defer roundCancel()
 	candidateBudget := policy.candidate
 	last := error(music.ErrUnavailable)
@@ -79,6 +84,9 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 	// 后备只能活在当前轮次；用完整身份及实际档位索引，不改变计划的候选顺序。
 	fallbacks := map[[4]string]music.Stream{}
 	for _, candidate := range plan.Candidates {
+		if scheduled && !time.Now().Before(deadline) {
+			return nil, nil, context.DeadlineExceeded
+		}
 		if err := round.Err(); err != nil {
 			return nil, nil, err
 		}
@@ -90,7 +98,15 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 		if rank := qualityRank(candidate.Quality); rank > 0 && rank < qualityRank(plan.MinimumQuality) {
 			continue
 		}
-		attempt, cancel := context.WithTimeout(round, candidateBudget)
+		var attempt context.Context
+		var cancel context.CancelFunc
+		if scheduled {
+			var waiting *candidateWait
+			attempt, waiting = newCandidateWait(round, minTime(deadline, time.Now().Add(candidateBudget)))
+			cancel = func() { deadline = deadline.Add(waiting.finish()) }
+		} else {
+			attempt, cancel = context.WithTimeout(round, candidateBudget)
+		}
 		guard := guardCandidate(attempt, src, track.ID, roundID, candidate)
 		guarded := guard.ctx
 		var info *music.Stream

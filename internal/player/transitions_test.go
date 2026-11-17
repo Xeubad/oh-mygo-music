@@ -1,0 +1,359 @@
+package player
+
+import (
+	"errors"
+	"io"
+	"math"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/audio"
+)
+
+type transitionSamples struct {
+	samples []float32
+	pos     int
+	rate    int
+	unknown bool
+}
+
+type transitionBroken struct{ transitionSamples }
+
+func (*transitionBroken) Len() int64 { return 48000 }
+
+func (*transitionBroken) Read([]float32) (int, error) { return 0, errors.New("stream failed") }
+
+type transitionReadError struct{ transitionSamples }
+
+func (samples *transitionReadError) Read(dst []float32) (int, error) {
+	count, _ := samples.transitionSamples.Read(dst)
+	return count, io.ErrUnexpectedEOF
+}
+
+type transitionSeekFailure struct {
+	transitionSamples
+	closes int
+}
+
+func (*transitionSeekFailure) SetPosition(int64) error { return io.ErrUnexpectedEOF }
+func (decoder *transitionSeekFailure) Close() error {
+	decoder.closes++
+	return nil
+}
+
+// 定位失败后关闭播放器仍须幂等，不能重复关闭预解码取消通道而崩溃。
+func TestTransitionSeekFailureStillClosesStream(t *testing.T) {
+	decoder := &transitionSeekFailure{transitionSamples: transitionSamples{samples: []float32{.2, .2}, rate: 48000}}
+	output := newTransitionOutput(newTransitionBuffer(decoder))
+	defer output.Close()
+	if count, _ := output.Read(make([]float32, 2)); count != 2 {
+		t.Fatal("首帧没有输出")
+	}
+	if err := output.SetPosition(0); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("定位错误未保留: %v", err)
+	}
+	output.Close()
+	output.Close()
+	if decoder.closes != 1 {
+		t.Fatalf("底层流关闭 %d 次", decoder.closes)
+	}
+}
+
+// 首帧已经输出后遇到读取错误，交接不能回滚，且错误必须留给有限恢复路径。
+func TestTransitionIncomingReadErrorKeepsCommittedIdentity(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2}, rate: 48000})
+	defer output.Close()
+	output.queue(&transitionReadError{transitionSamples{samples: []float32{.3, .3}, rate: 48000}}, TransitionSettings{Gapless: true}, 9)
+	count, failure := output.Read(make([]float32, 8))
+	if count != 4 || !errors.Is(failure, io.ErrUnexpectedEOF) {
+		t.Fatalf("新曲错误被吞掉: count=%d err=%v", count, failure)
+	}
+	events := output.eventsAt(2)
+	if len(events) != 3 || events[1].id != 9 || events[1].failed != nil || !events[2].ended || events[2].failed == nil {
+		t.Fatalf("已开播交接被回滚: %+v", events)
+	}
+}
+
+// 暂停意图出现后，尚未交接的下一曲不能被提前解码的窗口启动。
+func TestTransitionPausePreventsPendingHandoff(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2, .2, .2}, rate: 48000})
+	defer output.Close()
+	output.queue(&transitionSamples{samples: []float32{.3, .3}, rate: 48000}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second, Gapless: true}, 8)
+	output.setAllowed(false)
+	actual := make([]float32, 8)
+	count, _ := output.Read(actual)
+	if count != 4 {
+		t.Fatalf("暂停后新曲仍开播: %v", actual)
+	}
+	for _, event := range output.eventsAt(8) {
+		if event.id == 8 {
+			t.Fatal("暂停后仍发生交接")
+		}
+	}
+}
+
+// 最终准入期间暂停不能吞掉 B 首帧，也不能恢复时再次使用已经结束的准入上下文。
+func TestTransitionPauseDuringAdmissionPreservesFirstFrame(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2, .2, .2}, rate: 48000})
+	defer output.Close()
+	admissions := 0
+	output.queueConfigured(&transitionSamples{samples: []float32{.3, .3, .4, .4, .5, .5}, rate: 48000}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second, Gapless: true}, 8, 1, func() error {
+		admissions++
+		if admissions > 1 {
+			return io.ErrClosedPipe
+		}
+		output.setAllowed(false)
+		return nil
+	}, nil)
+	paused := make([]float32, 2)
+	output.Read(paused)
+	if !reflect.DeepEqual(paused, []float32{.2, .2}) {
+		t.Fatalf("暂停期间旧曲丢帧: %v", paused)
+	}
+	for _, event := range output.eventsAt(1) {
+		if event.id == 8 {
+			t.Fatal("暂停时仍发生交接")
+		}
+	}
+	output.setAllowed(true)
+	actual := make([]float32, 6)
+	count, _ := output.Read(actual)
+	if admissions != 1 || count != len(actual) || math.Abs(float64(actual[0])-.3) > .00001 {
+		t.Fatalf("暂停恢复丢失准入或首帧: admissions=%d count=%d samples=%v", admissions, count, actual)
+	}
+}
+
+// gapless 在 EOF 准入期间暂停时不产生永久结束，恢复继续使用同一首帧和一次准入。
+func TestTransitionGaplessPauseDuringAdmissionResumesPreparedSong(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2}, rate: 48000})
+	defer output.Close()
+	admissions := 0
+	output.queueConfigured(&transitionSamples{samples: []float32{.3, .3, .4, .4}, rate: 48000}, TransitionSettings{Gapless: true}, 8, 1, func() error {
+		admissions++
+		output.setAllowed(false)
+		return nil
+	}, nil)
+	if count, failure := output.Read(make([]float32, 8)); count != 2 || failure != nil {
+		t.Fatalf("暂停被当成永久 EOF: count=%d err=%v", count, failure)
+	}
+	for _, event := range output.eventsAt(1) {
+		if event.ended {
+			t.Fatal("暂停生成了旧曲的永久终止事件")
+		}
+	}
+	output.setAllowed(true)
+	actual := make([]float32, 4)
+	count, _ := output.Read(actual)
+	if admissions != 1 || count != 4 || !reflect.DeepEqual(actual, []float32{.3, .3, .4, .4}) {
+		t.Fatalf("恢复重播或丢首帧: admissions=%d count=%d samples=%v", admissions, count, actual)
+	}
+}
+
+// 不同采样率按同一输出时钟接续，重采样保持常量与正确帧数。
+func TestTransitionResamplesBeforeGaplessBoundary(t *testing.T) {
+	for _, rate := range []int{24000, 44100, 96000} {
+		samples := make([]float32, rate/100*2)
+		for index := range samples {
+			samples[index] = .25
+		}
+		decoder := newTransitionDecoder(&transitionSamples{samples: samples, rate: rate})
+		actual := make([]float32, 1200)
+		count, failure := decoder.Read(actual)
+		if count != 960 || failure != io.EOF {
+			t.Fatalf("rate=%d count=%d err=%v", rate, count, failure)
+		}
+		for _, sample := range actual[:count] {
+			if math.Abs(float64(sample)-.25) > .0001 {
+				t.Fatalf("rate=%d sample=%v", rate, sample)
+			}
+		}
+	}
+}
+
+// 新曲首帧失败时旧曲的每帧保持原音量，且只能报告失败而不能报告交接。
+func TestTransitionFailureBeforeFirstFrameKeepsOldSong(t *testing.T) {
+	first := &transitionSamples{samples: []float32{.4, .4, .4, .4, .4, .4, .4, .4}, rate: 48000}
+	output := newTransitionOutput(first)
+	output.started = true
+	defer output.Close()
+	output.queue(&transitionBroken{}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second, Gapless: true}, 7)
+	actual := make([]float32, 8)
+	count, _ := output.Read(actual)
+	if count != 8 || !reflect.DeepEqual(actual, first.samples) {
+		t.Fatalf("旧曲被打断或静音: %v", actual)
+	}
+	events := output.eventsAt(8)
+	if len(events) != 2 || events[0].failed == nil || !events[1].ended || events[1].id != 0 {
+		t.Fatalf("错误交接: %+v", events)
+	}
+}
+
+// 曲尾才发现待接曲不可读时，失败不能挡住同帧的结束事件，播放器仍需进入有限回退。
+func TestTransitionGaplessFailureAtEndStillCompletes(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2, .2, .2}, rate: 48000})
+	defer output.Close()
+	output.queue(&transitionBroken{}, TransitionSettings{Gapless: true}, 1)
+	if count, failure := output.Read(make([]float32, 8)); count != 4 || failure != io.EOF {
+		t.Fatalf("旧曲没有正常结束: count=%d err=%v", count, failure)
+	}
+	events := output.eventsAt(2)
+	if len(events) != 3 || events[1].failed == nil || !events[2].ended || events[2].id != 0 {
+		t.Fatalf("曲尾失败挡住了结束事件: %+v", events)
+	}
+}
+
+// 两轨等功率交叉在首尾准确，相关满幅输入经过共同峰值保护后不硬削波。
+func TestTransitionCrossfadeUsesSharedOutputFrames(t *testing.T) {
+	first := &transitionSamples{samples: []float32{.4, .4, .4, .4, .4, .4}, rate: 48000}
+	second := &transitionSamples{samples: []float32{.4, .4, .4, .4, .4, .4}, rate: 48000}
+	output := newTransitionOutput(first)
+	output.started = true
+	defer output.Close()
+	output.queue(second, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second}, 1)
+	actual := make([]float32, 6)
+	output.Read(actual)
+	if math.Abs(float64(actual[0])-.4) > .00001 || math.Abs(float64(actual[2])-.5656854) > .00001 || math.Abs(float64(actual[4])-.4) > .00001 {
+		t.Fatalf("交叉曲线: %v", actual)
+	}
+}
+
+// 同相满幅混音共同衰减左右声道，不能逐声道削波改变声像；反相信号保留自然抵消。
+func TestTransitionPeakProtectionKeepsStereoBalance(t *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		incoming []float32
+		middle   [2]float32
+	}{
+		{"correlated", []float32{1, .5, 1, .5, 1, .5}, [2]float32{1, .5}},
+		{"opposed", []float32{-1, -.5, -1, -.5, -1, -.5}, [2]float32{0, 0}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			output := newTransitionOutput(&transitionSamples{samples: []float32{1, .5, 1, .5, 1, .5}, rate: 48000})
+			defer output.Close()
+			output.queue(&transitionSamples{samples: scenario.incoming, rate: 48000}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second}, 1)
+			actual := make([]float32, 6)
+			if count, _ := output.Read(actual); count != len(actual) {
+				t.Fatalf("混音丢帧: %d", count)
+			}
+			for channel, expected := range scenario.middle {
+				if math.Abs(float64(actual[2+channel]-expected)) > .00001 {
+					t.Fatalf("中点声像改变: %v", actual)
+				}
+			}
+			for _, sample := range actual {
+				if math.Abs(float64(sample)) > 1 {
+					t.Fatalf("混音超过满幅: %v", actual)
+				}
+			}
+		})
+	}
+}
+
+// 待接曲短于配置过渡时，必须等它能覆盖整个剩余窗口再交接。
+func TestTransitionShortIncomingCommitsOnlyAtItsWindow(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2, .2, .2}, rate: 48000})
+	output.started = true
+	defer output.Close()
+	next := &transitionSamples{samples: []float32{.3, .3}, rate: 48000}
+	output.queue(next, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second}, 2)
+	output.Read(make([]float32, 2))
+	events := output.eventsAt(0)
+	if len(events) != 0 {
+		t.Fatalf("短曲窗口应在最后一帧才开始: %+v", events)
+	}
+	output.Read(make([]float32, 2))
+	events = output.eventsAt(2)
+	if len(events) != 2 || events[0].id != 2 || events[0].failed != nil || !events[1].ended {
+		t.Fatalf("新曲未交接: %+v", events)
+	}
+}
+
+// 交叉结束后歌曲响度增益继续作用，不能随着尾轨释放被跳过。
+func TestTransitionGainContinuesAfterOverlap(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.4, .4, .4, .4}, rate: 48000})
+	defer output.Close()
+	output.queue(&transitionSamples{samples: []float32{.4, .4, .4, .4, .4, .4, .4, .4}, rate: 48000}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second}, 3)
+	output.configureNext(3, .5, nil)
+	actual := make([]float32, 8)
+	output.Read(actual)
+	if math.Abs(float64(actual[6])-.2) > .00001 {
+		t.Fatalf("尾轨释放后丢失响度增益: %v", actual)
+	}
+}
+
+// 预混已经进入 B、可听身份仍为 A 时调整主音量，不能把 A 的响度增益写给 B。
+func TestTransitionVolumeBeforeAudibleHandoffKeepsIncomingGain(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.4, .4, .4, .4}, rate: 48000})
+	defer output.Close()
+	output.queueConfigured(&transitionSamples{samples: []float32{.4, .4, .4, .4, .4, .4, .4, .4}, rate: 48000}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second}, 3, .5, nil, nil)
+	output.Read(make([]float32, 2))
+	current := New(func(func()) {})
+	current.transition = output
+	current.gain = 1
+	current.Normalize = func() bool { return true }
+	current.SetVolume(.5)
+	actual := make([]float32, 6)
+	output.Read(actual)
+	if math.Abs(float64(actual[4])-.2) > .00001 {
+		t.Fatalf("调主音量污染新曲响度: %v", actual)
+	}
+}
+
+// 未知长度的新曲提前结束时，旧尾曲不能继续冒充当前曲或混入第三首。
+func TestTransitionShortUnknownIncomingReleasesTail(t *testing.T) {
+	output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2, .2, .2, .2, .2, .2, .2}, rate: 48000})
+	defer output.Close()
+	output.queue(&transitionSamples{samples: []float32{.3, .3}, rate: 48000, unknown: true}, TransitionSettings{Crossfade: true, CrossfadeDuration: time.Second, Gapless: true}, 2)
+	output.Read(make([]float32, 2))
+	output.queue(&transitionSamples{samples: []float32{.4, .4, .4, .4}, rate: 48000}, TransitionSettings{Gapless: true}, 3)
+	actual := make([]float32, 4)
+	output.Read(actual)
+	if !reflect.DeepEqual(actual, []float32{.4, .4, .4, .4}) {
+		t.Fatalf("第三曲混入旧尾曲: %v", actual)
+	}
+}
+
+func (samples *transitionSamples) SampleRate() int { return samples.rate }
+func (samples *transitionSamples) Channels() int   { return 2 }
+func (samples *transitionSamples) Len() int64 {
+	if samples.unknown {
+		return -1
+	}
+	return int64(len(samples.samples) / 2)
+}
+func (samples *transitionSamples) SetPosition(frame int64) error {
+	samples.pos = min(int(frame)*2, len(samples.samples))
+	return nil
+}
+func (samples *transitionSamples) Read(dst []float32) (int, error) {
+	count := copy(dst, samples.samples[samples.pos:])
+	samples.pos += count
+	if samples.pos == len(samples.samples) {
+		return count, io.EOF
+	}
+	return count, nil
+}
+
+// 自然接歌跨越同一次读取时，末尾样本与 EOF 不能吞掉下一首或额外补静音。
+func TestTransitionGaplessKeepsEveryFrame(t *testing.T) {
+	first := &transitionSamples{samples: []float32{.1, .1, .2, .2}, rate: 48000}
+	second := &transitionSamples{samples: []float32{.3, .3, .4, .4}, rate: 48000}
+	output := newTransitionOutput(first)
+	output.started = true
+	defer output.Close()
+	output.queue(second, TransitionSettings{Gapless: true}, 1)
+	var decoder audio.Decoder = output
+	actual := make([]float32, 8)
+	count, failure := decoder.Read(actual)
+	if count != 8 || failure != io.EOF || !reflect.DeepEqual(actual, []float32{.1, .1, .2, .2, .3, .3, .4, .4}) {
+		t.Fatalf("frames=%v count=%d failure=%v", actual, count, failure)
+	}
+	if events := output.eventsAt(1); len(events) != 0 {
+		t.Fatalf("交接过早: %v", events)
+	}
+	events := output.eventsAt(3)
+	if len(events) != 1 || events[0].id != 1 || events[0].frame != 2 {
+		t.Fatalf("交接边界: %+v", events)
+	}
+}
