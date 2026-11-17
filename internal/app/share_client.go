@@ -308,6 +308,35 @@ func (c *shareClient) get(ctx context.Context, id string) (*shareResult, error) 
 	return &result, nil
 }
 
+func (c *shareClient) reuse(ctx context.Context, metadata shareMetadata, cover []byte) (*shareResult, error) {
+	if len(cover) > 0 {
+		metadata.CoverHash = fmt.Sprintf("%x", sha256.Sum256(cover))
+	}
+	body, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("encode share details: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	response, err := c.request(ctx, http.MethodPost, "/api/shares/reuse", bytes.NewReader(body), int64(len(body)), "application/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	// 旧服务尚无查询接口时仍允许发布；明确支持查询的服务失败则保留错误，避免盲目重复上传。
+	if response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusNotFound {
+		response.Body.Close()
+		return nil, nil
+	}
+	var result shareResult
+	if err := decodeShareResponse(response, &result); err != nil {
+		return nil, err
+	}
+	if result.Status != "ready" || result.ID == "" || result.URL == "" {
+		return nil, errors.New("share service returned an invalid reusable share")
+	}
+	return &result, nil
+}
+
 func (c *shareClient) list(ctx context.Context) ([]shareListItem, error) {
 	response, err := c.request(ctx, http.MethodGet, "/api/shares", nil, 0, "", nil)
 	if err != nil {

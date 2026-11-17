@@ -46,17 +46,18 @@ func (a *app) publishOnlineShare(draft *shareDraft) {
 		return
 	}
 	lib := a.trackLib(&draft.track)
-	if lib == nil || lib.src == nil || !a.canDownload(&draft.track) {
-		draft.onlineError = music.ErrUnavailable
-		draft.status = T("Could not prepare audio")
-		return
+	var source music.Source
+	if lib != nil {
+		source = lib.src
 	}
+	canDownload := a.canDownload(&draft.track)
 	requestSnapshot, err := shareRequestSnapshot(metadata, cover)
 	if err != nil {
 		draft.onlineError = err
 		draft.status = T("Could not prepare online share")
 		return
 	}
+	revision := draft.onlineRevision
 	idempotencyKey := draft.onlineRequestKey
 	previousID := ""
 	if draft.onlineURL != "" || idempotencyKey == "" || draft.onlineRequestSnapshot != requestSnapshot {
@@ -65,6 +66,7 @@ func (a *app) publishOnlineShare(draft *shareDraft) {
 		}
 		idempotencyKey, err = newShareIdempotencyKey()
 		if err != nil {
+			draft.pendingOutput = shareOutputNone
 			draft.onlineError = err
 			draft.status = T("Could not prepare online share")
 			return
@@ -74,39 +76,56 @@ func (a *app) publishOnlineShare(draft *shareDraft) {
 	}
 
 	// 后台只读本次发布快照，不能在用户切换来源或关闭面板后读取可变草稿。
-	track, quality, source, player := draft.track, draft.onlineQuality, lib.src, a.pl
+	track, quality, player := draft.track, draft.onlineQuality, a.pl
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	draft.onlineCancel = cancel
-	draft.onlinePublishing, draft.onlineError, draft.status = true, nil, T("Preparing online share…")
+	draft.onlinePublishing, draft.onlineError, draft.status = true, nil, T("Checking existing shares…")
 	go func() {
 		defer cancel()
+		// 查询放在下载之前，重新打开面板或重启应用也能直接复用服务端的有效快照。
+		reused, err := client.reuse(ctx, metadata, cover)
+		if err != nil || reused != nil {
+			a.finishOnlineShare(draft, reused, err, revision, requestSnapshot)
+			return
+		}
+		// 历史分享命中时无需原音源仍可下载；只有新建才检查当前来源能力。
+		if source == nil || !canDownload {
+			a.finishOnlineShare(draft, nil, music.ErrUnavailable, revision, requestSnapshot)
+			return
+		}
+		a.post(func() {
+			if a.sharing == draft && draft.open && draft.onlineRevision == revision {
+				draft.onlineURL = ""
+				draft.status = T("Preparing online share…")
+			}
+		})
 		tempDir, err := os.MkdirTemp("", "mygo-share-")
 		if err != nil {
-			a.finishOnlineShare(draft, nil, err)
+			a.finishOnlineShare(draft, nil, err, revision, requestSnapshot)
 			return
 		}
 		defer os.RemoveAll(tempDir)
 
 		if previousID != "" {
 			if err := client.revoke(ctx, previousID); err != nil {
-				a.finishOnlineShare(draft, nil, fmt.Errorf("could not replace unfinished share: %w", err))
+				a.finishOnlineShare(draft, nil, fmt.Errorf("could not replace unfinished share: %w", err), revision, requestSnapshot)
 				return
 			}
 		}
 		song, err := player.FindSongContext(ctx, source, track, quality)
 		if err != nil {
-			a.finishOnlineShare(draft, nil, err)
+			a.finishOnlineShare(draft, nil, err, revision, requestSnapshot)
 			return
 		}
 		if err := ctx.Err(); err != nil {
 			song.Close()
-			a.finishOnlineShare(draft, nil, err)
+			a.finishOnlineShare(draft, nil, err, revision, requestSnapshot)
 			return
 		}
 		audioPath := filepath.Join(tempDir, songFileName(&track, song.Type))
 		err = song.SaveToContext(ctx, audioPath)
 		if err != nil {
-			a.finishOnlineShare(draft, nil, err)
+			a.finishOnlineShare(draft, nil, err, revision, requestSnapshot)
 			return
 		}
 
@@ -143,14 +162,14 @@ func (a *app) publishOnlineShare(draft *shareDraft) {
 			}
 		}
 		if err != nil {
-			a.finishOnlineShare(draft, result, err)
+			a.finishOnlineShare(draft, result, err, revision, requestSnapshot)
 			return
 		}
 		if result.URL == "" {
-			a.finishOnlineShare(draft, result, errors.New("share service did not publish a link"))
+			a.finishOnlineShare(draft, result, errors.New("share service did not publish a link"), revision, requestSnapshot)
 			return
 		}
-		a.finishOnlineShare(draft, result, nil)
+		a.finishOnlineShare(draft, result, nil, revision, requestSnapshot)
 	}()
 }
 
@@ -228,15 +247,20 @@ func (a *app) previewShareClip(draft *shareDraft) {
 	}()
 }
 
-func (a *app) finishOnlineShare(draft *shareDraft, result *shareResult, err error) {
+func (a *app) finishOnlineShare(draft *shareDraft, result *shareResult, err error, revision uint64, snapshot string) {
 	a.post(func() {
 		if a.sharing != draft || !draft.open {
 			return
 		}
 		draft.onlinePublishing = false
 		draft.onlineCancel = nil
+		if draft.onlineRevision != revision {
+			draft.pendingOutput = shareOutputNone
+			return
+		}
 		draft.onlineError = err
 		if err != nil {
+			draft.pendingOutput = shareOutputNone
 			draft.status = T("Could not publish online share")
 			if errors.Is(err, context.Canceled) {
 				draft.status = T("Online sharing cancelled")
@@ -248,11 +272,12 @@ func (a *app) finishOnlineShare(draft *shareDraft, result *shareResult, err erro
 		}
 		draft.onlineURL = result.URL
 		draft.onlineID = result.ID
-		draft.onlinePublishedSnapshot = draft.onlineRequestSnapshot
-		draft.onlinePublishedRevision = draft.onlineRevision
+		draft.onlinePublishedSnapshot = snapshot
+		draft.onlinePublishedRevision = revision
 		draft.onlineRequestKey = ""
 		draft.status = T("Online link ready")
 		a.requestShareRender()
+		a.resumeShareOutput(draft)
 	})
 }
 
@@ -390,9 +415,13 @@ func encodeShareCover(cover image.Image) ([]byte, error) {
 }
 
 func (a *app) copyOnlineShareLink(draft *shareDraft) {
-	if draft.onlineURL == "" {
+	if a.prepareOnlineCardOutput(draft, shareOutputCopyLink) {
 		return
 	}
+	a.copyPublishedShareLink(draft)
+}
+
+func (a *app) copyPublishedShareLink(draft *shareDraft) {
 	if err := copyText(draft.onlineURL); err != nil {
 		a.toast = T("Could not copy link")
 		return

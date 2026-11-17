@@ -21,8 +21,24 @@ func (a *app) shareDialog(c *ui.Context) {
 	}
 	width, height := c.Size()
 	palette := a.pal
-	ui.DialogBase(c.Key("share-card"), &draft.open, func(backdrop, panel ui.Element) {
+	busy := draft.onlinePublishing || draft.pendingOutput != shareOutputNone || draft.exporting
+	// DialogBase 会在 Escape 或点击遮罩时改写 open；忙碌时只改局部值，保持模态与任务存活。
+	open := draft.open
+	ui.DialogBase(c.Key("share-card"), &open, func(backdrop, panel ui.Element) {
 		backdrop.Background(ui.RGBA(0, 0, 0, 0.5))
+		if busy {
+			panel.Width(min(420, width-48)).Padding(28).Radius(20).Gap(14).AlignItems(ui.Center).
+				Background(palette.bg).Border(1, palette.hairline)
+			ui.Spinner(c).FontSize(32).TextColor(palette.accent).Label(T("Preparing share"))
+			status := draft.status
+			if status == "" {
+				status = T("Preparing share…")
+			}
+			ui.Text(c, status).FontSize(15).FontWeight(600).TextColor(palette.text)
+			ui.Text(c, T("Please wait until processing finishes")).FontSize(13).TextColor(palette.muted)
+			ui.Text(c, draft.track.Name+" · "+draft.track.ArtistNames()).FontSize(12).TextColor(palette.muted).SingleLine()
+			return
+		}
 		panel.Width(min(1040, width-48)).Padding(24).Radius(20).Gap(18).Background(palette.bg).Border(1, palette.hairline)
 		ui.Row(c).AlignItems(ui.Center).Gap(16).Children(func() {
 			ui.Column(c).Grow(1).Gap(4).Children(func() {
@@ -37,6 +53,7 @@ func (a *app) shareDialog(c *ui.Context) {
 			}
 		})
 		a.shareControls(c, draft)
+		a.shareLinkControls(c, draft)
 		if draft.onlineMode == "clip" {
 			if start, end, ok := shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable); ok {
 				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
@@ -67,7 +84,7 @@ func (a *app) shareDialog(c *ui.Context) {
 					default:
 						for index, line := range a.shareLines(draft) {
 							row := ui.ButtonBase(c.Key(index)).Column().AlignItems(ui.Start).Padding(12, 14).Gap(6).Radius(10).
-								Disabled(draft.onlinePublishing).Label(Tf("Select lyric %d", index+1))
+								Disabled(draft.onlinePublishing || draft.exporting || draft.pendingOutput != shareOutputNone).Label(Tf("Select lyric %d", index+1))
 							if draft.selected[index] {
 								row.Background(palette.accent.Alpha(0.12)).Border(1, palette.accent.Alpha(0.35))
 							}
@@ -115,12 +132,12 @@ func (a *app) shareDialog(c *ui.Context) {
 						a.requestShareRender()
 					}
 				}
-				if sharecard.PageURL(draft.track.URL) == "" {
+				if !draft.cardOnline && sharecard.PageURL(draft.track.URL) == "" {
 					ui.Text(c, T("No song link; QR code omitted")).FontSize(11).TextColor(palette.muted)
 				}
-				if a.onlineLinkMatchesDraft(draft) {
+				if draft.cardOnline && a.onlineLinkMatchesDraft(draft) {
 					ui.Text(c, T("QR code uses the online listening link")).FontSize(11).TextColor(palette.muted)
-				} else if draft.onlineURL != "" {
+				} else if draft.cardOnline && draft.onlineURL != "" {
 					ui.Text(c, T("Online link is for a previous snapshot")).FontSize(11).TextColor(palette.muted)
 				}
 			})
@@ -130,36 +147,29 @@ func (a *app) shareDialog(c *ui.Context) {
 				ui.Text(c, draft.status).FontSize(12).TextColor(palette.muted)
 			}
 			ui.Spacer(c)
-			if draft.onlinePublishing && ui.Button(c.Key("cancel-online-link"), T("Cancel Upload")).Clicked() {
-				if draft.onlineCancel != nil {
-					draft.onlineCancel()
-				}
+			if ui.Button(c.Key("copy-online-link"), T("Copy Listen Link")).
+				Disabled(draft.onlinePublishing || draft.loading || draft.coverLoading || draft.exporting || draft.pendingOutput != shareOutputNone).Clicked() {
+				a.copyOnlineShareLink(draft)
 			}
-			if draft.onlineURL != "" {
-				if ui.Button(c.Key("copy-online-link"), T("Copy Link")).Clicked() {
-					a.copyOnlineShareLink(draft)
-				}
-			}
-			createLinkLabel := "Create Listen Link"
-			if draft.onlineURL != "" {
-				createLinkLabel = "Create New Listen Link"
-			}
-			if ui.PrimaryButton(c.Key("create-online-link"), T(createLinkLabel)).
-				Disabled(draft.onlinePublishing || draft.rendering || draft.loading || draft.coverLoading).
+			if ui.PrimaryButton(c.Key("create-online-link"), T("Create Listen Link")).
+				Disabled(draft.onlinePublishing || draft.rendering || draft.loading || draft.coverLoading || draft.exporting || draft.pendingOutput != shareOutputNone).
 				Clicked() {
 				a.publishOnlineShare(draft)
 			}
 			if ui.Button(c, T("Copy Lyrics")).Disabled(len(a.shareFragment(draft)) == 0).Clicked() {
 				a.copyShareLyrics(draft)
 			}
-			if ui.Button(c, T("Copy Image")).Disabled(len(draft.png) == 0 || draft.exporting).Clicked() {
+			if ui.Button(c, T("Copy Image")).Disabled(len(draft.png) == 0 || draft.exporting || draft.onlinePublishing || draft.pendingOutput != shareOutputNone).Clicked() {
 				a.copyShareImage(draft)
 			}
-			if ui.PrimaryButton(c, T("Save PNG")).Disabled(len(draft.png) == 0 || draft.exporting).Clicked() {
+			if ui.PrimaryButton(c, T("Save PNG")).Disabled(len(draft.png) == 0 || draft.exporting || draft.onlinePublishing || draft.pendingOutput != shareOutputNone).Clicked() {
 				a.saveShareImage(draft)
 			}
 		})
 	})
+	if !busy && !open {
+		draft.open = false
+	}
 	if !draft.open {
 		a.stopSharePreview(draft)
 		if draft.onlineCancel != nil {
@@ -175,7 +185,7 @@ func shareClipTime(at time.Duration) string {
 }
 
 func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
-	ui.Row(c).Gap(10).AlignItems(ui.Center).Disabled(draft.onlinePublishing).Children(func() {
+	ui.Row(c).Gap(10).AlignItems(ui.Center).Disabled(draft.onlinePublishing || draft.exporting || draft.pendingOutput != shareOutputNone).Children(func() {
 		if draft.aggregateView != nil && len(uniqueAggregateSources(draft.track.AggregateSources)) > 1 {
 			source := aggregateViewSource(c, draft.aggregateView, &draft.track)
 			if queued, err := aggregateQueueTracks([]music.Track{draft.track}, draft.aggregateView.sourceChoices); err != nil {
@@ -217,6 +227,7 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 					draft.onlineMode = "full"
 					draft.onlineError = nil
 					draft.onlineRevision++
+					a.requestShareRender()
 				}
 				_, _, clipAvailable := shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable)
 				if menu.Item(T("Selected Clip")).Radio(draft.onlineMode == "clip").
@@ -224,6 +235,7 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 					draft.onlineMode = "clip"
 					draft.onlineError = nil
 					draft.onlineRevision++
+					a.requestShareRender()
 				}
 			})
 		if _, _, available := shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable); !available {
@@ -242,6 +254,7 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 					a.stopSharePreview(draft)
 					draft.onlineQuality = quality.level
 					draft.onlineRevision++
+					a.requestShareRender()
 				}
 			}
 		})
@@ -304,7 +317,35 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 			a.lyricScriptItems(menu, &draft.track)
 			if script != a.settings.LyricsScript || original != a.settings.ChineseLyrics[a.lyricKey(&draft.track)] {
 				draft.onlineRevision++
+				a.requestShareRender()
 			}
 		})
+	})
+}
+
+func (a *app) shareLinkControls(c *ui.Context, draft *shareDraft) {
+	label := "Original Song Page"
+	hint := "QR code links to the original song page"
+	if draft.cardOnline {
+		label = "Online Listening Link"
+		hint = "Copying or saving reuses an active share or creates a listening link"
+		if a.onlineLinkMatchesDraft(draft) {
+			hint = "QR code uses the online listening link"
+		}
+	}
+	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+		ui.Button(c.Key("card-link-target"), T("Card Link")+": "+T(label)).Label(T("Card Link")).
+			Disabled(draft.onlinePublishing || draft.exporting || draft.pendingOutput != shareOutputNone).
+			Menu(func(menu *ui.Menu) {
+				if menu.Item(T("Online Listening Link")).Radio(draft.cardOnline).Chosen() && !draft.cardOnline {
+					draft.cardOnline = true
+					a.requestShareRender()
+				}
+				if menu.Item(T("Original Song Page")).Radio(!draft.cardOnline).Chosen() && draft.cardOnline {
+					draft.cardOnline = false
+					a.requestShareRender()
+				}
+			})
+		ui.Text(c, T(hint)).FontSize(11.5).TextColor(a.pal.muted).Shrink(1).MinWidth(0)
 	})
 }

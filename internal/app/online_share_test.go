@@ -142,6 +142,10 @@ func TestShareClientProductionContract(t *testing.T) {
 		if result.Status != "ready" || result.URL == "" {
 			t.Fatalf("%s publication: %+v", mode, result)
 		}
+		reused, err := client.reuse(ctx, metadata, nil)
+		if err != nil || reused == nil || reused.ID != result.ID || reused.URL != result.URL || reused.Expires != result.Expires {
+			t.Fatalf("%s production reuse: %+v, original=%+v, error=%v", mode, reused, result, err)
+		}
 		response, err := client.http.Get(strings.Replace(result.URL, "/s/", "/api/public/", 1))
 		if err != nil {
 			t.Fatal(err)
@@ -217,6 +221,10 @@ func TestSharePublishRetriesAfterPollingFailure(t *testing.T) {
 	polls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/api/shares/reuse" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if request.Method == http.MethodPost {
 			keys = append(keys, request.Header.Get("Idempotency-Key"))
 			io.WriteString(w, `{"id":"retry-share","status":"processing"}`)

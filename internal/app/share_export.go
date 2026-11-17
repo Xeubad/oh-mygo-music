@@ -22,7 +22,66 @@ var saveCardAs = func(a *app, name, directory string) (string, error) {
 		Filters: []mygo.FileFilter{{Name: "PNG", Extensions: []string{"png"}}}, CreateDirectories: true})
 }
 
+type shareOutput uint8
+
+const (
+	shareOutputNone shareOutput = iota
+	shareOutputCopyImage
+	shareOutputSaveImage
+	shareOutputCopyLink
+)
+
+func (a *app) prepareOnlineCardOutput(draft *shareDraft, output shareOutput) bool {
+	if !draft.cardOnline && output != shareOutputCopyLink {
+		return false
+	}
+	if draft.onlinePublishing || draft.exporting || draft.pendingOutput != shareOutputNone {
+		return true
+	}
+	// 每次导出重新确认服务端有效期与撤销状态，不能仅凭本地 URL 判断可以复用。
+	draft.pendingOutput, draft.pendingOutputRevision = output, draft.onlineRevision
+	a.publishOnlineShare(draft)
+	if !draft.onlinePublishing {
+		draft.pendingOutput = shareOutputNone
+	}
+	return true
+}
+
+func (a *app) resumeShareOutput(draft *shareDraft) {
+	if a.sharing != draft || !draft.open || draft.pendingOutput == shareOutputNone {
+		return
+	}
+	if draft.pendingOutputRevision != draft.onlineRevision {
+		draft.pendingOutput = shareOutputNone
+		return
+	}
+	if draft.onlinePublishing || !a.onlineLinkMatchesDraft(draft) {
+		return
+	}
+	output := draft.pendingOutput
+	if output != shareOutputCopyLink && (len(draft.png) == 0 || draft.pngURL != draft.onlineURL) {
+		return
+	}
+	// 发布和卡片重绘都完成后再执行原来的导出动作，不能拿上传前的旧 PNG。
+	draft.pendingOutput = shareOutputNone
+	switch output {
+	case shareOutputCopyImage:
+		a.copyPreparedShareImage(draft)
+	case shareOutputSaveImage:
+		a.savePreparedShareImage(draft)
+	case shareOutputCopyLink:
+		a.copyPublishedShareLink(draft)
+	}
+}
+
 func (a *app) saveShareImage(draft *shareDraft) {
+	if a.prepareOnlineCardOutput(draft, shareOutputSaveImage) {
+		return
+	}
+	a.savePreparedShareImage(draft)
+}
+
+func (a *app) savePreparedShareImage(draft *shareDraft) {
 	if len(draft.png) == 0 || draft.exporting {
 		return
 	}
@@ -78,6 +137,13 @@ func writeCardPNG(path string, data []byte) error {
 }
 
 func (a *app) copyShareImage(draft *shareDraft) {
+	if a.prepareOnlineCardOutput(draft, shareOutputCopyImage) {
+		return
+	}
+	a.copyPreparedShareImage(draft)
+}
+
+func (a *app) copyPreparedShareImage(draft *shareDraft) {
 	if len(draft.png) == 0 || draft.exporting {
 		return
 	}

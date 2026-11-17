@@ -40,9 +40,13 @@ type shareDraft struct {
 	renderError             error
 	preview                 *ui.Bitmap
 	png                     []byte
+	pngURL                  string
 	exporting               bool
 	status                  string
 	onlineMode              string
+	cardOnline              bool
+	pendingOutput           shareOutput
+	pendingOutputRevision   uint64
 	onlineQuality           string
 	onlineURL               string
 	onlineID                string
@@ -74,6 +78,7 @@ func (a *app) openShare(track music.Track) {
 	draft := &shareDraft{
 		open: true, track: track, selected: make(map[int]bool),
 		onlineMode: "full", onlineQuality: a.settings.Quality,
+		cardOnline: strings.TrimSpace(a.settings.ShareServerURL) != "",
 	}
 	if len(uniqueAggregateSources(track.AggregateSources)) > 1 {
 		draft.aggregateView = &aggregateView{}
@@ -201,16 +206,14 @@ func (a *app) requestShareRender() {
 		return
 	}
 	draft.renderSerial++
-	draft.png, draft.preview, draft.renderError = nil, nil, nil
+	draft.png, draft.preview, draft.renderError, draft.pngURL = nil, nil, nil, ""
 	if draft.loading || draft.coverLoading || draft.rendering {
 		return
 	}
 	serial := draft.renderSerial
+	revision := draft.onlineRevision
 	draft.rendering = true
-	cardURL := draft.track.URL
-	if a.onlineLinkMatchesDraft(draft) {
-		cardURL = draft.onlineURL
-	}
+	cardURL := a.shareCardURL(draft)
 	card := sharecard.Card{Title: draft.track.Name, Artist: draft.track.ArtistNames(), URL: cardURL,
 		Template: a.settings.CardTemplate, Square: a.settings.CardSquare, Cover: draft.cover, Lines: a.shareFragment(draft)}
 	go func() {
@@ -221,7 +224,7 @@ func (a *app) requestShareRender() {
 			}
 			draft.rendering = false
 			// 连续操作最多保留一个渲染任务，过期结果只触发最新快照，不回写旧图片。
-			if serial != draft.renderSerial {
+			if serial != draft.renderSerial || revision != draft.onlineRevision {
 				a.requestShareRender()
 				return
 			}
@@ -230,8 +233,25 @@ func (a *app) requestShareRender() {
 				draft.preview, draft.renderError = ui.DecodeBitmap(data)
 				if draft.renderError == nil {
 					draft.png = data
+					draft.pngURL = cardURL
 				}
+			}
+			if draft.renderError != nil {
+				draft.pendingOutput = shareOutputNone
+			} else {
+				a.resumeShareOutput(draft)
 			}
 		})
 	}()
+}
+
+func (a *app) shareCardURL(draft *shareDraft) string {
+	if !draft.cardOnline {
+		return draft.track.URL
+	}
+	if a.onlineLinkMatchesDraft(draft) {
+		return draft.onlineURL
+	}
+	// 在线卡片尚未发布时不回退到原曲，避免预览和最终导出含义不一致。
+	return ""
 }
