@@ -2,9 +2,9 @@ package i18n
 
 // zhCN is the app's text in Simplified Chinese, by its English.
 var zhCN = map[string]string{
-	"NetEase Resolver Key": "网易解析密钥",
-	"Save NetEase Key Securely": "安全保存网易密钥",
-	"Use NetEase Key Once": "临时使用网易密钥",
+	"NetEase Resolver Key":            "网易解析密钥",
+	"Save NetEase Key Securely":       "安全保存网易密钥",
+	"Use NetEase Key Once":            "临时使用网易密钥",
 	"Candidate Timeout (ms)":          "单候选超时（毫秒）",
 	"Round Timeout (ms)":              "整轮超时（毫秒）",
 	"Stall Detection (ms)":            "卡顿检测（毫秒）",
@@ -499,7 +499,7 @@ var zhCN = map[string]string{
 	"Source List":         "来源列表",
 	"Filter Tracks":       "筛选曲目",
 	"Refresh Cloud Lists": "刷新云端列表",
-	"NetEase account lists can be refreshed after sign-in; playback is not connected.": "登录后可刷新网易云账号列表；播放尚未接入。",
+	"Refresh NetEase lists after sign-in, then configure the NetEase resolver key to play.": "登录后刷新网易云列表，配置网易解析密钥即可播放。",
 	"Updating aggregate data…":                             "正在更新聚合数据…",
 	"Reload Cached Data":                                   "重载本机缓存",
 	"Select a second track to confirm the same recording.": "再选择一首曲目以确认是同一录音。",
