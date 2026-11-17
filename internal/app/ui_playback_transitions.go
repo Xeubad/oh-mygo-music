@@ -21,7 +21,7 @@ func (a *app) savePlaybackTransitions() {
 
 func (a *app) playbackTransitionSettings(c *ui.Context, row settingsRow, block settingsBlock) {
 	preferences := &a.settings
-	block(T("Audio transitions"), func() { ui.Text(c, T("Audio transitions")).FontSize(12).FontWeight(600).Margin(12, 16, 8, 16) })
+	settingsHeading(c, block, T("Audio transitions"), iconRepeat)
 	if a.playbackSettingsError != "" {
 		block(a.playbackSettingsError, func() {
 			ui.Text(c, a.playbackSettingsError).FontSize(12).TextColor(ui.RGB(184, 54, 54)).Margin(8, 16, 8, 16)
@@ -34,6 +34,7 @@ func (a *app) playbackTransitionSettings(c *ui.Context, row settingsRow, block s
 	row(T("Gapless playback"), T("Join ready songs without adding silence; keeps silence in the recording"), func() {
 		ui.Switch(c.Key("gapless"), &preferences.GaplessEnabled).Label(T("Gapless playback")).OnClick(func() { a.savePlaybackTransitions() })
 	})
+	settingsHeading(c, block, T("Play and Pause"), iconVolumeLow)
 	row(T("Fade playback and pause"), T("Fade in when starting or resuming, and fade out before pausing"), func() {
 		ui.Switch(c.Key("playback-fade"), &preferences.PlaybackFadeEnabled).Label(T("Fade playback and pause")).OnClick(func() { a.savePlaybackTransitions() })
 	})

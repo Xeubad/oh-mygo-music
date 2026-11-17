@@ -136,3 +136,28 @@ func TestPlaybackTransitionsFrame(t *testing.T) {
 		saveFrame(t, directory, scenario.name, tester.Image())
 	}
 }
+
+// 分类和图标在普通、窄屏和深色设置页中都使用真实视图渲染，布局由帧图验收。
+func TestSettingsCategoriesFrame(t *testing.T) {
+	directory := framesDir(t)
+	defer i18n.SetLanguage(i18n.English)
+	i18n.SetLanguage(i18n.Chinese)
+	for _, scenario := range []struct {
+		name, page    string
+		width, height int
+		dark          bool
+	}{
+		{"settings-general-categories.png", "general", 1000, 800, false},
+		{"settings-general-compact.png", "general", 640, 800, false},
+		{"settings-general-minimum.png", "general", 640, 420, false},
+		{"settings-playback-dark.png", "playback", 900, 1000, true},
+	} {
+		a := newTestApp()
+		a.settingsPage = scenario.page
+		a.settings.CrossfadeEnabled = true
+		tester := ui.NewTester(a.settingsView, scenario.width, scenario.height)
+		tester.SetDark(scenario.dark)
+		settled(tester)
+		saveFrame(t, directory, scenario.name, tester.Image())
+	}
+}

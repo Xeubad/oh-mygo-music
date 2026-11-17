@@ -134,6 +134,7 @@ type settingsBlock func(text string, draw func())
 type settingsSection struct {
 	id, title string
 	icon      *ui.SVG
+	group     int
 	build     func(row settingsRow, block settingsBlock)
 }
 
@@ -183,9 +184,21 @@ func (a *app) settingsView(c *ui.Context) {
 		}
 		ui.Column(c).Width(settingsSidebarWidth).Shrink(0).Padding(top, 12, 14, 12).Gap(2).Background(p.sidebar).DragWindow().Children(func() {
 			a.settingsSearch(c, p)
-			for _, sec := range sections {
-				a.settingsNavItem(c, p, sec, query == "" && sec.id == current.id)
-			}
+			ui.Scroll(c.Key("settings-navigation")).Grow(1).MinHeight(0).Gap(2).Children(func() {
+				groups := []string{T("Listening Experience"), T("Sources and Sharing"), T("Application")}
+				previous := -1
+				for _, sec := range sections {
+					if sec.group != previous {
+						spacing := float32(14)
+						if previous < 0 {
+							spacing = 0
+						}
+						ui.Text(c, groups[sec.group]).FontSize(11).FontWeight(600).TextColor(p.muted).Margin(spacing, 9, 6, 9)
+						previous = sec.group
+					}
+					a.settingsNavItem(c, p, sec, query == "" && sec.id == current.id)
+				}
+			})
 		})
 		ui.Box(c).Width(1).Shrink(0).Background(p.hairline)
 		// The page's title is in the header, the strip the window buttons leave. What
@@ -221,8 +234,13 @@ func (a *app) settingsView(c *ui.Context) {
 			// The + keeps clear of the window buttons where they sit at the
 			// right (Linux, Windows).
 			right := max(32, c.TitleBar().Right+12)
-			header := ui.Row(c.Key("header")).Absolute().Top(0).Left(0).Right(0).Height(topBar(c)).Padding(0, right, 0, 32).AlignItems(ui.Center).DragWindow()
+			header := ui.Row(c.Key("header")).Absolute().Top(0).Left(0).Right(0).Height(topBar(c)).Padding(0, right, 0, 32).Gap(8).AlignItems(ui.Center).DragWindow()
 			header.Children(func() {
+				glyph := current.icon
+				if query != "" {
+					glyph = iconSearch
+				}
+				ui.Icon(c, glyph).Size(16, 16).TextColor(p.accent).IgnoreInput(true)
 				ui.Text(c, title).FontSize(15).FontWeight(700).SingleLine().Shrink(1).MinWidth(0)
 				if query == "" && current.id == "plugins" {
 					ui.Box(c).Grow(1)
@@ -301,7 +319,10 @@ func (a *app) settingsFinds(sec settingsSection, query string) bool {
 // under its title if it has one.
 func (a *app) settingsGroup(c *ui.Context, p palette, sec settingsSection, title, query string) {
 	if title != "" {
-		ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(p.muted).Margin(14, 4, 4, 4)
+		ui.Row(c).Gap(7).AlignItems(ui.Center).Margin(14, 4, 4, 4).Children(func() {
+			ui.Icon(c, sec.icon).Size(14, 14).TextColor(p.muted).IgnoreInput(true)
+			ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(p.muted)
+		})
 	}
 	all := query == "" || settingsMatch(query, sec.title)
 	ui.Column(c.Key(sec.id)).Radius(12).Background(p.bg).Border(1, p.hairline).Dividers(1, p.hairline).Children(func() {
@@ -326,15 +347,34 @@ func (a *app) settingsGroup(c *ui.Context, p palette, sec settingsSection, title
 	})
 }
 
+func settingsHeading(c *ui.Context, block settingsBlock, title string, glyph *ui.SVG) {
+	block(title, func() {
+		theme := *c.Theme()
+		colors := paletteFor(&theme)
+		ui.Row(c).Padding(10, 16).Gap(8).AlignItems(ui.Center).Background(colors.hover).Children(func() {
+			ui.Icon(c, glyph).Size(16, 16).TextColor(colors.muted).IgnoreInput(true)
+			ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(colors.muted)
+		})
+	})
+}
+
 // settingsSections are the pages of the settings, those that apply here.
 func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	s := &a.settings
 	var sections []settingsSection
 	add := func(id, title string, icon *ui.SVG, build func(row settingsRow, block settingsBlock)) {
-		sections = append(sections, settingsSection{id, title, icon, build})
+		group := 0
+		switch id {
+		case "plugins", "shares", "podcasts":
+			group = 1
+		case "cache", "experiments", "updates":
+			group = 2
+		}
+		sections = append(sections, settingsSection{id: id, title: title, icon: icon, group: group, build: build})
 	}
 
 	add("general", T("General"), iconSettings, func(row settingsRow, block settingsBlock) {
+		settingsHeading(c, block, T("Language and Appearance"), iconSettings)
 		row(T("Language"), "", func() {
 			follow := T("Follow System")
 			names := []string{follow}
@@ -368,6 +408,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
+		settingsHeading(c, block, T("Playback Display"), iconLyrics)
 		row(T("Chinese Lyrics"), T("Use the same text in lyrics, visualizers and share cards"), func() {
 			labels, selected := make([]string, len(lyricScripts)), 0
 			for index, option := range lyricScripts {
@@ -399,6 +440,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 		// Only on macOS: elsewhere the icon is always in the notification
 		// area.
 		if runtime.GOOS == "darwin" {
+			settingsHeading(c, block, T("Desktop"), iconLaptop)
 			row(T("App Icon"), T("Shown in the menu bar, it opens the window again after you close it"), func() {
 				labels := make([]string, len(appIcons))
 				at := 0
@@ -450,6 +492,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	}
 
 	add("playback", T("Playback"), iconVolume, func(row settingsRow, block settingsBlock) {
+		settingsHeading(c, block, T("Sound and Quality"), iconVolume)
 		row(T("Quality"), T("What's asked of plugins that have a choice, from the next song on"), func() {
 			labels := make([]string, len(qualityLevels))
 			at := 1
@@ -464,13 +507,6 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
-		if a.anyCan("comments") {
-			row(T("Top Comments in Quiet Parts"), T("In intros, breaks and outros, a song's top comments show in place of the lyrics"), func() {
-				if ui.Switch(c.Key("hot-comments"), &s.HotComments).Label(T("Top Comments in Quiet Parts")).Changed() {
-					a.changed()
-				}
-			})
-		}
 		row(T("Even Out Loudness"), T("Adjust each song's volume by what its plugin measured of it, for them to sound as loud as each other"), func() {
 			if ui.Switch(c.Key("normalize"), &s.Normalize).Label(T("Even Out Loudness")).Changed() {
 				a.pl.SetVolume(a.volume)
@@ -478,6 +514,14 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 			}
 		})
 		a.playbackTransitionSettings(c, row, block)
+		if a.anyCan("comments") {
+			settingsHeading(c, block, T("Playback Content"), iconComment)
+			row(T("Top Comments in Quiet Parts"), T("In intros, breaks and outros, a song's top comments show in place of the lyrics"), func() {
+				if ui.Switch(c.Key("hot-comments"), &s.HotComments).Label(T("Top Comments in Quiet Parts")).Changed() {
+					a.changed()
+				}
+			})
+		}
 	})
 
 	add("cache", T("Cache"), iconDatabase, func(row settingsRow, block settingsBlock) {
@@ -550,6 +594,8 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 			})
 		})
 	}
+	// 分类只重排导航，页面和控件的稳定键保持不变，搜索结果也沿用同一顺序。
+	slices.SortStableFunc(sections, func(first, second settingsSection) int { return first.group - second.group })
 	return sections
 }
 
