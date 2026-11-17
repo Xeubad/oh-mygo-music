@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,83 @@ import (
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
 )
+
+// 网页律动必须沿用原词时间，不能在分享时丢掉节奏而重新平均分配。
+func TestOnlineSharePreservesWordTiming(t *testing.T) {
+	a := newTestApp()
+	draft := &shareDraft{
+		track:      music.Track{ID: "stage-timing", Source: "fake", Name: "Blue hour", Duration: 12000},
+		onlineMode: "full", onlineQuality: "high", selected: map[int]bool{},
+		lines: []lyrics.Line{{
+			Text: "Blue hour", At: time.Second, End: 4 * time.Second, AtSource: true,
+			Words: []lyrics.Word{
+				{Text: "Blue ", Start: 1100 * time.Millisecond, End: 1800 * time.Millisecond},
+				{Text: "hour", Start: 2400 * time.Millisecond, End: 3800 * time.Millisecond},
+			},
+		}},
+	}
+	metadata, err := a.onlineShareMetadata(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Lyrics []struct {
+			StageEnd int64 `json:"stageEndMs"`
+			Words    []struct {
+				Text  string `json:"text"`
+				Start int64  `json:"startMs"`
+				End   int64  `json:"endMs"`
+			} `json:"words"`
+		} `json:"lyrics"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Lyrics) != 1 || len(payload.Lyrics[0].Words) != 2 {
+		t.Fatalf("share lost word timing: %s", encoded)
+	}
+	words := payload.Lyrics[0].Words
+	if words[0].Text != "Blue " || words[0].Start != 1100 || words[0].End != 1800 ||
+		words[1].Start != 2400 || words[1].End != 3800 {
+		t.Fatalf("share changed source timing: %s", encoded)
+	}
+	if payload.Lyrics[0].StageEnd != 4000 {
+		t.Fatalf("share lost the stage's original vocal end: %s", encoded)
+	}
+}
+
+// 热评快照只能来自正在分享的歌曲，切换分享对象不能带出上一曲的评论。
+func TestOnlineShareHotCommentsMatchSelectedTrack(t *testing.T) {
+	a := newTestApp()
+	a.settings.HotComments = true
+	a.comments = commentState{
+		track: "fake\x00current",
+		list:  []music.Comment{{Text: "Keep this moment", Author: "Listener", Likes: 12}},
+	}
+	draft := &shareDraft{
+		track:      music.Track{ID: "current", Source: "fake", Name: "Current", Duration: 12000},
+		onlineMode: "full", onlineQuality: "high",
+	}
+	metadata, err := a.onlineShareMetadata(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.HotComments) != 1 || metadata.HotComments[0].Author != "Listener" {
+		t.Fatalf("missing current track comment: %+v", metadata.HotComments)
+	}
+	draft.track.ID = "another"
+	metadata, err = a.onlineShareMetadata(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.HotComments) != 0 {
+		t.Fatalf("leaked another track's comments: %+v", metadata.HotComments)
+	}
+}
 
 // 显式配置本机验收服务时，验证真实 Go 快照能通过动态服务而非宽松的测试替身。
 func TestShareClientProductionContract(t *testing.T) {
@@ -33,8 +111,11 @@ func TestShareClientProductionContract(t *testing.T) {
 	audio := os.Getenv("MM_SHARE_ACCEPTANCE_AUDIO")
 	for _, mode := range []string{"full", "clip"} {
 		metadata := shareMetadata{Title: "Go contract", SourceID: "desktop", TrackID: mode, Quality: "high", Template: "minimal", Mode: mode, DurationMs: 12000}
+		metadata.Lyrics = []shareLyricLine{{
+			Text: "First line", AtMs: 0, EndMs: 2000,
+			Words: []shareLyricWord{{Text: "First ", StartMs: 100, EndMs: 700}, {Text: "line", StartMs: 1000, EndMs: 1800}},
+		}}
 		if mode == "clip" {
-			metadata.Lyrics = []shareLyricLine{{Text: "First line", AtMs: 0, EndMs: 2000}}
 			metadata.SelectedLineIndexes = []int{0}
 			metadata.ClipEndMs = 3000
 		}
@@ -60,6 +141,19 @@ func TestShareClientProductionContract(t *testing.T) {
 		}
 		if result.Status != "ready" || result.URL == "" {
 			t.Fatalf("%s publication: %+v", mode, result)
+		}
+		response, err := client.http.Get(strings.Replace(result.URL, "/s/", "/api/public/", 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var published struct {
+			Lyrics []shareLyricLine `json:"lyrics"`
+		}
+		err = json.NewDecoder(response.Body).Decode(&published)
+		response.Body.Close()
+		if err != nil || len(published.Lyrics) == 0 || len(published.Lyrics[0].Words) != 2 ||
+			published.Lyrics[0].Words[1].StartMs != 1000 {
+			t.Fatalf("%s production word timing: %+v, error=%v", mode, published, err)
 		}
 	}
 }

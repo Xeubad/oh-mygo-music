@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
@@ -281,15 +282,40 @@ func (a *app) onlineShareMetadata(draft *shareDraft) (shareMetadata, error) {
 		metadata.AccountID = draft.recordingSource.AccountID
 		metadata.TrackID = draft.recordingSource.TrackID
 	}
+	// 只附带本曲已加载且用户启用的真实热评，不能把上一首的评论写入分享快照。
+	if a.settings.HotComments && a.comments.track == draft.track.Source+"\x00"+draft.track.ID {
+		for _, comment := range a.comments.topComments() {
+			if utf8.RuneCountInString(comment.Text) <= quietRunes && strings.TrimSpace(comment.Text) != "" && len(comment.Author) <= 128 {
+				metadata.HotComments = append(metadata.HotComments, shareHotComment{
+					Text: comment.Text, Author: comment.Author, Likes: comment.Likes,
+				})
+			}
+		}
+	}
 	for index, line := range lines {
 		end := line.End
 		if metadata.DurationMs > 0 && index < len(draft.lines) {
 			end = lyricSourceEnd(draft.lines, index, time.Duration(metadata.DurationMs)*time.Millisecond)
 		}
-		metadata.Lyrics = append(metadata.Lyrics, shareLyricLine{
+		shared := shareLyricLine{
 			Text: line.Text, Translation: line.Translation,
 			AtMs: line.At.Milliseconds(), EndMs: end.Milliseconds(),
-		})
+		}
+		if stageEnd := min(shared.EndMs, line.End.Milliseconds()); stageEnd > shared.AtMs {
+			// 裁剪用的可靠区间可能延伸到下一句，律动仍需原显示终点识别真实间奏。
+			shared.StageEndMs = stageEnd
+		}
+		for _, word := range line.Words {
+			startMs := max(shared.AtMs, word.Start.Milliseconds())
+			endMs := min(shared.EndMs, word.End.Milliseconds())
+			// 毫秒舍入或来源异常不能产生越界、倒序时间；没有有效词时网页按整行做显示降级。
+			if strings.TrimSpace(word.Text) == "" || endMs <= startMs ||
+				len(shared.Words) > 0 && startMs < shared.Words[len(shared.Words)-1].StartMs {
+				continue
+			}
+			shared.Words = append(shared.Words, shareLyricWord{Text: word.Text, StartMs: startMs, EndMs: endMs})
+		}
+		metadata.Lyrics = append(metadata.Lyrics, shared)
 	}
 	if metadata.DurationMs <= 0 && metadata.Mode == "clip" {
 		return shareMetadata{}, errors.New(T("Song duration is unavailable"))

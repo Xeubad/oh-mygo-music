@@ -66,30 +66,45 @@ func loadShareServiceToken(serverURL string) (string, error) {
 }
 
 type shareMetadata struct {
-	Title               string           `json:"title"`
-	Artists             string           `json:"artists"`
-	SourceID            string           `json:"sourceId"`
-	AccountID           string           `json:"accountId,omitempty"`
-	TrackID             string           `json:"trackId"`
-	PlaybackID          string           `json:"playbackId,omitempty"`
-	Quality             string           `json:"quality"`
-	Template            string           `json:"template"`
-	CardSquare          bool             `json:"cardSquare"`
-	Mode                string           `json:"mode"`
-	DurationMs          int64            `json:"durationMs"`
-	Lyrics              []shareLyricLine `json:"lyrics"`
-	SelectedLineIndexes []int            `json:"selectedLineIndexes"`
-	ClipStartMs         int64            `json:"clipStartMs"`
-	ClipEndMs           int64            `json:"clipEndMs"`
-	SourceURL           string           `json:"sourceUrl,omitempty"`
-	CoverHash           string           `json:"coverHash,omitempty"`
+	Title               string            `json:"title"`
+	Artists             string            `json:"artists"`
+	SourceID            string            `json:"sourceId"`
+	AccountID           string            `json:"accountId,omitempty"`
+	TrackID             string            `json:"trackId"`
+	PlaybackID          string            `json:"playbackId,omitempty"`
+	Quality             string            `json:"quality"`
+	Template            string            `json:"template"`
+	CardSquare          bool              `json:"cardSquare"`
+	Mode                string            `json:"mode"`
+	DurationMs          int64             `json:"durationMs"`
+	Lyrics              []shareLyricLine  `json:"lyrics"`
+	SelectedLineIndexes []int             `json:"selectedLineIndexes"`
+	HotComments         []shareHotComment `json:"hotComments,omitempty"`
+	ClipStartMs         int64             `json:"clipStartMs"`
+	ClipEndMs           int64             `json:"clipEndMs"`
+	SourceURL           string            `json:"sourceUrl,omitempty"`
+	CoverHash           string            `json:"coverHash,omitempty"`
 }
 
 type shareLyricLine struct {
-	Text        string `json:"text"`
-	Translation string `json:"translation,omitempty"`
-	AtMs        int64  `json:"atMs"`
-	EndMs       int64  `json:"endMs"`
+	Text        string           `json:"text"`
+	Translation string           `json:"translation,omitempty"`
+	AtMs        int64            `json:"atMs"`
+	EndMs       int64            `json:"endMs"`
+	Words       []shareLyricWord `json:"words,omitempty"`
+	StageEndMs  int64            `json:"stageEndMs,omitempty"`
+}
+
+type shareLyricWord struct {
+	Text    string `json:"text"`
+	StartMs int64  `json:"startMs"`
+	EndMs   int64  `json:"endMs"`
+}
+
+type shareHotComment struct {
+	Text   string `json:"text"`
+	Author string `json:"author"`
+	Likes  int    `json:"likes"`
 }
 
 func (metadata shareMetadata) MarshalJSON() ([]byte, error) {
