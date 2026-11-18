@@ -1,7 +1,9 @@
 """从公开选点接口验证拍数适应、人声保护和拍速层级。"""
 
 import copy
+import json
 import unittest
+import numpy as np
 
 from adaptive_planner import plan_pair
 
@@ -18,6 +20,13 @@ def track(identifier, duration=120, period=.5, first_voice=4, last_voice=114):
 
 
 class AdaptivePlannerTests(unittest.TestCase):
+    # 首次本机分析带有 NumPy 标量；质量报告必须与从 JSON 缓存读取时一样可序列化。
+    def test_fresh_model_scalars_produce_serializable_handoff_checks(self):
+        current = track("old", last_voice=np.float64(115))
+        incoming = track("new", first_voice=np.float64(4))
+        plan = plan_pair(current, incoming)["candidates"][0]
+        json.dumps({"vocal_handoff": .25 <= plan["estimated_vocal_gap"] <= 5})
+
     # 短前奏只能承接短乐句，不能沿用固定三十二拍导致无入口。
     def test_short_intro_uses_eight_beats_and_preserves_first_line(self):
         current = track("outgoing", last_voice=115)

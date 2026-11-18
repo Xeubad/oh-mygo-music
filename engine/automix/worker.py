@@ -83,7 +83,7 @@ def voice_regions(audio, voice, destination, origin):
     active = binary_opening(binary_closing(active, structure=np.ones(5)), structure=np.ones(3))
     changes = np.diff(np.r_[False, active, False].astype(int))
     regions = [
-        {"start": origin + first * .05, "end": origin + last * .05}
+        {"start": float(origin + first * .05), "end": float(origin + last * .05)}
         for first, last in zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1))
         if last - first >= 4
     ]
