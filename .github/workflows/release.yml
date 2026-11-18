@@ -121,3 +121,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         run: go tool mygo build -platform "${{ matrix.platform }}" -upload
+      - name: Test packaged AutoMix runtime
+        run: |
+          python scripts/verify_automix_package.py build/windows-amd64/mygo-music-*-windows-amd64.tar.gz

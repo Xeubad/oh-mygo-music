@@ -44,6 +44,25 @@ def download(url, path):
     return path
 
 
+def stage_windows_dlls(site):
+    package = site / "sklearn"
+    initializer = package / "_distributor_init.py"
+    source = initializer.read_text(encoding="utf-8")
+    if '".libs"' not in source and '"_runtime_libs"' not in source:
+        raise RuntimeError("scikit-learn 的 Windows DLL 加载方式已变化")
+    # MyGo 不打包隐藏目录；使用普通目录保留上游自带的 DLL 和完整绝对路径加载。
+    libraries = package / "_runtime_libs"
+    libraries.mkdir(exist_ok=True)
+    for name in ("vcomp140.dll", "msvcp140.dll"):
+        original = package / ".libs" / name
+        target = libraries / name
+        if original.is_file():
+            shutil.copy2(original, target)
+        if not target.is_file():
+            raise RuntimeError(f"本机分析运行时缺少 {name}")
+    initializer.write_text(source.replace('".libs"', '"_runtime_libs"'), encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "resources/windows/automix-engine")
@@ -74,6 +93,7 @@ def main():
             "--extra-index-url", "https://download.pytorch.org/whl/cpu",
             "--constraint", str(ROOT / "engine/automix/constraints.txt"),
         ], site)
+    stage_windows_dlls(site)
     # 推理只加载 DLL；开发用 dnnl.lib 等静态库体积很大，还会耗尽 32 位 NSIS 的地址空间。
     for directory in (site / "torch/lib", site / "torchaudio/lib"):
         for pattern in ("*.lib", "*.pdb"):
