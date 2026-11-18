@@ -1,0 +1,48 @@
+Oh MyGo Music local AutoMix engine
+
+This directory contains the source used by the matching release tag.
+No user audio, credentials, cached features, or trained models derived from
+user music are part of the source or distribution.
+
+Adapted transition DSP:
+  https://github.com/VertexSelection/automix-engine
+  original revision b2d4df969e4d999905145cb17bc48b137b666b8b
+  GNU LGPL version 2.1, see LICENSE-automix-engine.
+  Local modifications: adaptive per-plan pulse count and time map, actual
+  vocal fallback, stem-window coverage, checked publication, and quality gates.
+
+Beat This:
+  https://github.com/CPJKU/beat_this
+  Code and the published small0 model: MIT.
+  See LICENSE-Beat-This.
+
+HTDemucs / demucs-infer:
+  https://github.com/facebookresearch/demucs
+  https://pypi.org/project/demucs-infer/
+  Code and pretrained HTDemucs: MIT.
+  See the licenses supplied with demucs-infer in python/Lib/site-packages.
+
+Music structure:
+  https://github.com/urinieto/msaf
+  Spectral embedding adapted from MSAF scluster main2.py (ISC);
+  MSAF package license: MIT, see LICENSE-MSAF.
+  No pretrained music structure weights are used.
+
+Rubber Band command-line tool 4.0.0:
+  https://github.com/breakfastquay/rubberband/tree/v4.0.0
+  GPL version 2 or later. Kept as a separate, replaceable executable.
+  Corresponding upstream source is included in bin/rubberband-4.0.0-source.tar.bz2.
+  License and upstream notices are in bin/COPYING.txt and bin/README.txt.
+  The accompanying libsndfile library is distributed with its upstream license
+  and corresponding source, see bin/LICENSE-libsndfile and
+  bin/libsndfile-1.2.2-source.tar.xz.
+
+CPython 3.11.9:
+  https://www.python.org/downloads/release/python-3119/
+  Python Software Foundation license, see python/LICENSE.txt.
+
+PyTorch, torchaudio, NumPy, SciPy, scikit-learn, SoundFile, librosa and
+dependencies retain their licenses in python/Lib/site-packages/*.dist-info.
+The runtime uses CPU inference and does not require CUDA or a system Python.
+On Windows ARM64 the bundled x64 helper requires Windows 11 x64 emulation;
+if unavailable, the player keeps original playback rather than failing a song.

@@ -38,6 +38,8 @@ func trustedTransitionLength(source stream) int64 {
 	switch original := source.(type) {
 	case *preparedStream:
 		return trustedTransitionLength(original.stream)
+	case *silenceTrimStream:
+		return original.Len()
 	case *mp3Stream, *adtsStream:
 		return -1
 	case *oggStream:

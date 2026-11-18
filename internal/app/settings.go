@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo"
 
+	"mygo-music/internal/automix"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/player"
 )
@@ -86,9 +87,16 @@ type settings struct {
 	Shortcuts *shortcutConfig `json:"globalShortcuts,omitempty"`
 	// Normalize evens out the loudness of tracks, by what their source
 	// measured of each.
-	Normalize           bool `json:"normalize"`
-	CrossfadeEnabled    bool `json:"crossfadeEnabled"`
-	CrossfadeDurationMs int  `json:"crossfadeDurationMs"`
+	Normalize bool `json:"normalize"`
+	// 本机计算与云端增强独立选择，旧 gapless 不迁移成会变速的智能过渡。
+	AutoMixEnabled      bool               `json:"autoMixEnabled"`
+	AutoMixAIEnabled    bool               `json:"autoMixAIEnabled"`
+	AutoMixEndpoint     string             `json:"autoMixEndpoint,omitempty"`
+	AutoMixModel        string             `json:"autoMixModel,omitempty"`
+	AIProviders         []automix.Provider `json:"aiProviders,omitempty"`
+	AutoMixProviderID   string             `json:"autoMixProviderId,omitempty"`
+	CrossfadeEnabled    bool               `json:"crossfadeEnabled"`
+	CrossfadeDurationMs int                `json:"crossfadeDurationMs"`
 	// 开启默认项不能省略 false，否则重启会丢失用户关闭的选择。
 	GaplessEnabled      bool `json:"gaplessEnabled"`
 	PlaybackFadeEnabled bool `json:"playbackFadeEnabled"`
@@ -131,7 +139,7 @@ func (s settings) playbackTransitions() player.TransitionSettings {
 	if play < 50 || play > 1000 {
 		play = 260
 	}
-	return player.TransitionSettings{Crossfade: s.CrossfadeEnabled, CrossfadeDuration: time.Duration(crossfade) * time.Millisecond, Gapless: s.GaplessEnabled, PlaybackFade: s.PlaybackFadeEnabled, PauseFadeOut: time.Duration(pause) * time.Millisecond, PlayFadeIn: time.Duration(play) * time.Millisecond}
+	return player.TransitionSettings{AutoMix: s.AutoMixEnabled, Crossfade: s.CrossfadeEnabled, CrossfadeDuration: time.Duration(crossfade) * time.Millisecond, Gapless: s.GaplessEnabled, PlaybackFade: s.PlaybackFadeEnabled, PauseFadeOut: time.Duration(pause) * time.Millisecond, PlayFadeIn: time.Duration(play) * time.Millisecond}
 }
 
 func settingsPath() (string, error) {
@@ -151,6 +159,7 @@ func loadSettings() settings {
 		}
 		s.path = path
 	}
+	s.migrateAIProviders()
 	return s
 }
 

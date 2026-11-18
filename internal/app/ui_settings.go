@@ -51,6 +51,7 @@ func (a *app) openSettings() {
 	})
 	a.settingsWin.OnClosed(func() {
 		a.endShortcutRecording()
+		a.closeAIEditor()
 		a.shortcutEdit.confirm = false
 		a.settingsWin = nil
 		// Its sign-in dialog goes with it; a sign-in on its way still counts.
@@ -295,6 +296,9 @@ func (a *app) settingsNavItem(c *ui.Context, p palette, sec settingsSection, sel
 	})
 	if b.Clicked() {
 		a.endShortcutRecording()
+		if sec.id != "ai" {
+			a.cancelAIProbe()
+		}
 		a.shortcutEdit.confirm = false
 		a.settingsPage, a.settingsQuery = sec.id, ""
 	}
@@ -365,7 +369,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	add := func(id, title string, icon *ui.SVG, build func(row settingsRow, block settingsBlock)) {
 		group := 0
 		switch id {
-		case "plugins", "shares", "podcasts":
+		case "plugins", "shares", "podcasts", "ai":
 			group = 1
 		case "cache", "experiments", "updates":
 			group = 2
@@ -468,6 +472,9 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 
 	add("shares", T("Online Sharing"), iconLink, func(row settingsRow, block settingsBlock) {
 		a.onlineShareSettings(c, p, row, block)
+	})
+	add("ai", T("AI and Models"), iconAI, func(row settingsRow, block settingsBlock) {
+		a.aiSettings(c, row, block)
 	})
 
 	// Only on macOS, the one with a notch player.

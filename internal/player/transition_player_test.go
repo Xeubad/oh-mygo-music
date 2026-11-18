@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,70 @@ import (
 
 	"mygo-music/internal/music"
 )
+
+// 本机 FLAC 的暂停与恢复必须按设置时长改变设备音量，不能只延迟暂停却保持原音量。
+func TestTransitionPlayerConfiguredFadesReachOutput(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		current, posted, source := transitionPlayerFixture(t)
+		path, err := filepath.Abs("testdata/seek.flac")
+		if err != nil {
+			t.Fatal(err)
+		}
+		source.file = path
+		current.SetVolume(.8)
+		current.Transitions = func() TransitionSettings {
+			settings := DefaultTransitionSettings()
+			settings.PauseFadeOut = 850 * time.Millisecond
+			settings.PlayFadeIn = time.Second
+			return settings
+		}
+		current.PlayQueue([]music.Track{{ID: "a", Source: "test"}}, 0)
+		for step := 0; step < 10; step++ {
+			synctest.Wait()
+			pumpTransitionPosts(posted)
+		}
+		out, ok := current.out.(*transitionTestOutput)
+		if !ok {
+			t.Fatal("FLAC 没有建立输出")
+		}
+		time.Sleep(1100 * time.Millisecond)
+		synctest.Wait()
+		pumpTransitionPosts(posted)
+		steady := out.Volume()
+		current.TogglePlay()
+		time.Sleep(425 * time.Millisecond)
+		synctest.Wait()
+		pumpTransitionPosts(posted)
+		pauseMiddle := out.Volume()
+		if !out.Playing() || math.Abs(pauseMiddle/steady-.5) > .03 {
+			t.Fatalf("暂停半程没有半音量渐出: steady=%v middle=%v playing=%v", steady, pauseMiddle, out.Playing())
+		}
+		time.Sleep(440 * time.Millisecond)
+		synctest.Wait()
+		pumpTransitionPosts(posted)
+		if out.Playing() || out.Volume() != 0 {
+			t.Fatalf("暂停结束未静音: volume=%v playing=%v", out.Volume(), out.Playing())
+		}
+		current.TogglePlay()
+		time.Sleep(500 * time.Millisecond)
+		synctest.Wait()
+		pumpTransitionPosts(posted)
+		resumeMiddle := out.Volume()
+		if !out.Playing() || math.Abs(resumeMiddle/steady-.5) > .03 {
+			t.Fatalf("恢复半程没有半音量渐入: steady=%v middle=%v playing=%v", steady, resumeMiddle, out.Playing())
+		}
+		time.Sleep(520 * time.Millisecond)
+		synctest.Wait()
+		pumpTransitionPosts(posted)
+		if math.Abs(out.Volume()-steady) > .0001 {
+			t.Fatalf("恢复未达到原音量: steady=%v actual=%v", steady, out.Volume())
+		}
+		t.Logf("输出增益: 正常 %.3f → 暂停425ms %.3f → 暂停865ms 0 → 恢复500ms %.3f → 恢复1020ms %.3f", steady, pauseMiddle, resumeMiddle, out.Volume())
+		current.stop()
+		time.Sleep(200 * time.Millisecond)
+		pumpTransitionPosts(posted)
+	})
+}
 
 type transitionSource struct {
 	nothing
@@ -152,13 +217,14 @@ func TestTransitionPlayerPreparedCandidateKeepsAdmissionAndBudget(t *testing.T) 
 }
 
 type transitionTestOutput struct {
-	decoder audio.Decoder
-	frame   atomic.Int64
-	decoded int64
-	playing bool
-	closed  bool
-	volume  float64
-	onEnd   func()
+	decoder  audio.Decoder
+	frame    atomic.Int64
+	decoded  int64
+	captured []float32
+	playing  bool
+	closed   bool
+	volume   atomic.Uint64
+	onEnd    func()
 }
 
 type transitionRecoveringSource struct {
@@ -227,6 +293,74 @@ func TestTransitionPlayerBufferedErrorStartsRecoveryAtAudibleBoundary(t *testing
 	})
 }
 
+// AutoMix 独立启用时也裁掉完整歌曲首尾静音，并保留歌曲中间停顿。
+func TestAutoMixPlayerTrimsOnlySongEdgesWithoutGapless(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		current, posted, source := transitionPlayerFixture(t)
+		const rate = 48000
+		const totalFrames = rate * 4
+		data := make([]byte, 44+totalFrames*4)
+		copy(data, "RIFF")
+		binary.LittleEndian.PutUint32(data[4:], uint32(len(data)-8))
+		copy(data[8:], "WAVEfmt ")
+		binary.LittleEndian.PutUint32(data[16:], 16)
+		binary.LittleEndian.PutUint16(data[20:], 1)
+		binary.LittleEndian.PutUint16(data[22:], 2)
+		binary.LittleEndian.PutUint32(data[24:], rate)
+		binary.LittleEndian.PutUint32(data[28:], rate*4)
+		binary.LittleEndian.PutUint16(data[32:], 4)
+		binary.LittleEndian.PutUint16(data[34:], 16)
+		copy(data[36:], "data")
+		binary.LittleEndian.PutUint32(data[40:], uint32(totalFrames*4))
+		for frame := rate / 2; frame < rate*7/2; frame++ {
+			if frame >= rate*3/2 && frame < rate*5/2 {
+				continue
+			}
+			offset := 44 + frame*4
+			binary.LittleEndian.PutUint16(data[offset:], uint16(int16(9830)))
+			binary.LittleEndian.PutUint16(data[offset+2:], uint16(int16(9830)))
+		}
+		path := filepath.Join(t.TempDir(), "song-edges.wav")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		source.file = path
+		current.SetVolume(.8)
+		current.Transitions = func() TransitionSettings {
+			settings := DefaultTransitionSettings()
+			settings.AutoMix = true
+			settings.Gapless = false
+			settings.Crossfade = false
+			settings.PlaybackFade = false
+			return settings
+		}
+		current.PlayQueue([]music.Track{{ID: "trimmed", Source: "test", Duration: 4000}}, 0)
+		for step := 0; step < 12; step++ {
+			synctest.Wait()
+			pumpTransitionPosts(posted)
+		}
+		if position := current.Position(); position < 490*time.Millisecond || position > 510*time.Millisecond {
+			t.Fatalf("没有跳过 500ms 片头静音: position=%v", position)
+		}
+		if duration := current.Duration(); duration < 3490*time.Millisecond || duration > 3510*time.Millisecond {
+			t.Fatalf("尾静音未从可听时长去掉: duration=%v", duration)
+		}
+		out := current.out.(*transitionTestOutput)
+		for step := 0; step < 205; step++ {
+			advanceTransitionPlayer(current, posted, 480)
+		}
+		middle := out.captured[96_000:192_000]
+		for _, sample := range middle {
+			if sample != 0 {
+				t.Fatal("歌曲中间的一秒停顿被跳过")
+			}
+		}
+		current.stop()
+		time.Sleep(200 * time.Millisecond)
+		pumpTransitionPosts(posted)
+	})
+}
+
 func (output *transitionTestOutput) Play()  { output.playing = true }
 func (output *transitionTestOutput) Pause() { output.playing = false }
 func (output *transitionTestOutput) Close() {
@@ -251,8 +385,12 @@ func (output *transitionTestOutput) OnEnd(callback func()) func() {
 	return func() { output.onEnd = nil }
 }
 func (output *transitionTestOutput) SetVolume(volume float64) *audio.Player {
-	output.volume = volume
+	output.volume.Store(math.Float64bits(volume))
 	return nil
+}
+
+func (output *transitionTestOutput) Volume() float64 {
+	return math.Float64frombits(output.volume.Load())
 }
 func (output *transitionTestOutput) advance(frames int) {
 	if !output.playing || output.closed {
@@ -269,6 +407,7 @@ func (output *transitionTestOutput) advance(frames int) {
 	}
 	buffer := make([]float32, frames*2)
 	count, failure := output.decoder.Read(buffer)
+	output.captured = append(output.captured, buffer[:count]...)
 	output.decoded = output.frame.Add(int64(count / 2))
 	if failure != nil {
 		output.playing = false
@@ -730,6 +869,44 @@ func TestTransitionPlayerGaplessPreparesBeforeBoundary(t *testing.T) {
 		source.mu.Unlock()
 		if requested != 1 {
 			t.Fatalf("待接曲被重复请求: %d", requested)
+		}
+		current.stop()
+		time.Sleep(200 * time.Millisecond)
+		pumpTransitionPosts(posted)
+	})
+}
+
+// 交叉淡化会在上一首结束前交接下一首，并继续使用同一个设备输出。
+func TestTransitionPlayerCrossfadeHandsOffBeforeSongEnds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		current, posted, source := transitionPlayerFixture(t)
+		current.Transitions = func() TransitionSettings {
+			settings := DefaultTransitionSettings()
+			settings.Crossfade = true
+			settings.CrossfadeDuration = time.Second
+			settings.Gapless = false
+			settings.PlaybackFade = false
+			return settings
+		}
+		current.PlayQueue([]music.Track{{ID: "a", Source: "test"}, {ID: "b", Source: "test"}}, 0)
+		for step := 0; step < 20; step++ {
+			synctest.Wait()
+			pumpTransitionPosts(posted)
+			advanceTransitionPlayer(current, posted, 480)
+		}
+		output := current.out
+		for step := 0; step < 350 && current.Current().ID != "b"; step++ {
+			advanceTransitionPlayer(current, posted, 480)
+		}
+		if current.Current().ID != "b" || current.out != output {
+			t.Fatalf("交叉淡化没有在旧曲结束前接管新曲: current=%+v sameOutput=%v", current.Current(), current.out == output)
+		}
+		if output.Position() >= 4*time.Second {
+			t.Fatalf("新曲交接发生在旧曲结束之后: position=%v", output.Position())
+		}
+		synctest.Wait()
+		if records := source.records(); len(records) != 2 || records[0] != "a" || records[1] != "b" {
+			t.Fatalf("交叉淡化开播记录异常: %v", records)
 		}
 		current.stop()
 		time.Sleep(200 * time.Millisecond)

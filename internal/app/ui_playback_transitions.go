@@ -21,18 +21,25 @@ func (a *app) savePlaybackTransitions() {
 
 func (a *app) playbackTransitionSettings(c *ui.Context, row settingsRow, block settingsBlock) {
 	preferences := &a.settings
+	a.autoMixSettings(c, row, block)
 	settingsHeading(c, block, T("Audio transitions"), iconRepeat)
 	if a.playbackSettingsError != "" {
 		block(a.playbackSettingsError, func() {
 			ui.Text(c, a.playbackSettingsError).FontSize(12).TextColor(ui.RGB(184, 54, 54)).Margin(8, 16, 8, 16)
 		})
 	}
+	if preferences.AutoMixEnabled {
+		message := T("AutoMix manages song transitions automatically; switch it off to use your saved manual settings")
+		block(message, func() {
+			ui.Text(c, message).FontSize(11.5).LineHeight(1.4).Margin(8, 16, 8, 16)
+		})
+	}
 	row(T("Crossfade"), T("Blend songs on automatic track changes; takes priority over gapless playback"), func() {
-		ui.Switch(c.Key("crossfade"), &preferences.CrossfadeEnabled).Label(T("Crossfade")).OnClick(func() { a.savePlaybackTransitions() })
+		ui.Switch(c.Key("crossfade"), &preferences.CrossfadeEnabled).Label(T("Crossfade")).Disabled(preferences.AutoMixEnabled).OnClick(func() { a.savePlaybackTransitions() })
 	})
-	a.transitionDuration(c, row, "crossfade-duration", T("Crossfade duration"), &preferences.CrossfadeDurationMs, 1000, 12000, 500, !preferences.CrossfadeEnabled)
-	row(T("Gapless playback"), T("Join ready songs without adding silence; keeps silence in the recording"), func() {
-		ui.Switch(c.Key("gapless"), &preferences.GaplessEnabled).Label(T("Gapless playback")).OnClick(func() { a.savePlaybackTransitions() })
+	a.transitionDuration(c, row, "crossfade-duration", T("Crossfade duration"), &preferences.CrossfadeDurationMs, 1000, 12000, 500, preferences.AutoMixEnabled || !preferences.CrossfadeEnabled)
+	row(T("Gapless playback"), T("Skip silence at each song's beginning and end; keep pauses within songs"), func() {
+		ui.Switch(c.Key("gapless"), &preferences.GaplessEnabled).Label(T("Gapless playback")).Disabled(preferences.AutoMixEnabled).OnClick(func() { a.savePlaybackTransitions() })
 	})
 	settingsHeading(c, block, T("Play and Pause"), iconVolumeLow)
 	row(T("Fade playback and pause"), T("Fade in when starting or resuming, and fade out before pausing"), func() {
