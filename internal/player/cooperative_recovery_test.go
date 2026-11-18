@@ -236,14 +236,22 @@ export function playbackPlan() {
  {id:"metadata",platform:"wy",trackID:"one",quality:"flac"},
  {id:"audio",platform:"tx",trackID:"one",quality:"flac"}]};
 }
-export function resolveCandidate({candidate}) { return {stream:{url:candidate.id==="metadata"?%q:%s}}; }
-`, server.URL, audioPath(t, "seek.flac")))
+export function resolveCandidate({candidate}) {
+ // 后备只确认同轮继续；真实音频开播另有集成覆盖，不能要求其在 100ms 内完成解码。
+ if (candidate.id === "audio") throw new Error("next candidate reached");
+ return {stream:{url:%q}};
+}
+`, server.URL))
 	p, posts := cooperativePlayer(src)
 	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
 	finishLoading(t, p, posts)
-	defer p.TogglePlay()
-	if !p.Ready() || !p.Playing() || p.Err() != "" || p.Stream().Platform != "tx" {
-		t.Fatalf("未解码音频的候选被当成首次开播成功：stream=%+v error=%q", p.Stream(), p.Err())
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	if p.Ready() || p.Playing() || p.Stream() != nil || p.Err() != "next candidate reached" || p.Current().ID != "one" {
+		t.Fatalf("未解码音频被接受或首次候选截止后未继续：stream=%+v current=%+v error=%q", p.Stream(), p.Current(), p.Err())
 	}
 	select {
 	case <-canceled:
@@ -399,6 +407,17 @@ func TestCooperativeRecoveryRejectsMP3BeforeInterruption(t *testing.T) {
 			w.Write(mp3[:10000])
 			return
 		}
+		if r.URL.Path == "/complete" {
+			// 冷启动或本机调度可超过 300ms；完整来源变慢不能改变短音频的拒绝结论。
+			timer := time.NewTimer(350 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				w.Write(mp3)
+			case <-r.Context().Done():
+			}
+			return
+		}
 		w.Header().Set("Content-Length", fmt.Sprint(len(flac)+1))
 		w.Write(flac)
 		w.(http.Flusher).Flush()
@@ -412,12 +431,13 @@ func TestCooperativeRecoveryRejectsMP3BeforeInterruption(t *testing.T) {
 	src := cooperativePlugin(t, fmt.Sprintf(`
 let rounds=0;
 export function playbackPlan() {
- rounds++; return {targetQuality:rounds===1?"flac":"128k",minimumQuality:"128k",candidateTimeoutMs:300,roundTimeoutMs:2000,candidates:rounds===1?
+ // 本用例核验真实定位，沿用正式候选预算；超时边界由独立虚拟时钟测试覆盖。
+ rounds++; return {targetQuality:rounds===1?"flac":"128k",minimumQuality:"128k",candidates:rounds===1?
  [{id:"initial",platform:"wy",trackID:"one",quality:"flac"}]:
  [{id:"short",platform:"wy",trackID:"one",quality:"128k"},{id:"complete",platform:"tx",trackID:"one",quality:"128k"}]};
 }
-export function resolveCandidate({candidate}) {return {stream:{url:candidate.id==="complete"?%s:%q+"/"+candidate.id}};}
-`, audioPath(t, "seek.mp3"), server.URL))
+export function resolveCandidate({candidate}) {return {stream:{url:%q+"/"+candidate.id}};}
+`, server.URL))
 	p, posts := cooperativePlayer(src)
 	p.SetVolume(0)
 	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative", Duration: 5000}}, 0)

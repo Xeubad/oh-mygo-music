@@ -2,13 +2,14 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 )
 
-// QQ 账号喜欢快照经聚合冻结身份进入通用解析，主动退出后同一候选不可重新请求解析。
+// QQ 账号快照经冻结身份进入专用 POST 解析，退出后同一候选不能重新请求。
 func TestAggregateQQAccountSnapshotResolvesFrozenCandidate(t *testing.T) {
 	p, _ := qqAccountTest(t, func(*http.Request, string) (string, error) {
 		return qqFixtureSongs(1, 0, qqFixtureSong("FixtureSongA1")), nil
@@ -19,7 +20,7 @@ func TestAggregateQQAccountSnapshotResolvesFrozenCandidate(t *testing.T) {
 	if _, err := p.Liked(0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Aggregate("setResolverKey", map[string]any{"value": "fixture-general-key", "temporary": true}); err != nil {
+	if _, err := p.Aggregate("setResolverKey", map[string]any{"platform": "tx", "value": "fixture-qq-key", "temporary": true}); err != nil {
 		t.Fatal(err)
 	}
 	home, err := p.Home()
@@ -33,23 +34,24 @@ func TestAggregateQQAccountSnapshotResolvesFrozenCandidate(t *testing.T) {
 	}
 	candidate := plan.Candidates[2]
 	if candidate.Platform != "tx" || candidate.AccountID != "700" || candidate.TrackID != "FixtureSongA1" || candidate.Quality != "128k" {
-		t.Fatal("聚合冻结候选丢失真实来源或音质路径")
+		t.Fatal("冻结候选丢失来源身份或档位")
 	}
 	previous := http.DefaultTransport
 	requests := 0
 	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Hostname() != "source.shiqianjiang.cn" {
+		if r.URL.Hostname() != "c.wwwweb.top" {
 			return previous.RoundTrip(r)
 		}
 		requests++
-		if r.Method != http.MethodGet || r.URL.Query().Get("source") != "tx" || r.URL.Query().Get("songId") != "FixtureSongA1" || r.Header.Get("X-API-Key") != "fixture-general-key" || r.Header.Get("Cookie") != "" {
-			t.Error("账号解析越过通用服务、songmid 或凭据隔离边界")
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) != nil || r.Method != http.MethodPost || r.URL.Path != "/music/url" || r.URL.RawQuery != "" || len(body) != 3 || body["source"] != "tx" || body["musicId"] != "FixtureSongA1" || body["quality"] != "128k" || r.Header.Get("X-Api-Key") != "fixture-qq-key" || r.Header.Get("Cookie") != "" {
+			t.Error("账号解析越过QQ新源、songmid或凭据隔离边界")
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":0,"url":"https://audio.example.test/qq-media"}`)), Request: r}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":200,"url":"https://audio.example.test/qq-media"}`)), Request: r}, nil
 	})
 	stream, err := p.ResolveCandidate(context.Background(), id, "qq-account-round", candidate)
 	if err != nil || stream == nil || stream.Platform != "tx" || stream.RequestedQuality != "128k" || stream.Stream.URL != "https://audio.example.test/qq-media" {
-		t.Fatalf("QQ 账号曲目未进入通用解析：%v", err)
+		t.Fatalf("QQ 账号曲目未进入专用解析：%v", err)
 	}
 	if stream.Stream.Quality != "" || len(stream.Stream.Headers) != 0 {
 		t.Fatal("解析结果冒充实际音质或带出鉴权")

@@ -88,7 +88,9 @@ type aggregateEdit struct {
 	order                    []string
 	key                      string // 仅编辑期间持有；永远不从凭据库回填到界面。
 	credentialState          string
-	wyKey, wyCredentialState string // 网易与通用服务分开持有，不能跨服务回填或清空草稿。
+	wyKey, wyCredentialState string // 各平台独立持有，不跨服务回填或清空草稿。
+	qqKey, qqCredentialState string
+	qsKey, qsCredentialState string
 	qualityTargets           []aggregateQualityTarget
 }
 
@@ -153,9 +155,15 @@ func (a *app) aggregateCommand(lib *library, e *aggregateEdit, action string, in
 			e.loaded = true
 			e.credentialState = reply.ResolverCredential.State
 			e.wyCredentialState = reply.ResolverCredentials["wy"].State
+			e.qqCredentialState = reply.ResolverCredentials["tx"].State
+			e.qsCredentialState = reply.ResolverCredentials["qs"].State
 			if action == "setResolverKey" || action == "clearResolverKey" {
 				if input["platform"] == "wy" {
 					e.wyKey = ""
+				} else if input["platform"] == "tx" {
+					e.qqKey = ""
+				} else if input["platform"] == "qs" {
+					e.qsKey = ""
 				} else {
 					e.key = ""
 				}
@@ -281,6 +289,35 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 				}
 				if ui.Button(c.Key("temporary-wy-key"), T("Use NetEase Key Once")).Disabled(e.busy || e.wyKey == "").Clicked() {
 					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": true})
+				}
+			})
+		}
+		if e.qqCredentialState != "" {
+			aggregateField(c, T("QQ Resolver Key"), func() {
+				ui.TextInput(c.Key("qq-key"), &e.qqKey).Label(T("QQ Resolver Key")).Password().Width(260).Disabled(e.busy)
+			})
+			ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.qqCredentialState]).FontSize(11.5).TextColor(p.muted)
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c.Key("save-qq-key"), T("Save QQ Key Securely")).Disabled(e.busy || e.qqKey == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "tx", "value": e.qqKey, "temporary": false})
+				}
+				if ui.Button(c.Key("temporary-qq-key"), T("Use QQ Key Once")).Disabled(e.busy || e.qqKey == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "tx", "value": e.qqKey, "temporary": true})
+				}
+			})
+		}
+		// 旧插件未声明汽水凭据状态时不显示该范围，避免把其他服务的已保存状态套用过来。
+		if e.qsCredentialState != "" {
+			aggregateField(c, T("Qishui Resolver Key"), func() {
+				ui.TextInput(c.Key("qs-key"), &e.qsKey).Label(T("Qishui Resolver Key")).Password().Width(260).Disabled(e.busy)
+			})
+			ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.qsCredentialState]).FontSize(11.5).TextColor(p.muted)
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c.Key("save-qs-key"), T("Save Qishui Key Securely")).Disabled(e.busy || e.qsKey == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "qs", "value": e.qsKey, "temporary": false})
+				}
+				if ui.Button(c.Key("temporary-qs-key"), T("Use Qishui Key Once")).Disabled(e.busy || e.qsKey == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "qs", "value": e.qsKey, "temporary": true})
 				}
 			})
 		}

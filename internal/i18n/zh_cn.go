@@ -2,7 +2,13 @@ package i18n
 
 // zhCN is the app's text in Simplified Chinese, by its English.
 var zhCN = map[string]string{
-	"AutoMix runs locally": "AutoMix 在本机运行",
+	"QQ Resolver Key":          "QQ 解析密钥",
+	"Save QQ Key Securely":     "安全保存 QQ 密钥",
+	"Use QQ Key Once":          "临时使用 QQ 密钥",
+	"Qishui Resolver Key":      "汽水解析密钥",
+	"Save Qishui Key Securely": "安全保存汽水密钥",
+	"Use Qishui Key Once":      "临时使用汽水密钥",
+	"AutoMix runs locally":     "AutoMix 在本机运行",
 	"AutoMix analyzes songs on this computer and chooses the phrase length. If a transition is unsafe or not ready in time, playback continues with the original songs.": "AutoMix 会在本机分析歌曲并选择乐句长度；不适合衔接或未及时准备好时，继续按原曲播放。",
 	"NetEase Resolver Key":            "网易解析密钥",
 	"Save NetEase Key Securely":       "安全保存网易密钥",

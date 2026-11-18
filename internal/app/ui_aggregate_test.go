@@ -43,7 +43,8 @@ func aggregateApp(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) 
 	t.Cleanup(func() {
 		until(t, post, func() bool {
 			edit, view := a.aggregateEdits[a.library], a.aggregateViews[a.library]
-			return (edit == nil || !edit.busy) && (view == nil || !view.busy && !view.loadingLists) && !a.pl.Loading()
+			// 设置页还会异步查询账号，必须等回执落地，避免 Close 后被迟到调用重启。
+			return !a.library.accountBusy && (edit == nil || !edit.busy) && (view == nil || !view.busy && !view.loadingLists) && !a.pl.Loading()
 		})
 		if a.pl.Playing() {
 			a.pl.TogglePlay()
@@ -51,6 +52,54 @@ func aggregateApp(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) 
 	})
 	tt := ui.NewTester(func(c *ui.Context) { a.pluginSettings(c, a.library, paletteFor(c.Theme())) }, 760, 1200)
 	return a, src, tt, post
+}
+
+// 设置页启动的账号查询必须在关闭插件前收齐，否则迟到调用可能重建已删除的临时目录。
+func TestAggregateCleanupWaitsForAccount(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var a *app
+	var post chan func()
+	released := false
+	t.Run("pending-account", func(t *testing.T) {
+		a, _, _, post = aggregateApp(t)
+		// NewTester 的首帧可能已经查询账号，先收齐它，再控制下一次查询。
+		until(t, post, func() bool {
+			edit := a.aggregateEdits[a.library]
+			return !a.library.accountBusy && (edit == nil || !edit.busy)
+		})
+		src := newFakeSource("pending-aggregate-account")
+		src.account = func() (*music.Account, error) {
+			close(entered)
+			<-release
+			return nil, nil
+		}
+		a.library.src = src
+		a.library.caps = probeCaps(src)
+		a.loadAccount(a.library)
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("账号查询未进入受控等待")
+		}
+		// 只允许 helper 的清理循环处理该回执；旧条件会直接退出并跳过它。
+		post <- func() {
+			if !released {
+				released = true
+				close(release)
+			}
+		}
+	})
+	if a == nil {
+		t.Skip("聚合插件夹具不可用")
+	}
+	if !released {
+		t.Error("插件关闭前没有等待设置页账号查询")
+		released = true
+		close(release)
+	}
+	if a != nil {
+		until(t, post, func() bool { return !a.library.accountBusy })
+	}
 }
 
 func aggregateFixture(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) {

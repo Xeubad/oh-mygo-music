@@ -16,7 +16,7 @@ func TestAggregateQQResolverNeverFallsBackToNetEaseKey(t *testing.T) {
 	previous := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = previous })
 	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
-		t.Error("缺少通用密钥时不应发请求")
+		t.Error("缺少 QQ 专用密钥时不应发请求")
 		return nil, errors.New("unexpected")
 	})
 	p := loadAggregate(t)
@@ -29,7 +29,7 @@ func TestAggregateQQResolverNeverFallsBackToNetEaseKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = p.ResolveCandidate(context.Background(), id, "missing-qq", plan.Candidates[0]); !errors.Is(err, music.ErrSetup) {
-		t.Fatal("QQ 没有独立报告通用密钥配置缺失")
+		t.Fatal("QQ 没有独立报告专用密钥配置缺失")
 	}
 }
 
@@ -42,6 +42,11 @@ func TestAggregateQQResolverRejectsUnsafeResponses(t *testing.T) {
 		setup  bool
 	}{
 		{"auth", 403, `{"code":403,"message":"fixture-qq-secret https://example.test/token"}`, true},
+		{"http-401", 401, `{"code":401,"message":"fixture-qq-secret"}`, true},
+		{"http-401-not-json", 401, `fixture-qq-secret`, true},
+		{"business-401", 200, `{"code":401,"message":"fixture-qq-secret"}`, true},
+		{"string-business-401", 200, `{"code":"401","message":"fixture-qq-secret"}`, true},
+		{"http-403-not-json", 403, `fixture-qq-secret`, true},
 		{"rate", 429, `{"code":429,"message":"fixture-qq-secret"}`, false},
 		{"missing-code", 200, `{"url":"https://audio.example.test/media"}`, false},
 		{"null-code", 200, `{"code":null,"url":"https://audio.example.test/media"}`, false},
@@ -59,7 +64,7 @@ func TestAggregateQQResolverRejectsUnsafeResponses(t *testing.T) {
 				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body)), Request: r}, nil
 			})
 			p := loadAggregate(t)
-			if _, err := p.Aggregate("setResolverKey", map[string]any{"value": "fixture-qq-secret", "temporary": true}); err != nil {
+			if _, err := p.Aggregate("setResolverKey", map[string]any{"platform": "tx", "value": "fixture-qq-secret", "temporary": true}); err != nil {
 				t.Fatal(err)
 			}
 			id := "catalog:tx:track:FixtureSongA1"
@@ -93,7 +98,7 @@ func TestAggregateQQResolverPropagatesCancellation(t *testing.T) {
 		}
 	})
 	p := loadAggregate(t)
-	if _, err := p.Aggregate("setResolverKey", map[string]any{"value": "fixture-qq-cancel", "temporary": true}); err != nil {
+	if _, err := p.Aggregate("setResolverKey", map[string]any{"platform": "tx", "value": "fixture-qq-cancel", "temporary": true}); err != nil {
 		t.Fatal(err)
 	}
 	id := "catalog:tx:track:FixtureSongA1"
