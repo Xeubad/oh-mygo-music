@@ -13,7 +13,7 @@ export default ({ command }: { command: string }) => ({
     github: release.repository,
     changelog: "FORK_CHANGELOG.md",
     // 首次随包加入模型时，旧版增量几乎等于完整包；后续版本恢复增量更新。
-    deltas: release.version === "0.0.6" ? 0 : 3,
+    deltas: release.version === "0.0.7" ? 0 : 3,
   },
   macos: {
     icon: "icon/AppIcon.icon",
