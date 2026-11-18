@@ -399,6 +399,17 @@ func TestCooperativeRecoveryRejectsMP3BeforeInterruption(t *testing.T) {
 			w.Write(mp3[:10000])
 			return
 		}
+		if r.URL.Path == "/complete" {
+			// 冷启动或本机调度可超过 300ms；完整来源变慢不能改变短音频的拒绝结论。
+			timer := time.NewTimer(350 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				w.Write(mp3)
+			case <-r.Context().Done():
+			}
+			return
+		}
 		w.Header().Set("Content-Length", fmt.Sprint(len(flac)+1))
 		w.Write(flac)
 		w.(http.Flusher).Flush()
@@ -412,12 +423,13 @@ func TestCooperativeRecoveryRejectsMP3BeforeInterruption(t *testing.T) {
 	src := cooperativePlugin(t, fmt.Sprintf(`
 let rounds=0;
 export function playbackPlan() {
- rounds++; return {targetQuality:rounds===1?"flac":"128k",minimumQuality:"128k",candidateTimeoutMs:300,roundTimeoutMs:2000,candidates:rounds===1?
+ // 本用例核验真实定位，沿用正式候选预算；超时边界由独立虚拟时钟测试覆盖。
+ rounds++; return {targetQuality:rounds===1?"flac":"128k",minimumQuality:"128k",candidates:rounds===1?
  [{id:"initial",platform:"wy",trackID:"one",quality:"flac"}]:
  [{id:"short",platform:"wy",trackID:"one",quality:"128k"},{id:"complete",platform:"tx",trackID:"one",quality:"128k"}]};
 }
-export function resolveCandidate({candidate}) {return {stream:{url:candidate.id==="complete"?%s:%q+"/"+candidate.id}};}
-`, audioPath(t, "seek.mp3"), server.URL))
+export function resolveCandidate({candidate}) {return {stream:{url:%q+"/"+candidate.id}};}
+`, server.URL))
 	p, posts := cooperativePlayer(src)
 	p.SetVolume(0)
 	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative", Duration: 5000}}, 0)
