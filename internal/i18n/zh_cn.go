@@ -2,6 +2,9 @@ package i18n
 
 // zhCN is the app's text in Simplified Chinese, by its English.
 var zhCN = map[string]string{
+	"QQ Resolver Key":                 "QQ 解析密钥",
+	"Save QQ Key Securely":            "安全保存 QQ 密钥",
+	"Use QQ Key Once":                 "临时使用 QQ 密钥",
 	"NetEase Resolver Key":            "网易解析密钥",
 	"Save NetEase Key Securely":       "安全保存网易密钥",
 	"Use NetEase Key Once":            "临时使用网易密钥",
