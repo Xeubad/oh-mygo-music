@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/audio"
 
+	"mygo-music/internal/automix"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
@@ -43,6 +44,10 @@ type Player struct {
 	Normalize func() bool
 	// Transitions 在开始下一次过渡时读取；当前过渡持有自己的参数快照。
 	Transitions func() TransitionSettings
+	// AutoMixAdvisor 是可选增强；没有配置或请求失败时仍采用本机计算的候选。
+	AutoMixAdvisor func() automix.Planner
+	// AutoMixEngine 接收同一份本机解码音源，提前完成逐拍分轨渲染与质量检查。
+	AutoMixEngine automix.AdaptiveRenderer
 	// Cache keeps the songs played, if set.
 	Cache *Cache
 	// Changed, if set, hears that what plays, where it is or whether it
@@ -117,6 +122,9 @@ type Player struct {
 	transitionOffset   time.Duration
 	transitionID       uint64
 	transitionDone     chan struct{}
+	autoMixStatus      string
+	autoMixCloudCancel context.CancelFunc
+	autoMixCloudEpoch  uint64
 }
 
 func New(post func(func())) *Player {
@@ -766,6 +774,8 @@ func (p *Player) Position() time.Duration {
 	position := p.out.Position()
 	if p.transition != nil {
 		position -= time.Duration(p.transitionStart) * time.Second / 48000
+		frame := int64(math.Round(position.Seconds() * 48000))
+		position = time.Duration(p.transition.sourceFrameOf(p.transitionID, max(frame, 0))) * time.Second / 48000
 		position += p.transitionOffset
 	}
 	return max(position, 0)
@@ -777,14 +787,15 @@ func (p *Player) Duration() time.Duration {
 		return 0
 	case p.remote != nil && p.remote.duration > 0:
 		return p.remote.duration
-	case p.track.Duration > 0 || p.out == nil:
-		return p.track.Length()
 	}
 	if p.transition != nil {
 		if frames := p.transition.lengthOf(p.transitionID); frames >= 0 {
 			// 恢复流从中途开始，但进度条总长仍属于已提交的完整歌曲。
 			return time.Duration(frames)*time.Second/48000 + p.transitionOffset
 		}
+	}
+	if p.track.Duration > 0 || p.out == nil {
+		return p.track.Length()
 	}
 	return p.out.Duration() // a source that didn't say
 }
@@ -800,6 +811,7 @@ func (p *Player) Levels() ([Bands]float32, bool) {
 }
 
 func (p *Player) stop() {
+	p.CancelAutoMixEnhancement()
 	// 停止不需要重建未听到的缓冲，直接关闭输出先唤醒任何等待网络的解码。
 	if p.transition != nil {
 		p.transition.Close()
@@ -963,8 +975,16 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 					err      error
 				}
 				for {
+					if settings := p.transitionSettings(); (settings.AutoMix || settings.Gapless || settings.Crossfade) && !(settings.AutoMix && p.AutoMixEngine != nil) {
+						var err error
+						s, err = trimSilenceStream(s)
+						if err != nil {
+							return err
+						}
+					}
+					trimmedFrom := max(from-silenceTrimOffset(s), 0)
 					// 元数据不等于开播；定位改变时仍用同一流和候选截止重新准备，不能领取新预算。
-					prepared, err := prepareCooperativeStream(attempt, s, from)
+					prepared, err := prepareCooperativeStream(attempt, s, trimmedFrom)
 					if err != nil {
 						return err
 					}
@@ -1013,9 +1033,14 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 			return
 		} else {
 			info, s, err = p.open(src, t, quality, pre)
+			settings := p.transitionSettings()
+			if err == nil && p.Transitions != nil && (settings.AutoMix || settings.Gapless || settings.Crossfade) && !(settings.AutoMix && p.AutoMixEngine != nil) {
+				s, err = trimSilenceStream(s)
+			}
 			if err == nil && p.Transitions != nil {
+				trimmedFrom := max(from-silenceTrimOffset(s), 0)
 				var prepared stream
-				prepared, err = prepareCooperativeStream(context.Background(), s, from)
+				prepared, err = prepareCooperativeStream(context.Background(), s, trimmedFrom)
 				if err == nil {
 					s = prepared
 				} else {
@@ -1051,12 +1076,14 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 	watch := &watched{stream: s, now: p.now, ended: func() { p.post(func() {}) }, failed: make(chan error, 1)}
 	p.watch = watch
 	from := p.pending
+	trimOffset := silenceTrimOffset(s)
+	trimmedFrom := max(from-trimOffset, 0)
 	var decoder audio.Decoder = watch
 	if p.Transitions != nil {
 		// 定位先于输出构造；原生输出会立即预读，不能让未激活的恢复流先返回 EOF。
 		positioned := newTransitionDecoder(watch)
-		if from > 0 {
-			frame := int64(from) * 48000 / int64(time.Second)
+		if trimmedFrom > 0 {
+			frame := int64(trimmedFrom) * 48000 / int64(time.Second)
 			if prepared, ok := s.(*preparedStream); ok {
 				frame = prepared.frame * 48000 / int64(prepared.SampleRate())
 			}
@@ -1065,9 +1092,13 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 			}
 			positioned.origin = frame
 		}
-		p.transition = newTransitionOutput(newTransitionBuffer(positioned))
+		buffer := newTransitionBuffer(positioned)
+		if p.transitionSettings().AutoMix {
+			buffer = newAnalyzedTransitionBuffer(positioned, false)
+		}
+		p.transition = newTransitionOutput(buffer)
 		p.transitionID, p.transitionStart = 0, 0
-		p.transitionOffset = from
+		p.transitionOffset = max(from, trimOffset)
 		decoder = p.transition
 	}
 	factory := p.newOutput

@@ -1,14 +1,18 @@
 package player
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/egoist/mygo/audio"
+
+	"mygo-music/internal/automix"
 )
 
 type transitionSamples struct {
@@ -218,6 +222,44 @@ func TestTransitionCrossfadeUsesSharedOutputFrames(t *testing.T) {
 	}
 }
 
+// 交接开始不能清掉已选锁拍计划，且混音结束后必须释放旧尾轨。
+func TestTransitionAutoMixRetainsProfileThroughOverlap(t *testing.T) {
+	first := &transitionSamples{samples: []float32{.4, -.1, .4, -.1, .4, -.1, .4, -.1}, rate: 48000}
+	second := &transitionSamples{samples: []float32{.2, .05, .2, .05, .2, .05, .2, .05}, rate: 48000}
+	output := newTransitionOutput(first)
+	defer output.Close()
+	output.queue(second, TransitionSettings{AutoMix: true}, 1)
+	output.autoMixPlan = &automix.Candidate{Start: 0, End: 4, Profiles: []string{automix.ProfileMatched}}
+	if count, err := output.Read(make([]float32, 2)); count != 2 || err != nil {
+		t.Fatalf("交接首帧失败: count=%d err=%v", count, err)
+	}
+	if output.autoMixProfile() != automix.ProfileMatched {
+		t.Fatal("交接开始清掉了已选混音策略")
+	}
+	output.Read(make([]float32, 6))
+	if output.tail != nil {
+		t.Fatal("过渡完成仍保留旧尾轨")
+	}
+}
+
+// 只开启 AutoMix 就能在无可信混音计划时连续接歌，旧手动淡化参数不得抢先执行。
+func TestTransitionAutoMixOwnsFallbackWithoutOtherSwitches(t *testing.T) {
+	for _, crossfade := range []bool{false, true} {
+		t.Run(map[bool]string{false: "only-automix", true: "saved-crossfade"}[crossfade], func(t *testing.T) {
+			output := newTransitionOutput(&transitionSamples{samples: []float32{.2, .2, .4, .4}, rate: 48000})
+			defer output.Close()
+			output.queue(&transitionSamples{samples: []float32{.6, .6, .8, .8}, rate: 48000}, TransitionSettings{
+				AutoMix: true, Crossfade: crossfade, CrossfadeDuration: time.Second,
+			}, 1)
+			actual := make([]float32, 8)
+			count, failure := output.Read(actual)
+			if count != len(actual) || failure != io.EOF || !reflect.DeepEqual(actual, []float32{.2, .2, .4, .4, .6, .6, .8, .8}) {
+				t.Fatalf("单开 AutoMix 仍依赖手动设置或提前淡化: count=%d err=%v samples=%v", count, failure, actual)
+			}
+		})
+	}
+}
+
 // 同相满幅混音共同衰减左右声道，不能逐声道削波改变声像；反相信号保留自然抵消。
 func TestTransitionPeakProtectionKeepsStereoBalance(t *testing.T) {
 	for _, scenario := range []struct {
@@ -356,4 +398,216 @@ func TestTransitionGaplessKeepsEveryFrame(t *testing.T) {
 	if len(events) != 1 || events[0].id != 1 || events[0].frame != 2 {
 		t.Fatalf("交接边界: %+v", events)
 	}
+}
+
+// 无缝接歌删除两首各自的首尾静音，同时保留 A 内部 300ms 的停顿和所有有效音频帧。
+func TestTransitionGaplessTrimsTrackEdgesAndKeepsMiddlePause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		makeSamples := func(leading, active, pause, resumed, trailing int, value float32) []float32 {
+			samples := make([]float32, leading*2)
+			for range active {
+				samples = append(samples, value, value)
+			}
+			for range pause {
+				samples = append(samples, 0, 0)
+			}
+			for range resumed {
+				samples = append(samples, value, value)
+			}
+			for range trailing {
+				samples = append(samples, 0, 0)
+			}
+			return samples
+		}
+		openTrimmed := func(samples []float32) audio.Decoder {
+			decoded := &transitionTestStream{
+				transitionSamples: transitionSamples{samples: samples, rate: 1000},
+				dl:                downloaded(nil),
+			}
+			trimmed, err := trimSilenceStream(decoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return newTransitionDecoder(trimmed)
+		}
+		firstSamples := makeSamples(200, 120, 300, 150, 250, .2)
+		secondSamples := makeSamples(150, 250, 0, 0, 200, .3)
+		readAll := func(decoder audio.Decoder) []float32 {
+			t.Helper()
+			var samples []float32
+			buffer := make([]float32, 4096)
+			for {
+				count, err := decoder.Read(buffer)
+				samples = append(samples, buffer[:count]...)
+				if err == io.EOF {
+					return samples
+				}
+				if err != nil || count == 0 {
+					t.Fatalf("参考音频解码停止: count=%d err=%v", count, err)
+				}
+			}
+		}
+		firstExpected := readAll(openTrimmed(firstSamples))
+		secondExpected := readAll(openTrimmed(secondSamples))
+		expected := append(firstExpected, secondExpected...)
+		first := openTrimmed(firstSamples)
+		second := openTrimmed(secondSamples)
+		output := newTransitionOutput(newTransitionBuffer(first))
+		output.queue(newTransitionBuffer(second), TransitionSettings{Gapless: true}, 1)
+		defer output.Close()
+		synctest.Wait()
+		var actual []float32
+		buffer := make([]float32, 256)
+		for {
+			count, err := output.Read(buffer)
+			actual = append(actual, buffer[:count]...)
+			if err == io.EOF {
+				break
+			}
+			if err != nil || count == 0 {
+				t.Fatalf("混音停止: count=%d err=%v", count, err)
+			}
+		}
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("曲边静音未裁或中间停顿被裁: actualFrames=%d expectedFrames=%d", len(actual)/2, len(expected)/2)
+		}
+		t.Log("首尾静音已裁；中间停顿 300 帧保留；交接新增空帧 0")
+	})
+}
+
+// 只裁掉达到阈值的歌曲首尾近静音，歌曲中间同样长度的停顿必须逐样本保留。
+func TestTransitionTrimsOnlyLeadingAndTrailingSilence(t *testing.T) {
+	appendFrames := func(samples []float32, count int, value float32) []float32 {
+		for range count {
+			samples = append(samples, value, value)
+		}
+		return samples
+	}
+	samples := make([]float32, 0)
+	samples = appendFrames(samples, 200, 0)
+	samples = appendFrames(samples, 120, .2)
+	samples = appendFrames(samples, 300, 0)
+	samples = appendFrames(samples, 150, .2)
+	samples = appendFrames(samples, 250, 0)
+	decoder := &transitionSamples{samples: samples, rate: 1000}
+	start, end, total, err := findSilenceTrimBounds(decoder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != 200 || end != 770 || total != 1020 {
+		t.Fatalf("静音边界 start=%d end=%d total=%d，期望 200/770/1020", start, end, total)
+	}
+	if err = decoder.SetPosition(start); err != nil {
+		t.Fatal(err)
+	}
+	actual := make([]float32, (end-start)*2)
+	count, err := decoder.Read(actual)
+	if err != nil && err != io.EOF {
+		t.Fatal(err)
+	}
+	if count != len(actual) {
+		t.Fatalf("定位后读取 %d 个样本，期望 %d", count, len(actual))
+	}
+	if !reflect.DeepEqual(actual[240:840], appendFrames(make([]float32, 0), 300, 0)) {
+		t.Fatal("歌曲中间的 300ms 停顿被误裁")
+	}
+}
+
+// 未完整下载的音源不能为了探测尾静音而读到 EOF，避免阻塞当前播放。
+func TestTransitionDoesNotScanIncompleteDownload(t *testing.T) {
+	samples := &transitionSamples{samples: []float32{0, 0, .2, .2}, rate: 48000}
+	source := &transitionTestStream{transitionSamples: *samples, dl: &download{done: false}}
+	trimmed, err := trimSilenceStream(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmed != source || samples.pos != 0 {
+		t.Fatal("未完成下载被扫描或改变了播放起点")
+	}
+}
+
+// 全程静音或不足 120ms 的边缘静音不能把短音效、短歌曲裁成空内容。
+func TestTransitionKeepsSilentAndShortEdgeContent(t *testing.T) {
+	for _, samples := range [][]float32{
+		make([]float32, 48000*2),
+		{0, 0, 0, 0, .2, .2, .2, .2, 0, 0, 0, 0},
+	} {
+		source := &transitionTestStream{
+			transitionSamples: transitionSamples{samples: samples, rate: 48000},
+			dl:                downloaded(nil),
+		}
+		trimmed, err := trimSilenceStream(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if trimmed != source || source.pos != 0 {
+			t.Fatalf("不可裁内容发生变化: trimmed=%T position=%d samples=%d", trimmed, source.pos, len(samples))
+		}
+	}
+}
+
+type transitionTestStream struct {
+	transitionSamples
+	dl *download
+}
+
+func (stream *transitionTestStream) Close() error                   { return nil }
+func (stream *transitionTestStream) source() (*download, *spectrum) { return stream.dl, nil }
+
+// 实际 FLAC 接 AAC 的预解码、重采样和曲尾衔接必须保留每个样本，不能新增空帧或重播首帧。
+func TestTransitionGaplessDecodedFormatsKeepEverySample(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		open := func(name string) audio.Decoder {
+			decoded, err := openStream(downloaded(readFixture(t, name)), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := prepareCooperativeStream(context.Background(), decoded, 0)
+			if err != nil {
+				decoded.Close()
+				t.Fatal(err)
+			}
+			return newTransitionDecoder(prepared)
+		}
+		read := func(decoder audio.Decoder) []float32 {
+			if closer, ok := decoder.(io.Closer); ok {
+				defer closer.Close()
+			}
+			var samples []float32
+			buffer := make([]float32, 4096)
+			for {
+				count, err := decoder.Read(buffer)
+				samples = append(samples, buffer[:count]...)
+				if err == io.EOF {
+					return samples
+				}
+				if err != nil || count == 0 {
+					t.Fatalf("解码停止: count=%d err=%v", count, err)
+				}
+			}
+		}
+		first := read(open("seek.flac"))
+		second := read(open("seek-aac.m4a"))
+		output := newTransitionOutput(newTransitionBuffer(open("seek.flac")))
+		output.queue(newTransitionBuffer(open("seek-aac.m4a")), TransitionSettings{Gapless: true}, 1)
+		synctest.Wait()
+		actual := read(output)
+		expected := append(first, second...)
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("无缝输出与原音频直接拼接不同: actual=%d expected=%d", len(actual), len(expected))
+		}
+		found := false
+		for _, event := range output.eventsAt(int64(len(actual) / 2)) {
+			if event.id == 1 && !event.ended && event.failed == nil {
+				found = true
+				if event.frame != int64(len(first)/2) {
+					t.Fatalf("交接帧不是旧曲的结束边界: frame=%d end=%d", event.frame, len(first)/2)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("缺少新曲首帧交接")
+		}
+		t.Logf("FLAC 结束帧 E=%d；AAC 起始帧 N=%d；总帧 %d；额外间隙=0 帧", len(first)/2, len(first)/2, len(actual)/2)
+	})
 }

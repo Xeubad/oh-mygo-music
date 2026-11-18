@@ -6,21 +6,27 @@ import (
 	"math"
 	"time"
 
+	"mygo-music/internal/automix"
 	"mygo-music/internal/music"
 )
 
 type transitionPreparation struct {
-	id       uint64
-	index    int
-	track    music.Track
-	info     *music.Stream
-	stream   stream
-	watch    *watched
-	playback *playbackAttempt
-	cancel   context.CancelFunc
-	ready    bool
-	failed   map[int]bool
-	blocked  error
+	id                  uint64
+	index               int
+	track               music.Track
+	info                *music.Stream
+	stream              stream
+	watch               *watched
+	playback            *playbackAttempt
+	cancel              context.CancelFunc
+	ready               bool
+	failed              map[int]bool
+	blocked             error
+	autoMixPlanning     bool
+	autoMixDone         bool
+	autoMixChecked      int64
+	autoMixRenderCancel context.CancelFunc
+	context             context.Context
 }
 
 // RefreshTransitions 让尚未开始的过渡使用新设置，已经输出首帧的交叉保留原快照。
@@ -31,6 +37,18 @@ func (p *Player) RefreshTransitions() {
 		return
 	}
 	p.cancelTransitionPreparation()
+	if p.transition != nil && p.transitionSettings().AutoMix {
+		p.transition.mu.Lock()
+		var buffer *transitionBuffer
+		if p.transition.current != nil {
+			buffer, _ = p.transition.current.decoder.(*transitionBuffer)
+		}
+		p.transition.mu.Unlock()
+		if buffer != nil && buffer.analyzer == nil {
+			p.loadPlayback(p.at, 0, stay, p.playing, p.Position(), p.playback)
+			return
+		}
+	}
 	p.prepareTransition()
 }
 
@@ -99,7 +117,10 @@ func (p *Player) prepareTransition() {
 		return
 	}
 	settings := p.transitionSettings()
-	if !settings.Crossfade && !settings.Gapless {
+	if settings.AutoMix && p.transition.hasTail() {
+		return
+	}
+	if !settings.Crossfade && !settings.Gapless && !settings.AutoMix {
 		return
 	}
 	index := p.nextTransitionIndex()
@@ -112,7 +133,10 @@ func (p *Player) prepareTransition() {
 	if _, ok := source.(music.CooperativeSource); ok && source.Can("playbackPlan") && source.Can("resolveCandidate") {
 		remaining := p.Duration() - p.Position()
 		window := max(settings.CrossfadeDuration, 2*time.Second)
-		if p.Duration() <= 0 || remaining > window {
+		if settings.AutoMix {
+			window = 240 * time.Second
+		}
+		if (!settings.AutoMix && p.Duration() <= 0) || p.Duration() > 0 && remaining > window {
 			return
 		}
 	}
@@ -131,7 +155,7 @@ func (p *Player) prepareTransitionAt(index int, failed map[int]bool) {
 	p.transitionSequence++
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = context.WithValue(ctx, scheduledCandidateKey{}, true)
-	preparation := &transitionPreparation{id: p.transitionSequence, index: p.order[index], track: track, playback: &playbackAttempt{dir: forward}, cancel: cancel, failed: failed}
+	preparation := &transitionPreparation{id: p.transitionSequence, index: p.order[index], track: track, playback: &playbackAttempt{dir: forward}, cancel: cancel, failed: failed, context: ctx}
 	p.transitionNext, p.transitionCancel = preparation, cancel
 	quality := music.Qualities[len(music.Qualities)/2]
 	if p.Quality != nil {
@@ -140,6 +164,13 @@ func (p *Player) prepareTransitionAt(index int, failed map[int]bool) {
 	pre := p.takeAhead(track, quality)
 	generation := p.gen
 	install := func(attempt context.Context, info *music.Stream, decoded stream, policy playbackPolicy, admit func(func() error) error) error {
+		if settings := p.transitionSettings(); (settings.AutoMix || settings.Gapless || settings.Crossfade) && !(settings.AutoMix && p.AutoMixEngine != nil) {
+			var failure error
+			decoded, failure = trimSilenceStream(decoded)
+			if failure != nil {
+				return failure
+			}
+		}
 		prepared, failure := prepareCooperativeStream(attempt, decoded, 0)
 		if failure != nil {
 			return failure
@@ -187,7 +218,16 @@ func (p *Player) prepareTransitionAt(index int, failed map[int]bool) {
 					return err
 				}
 			}
-			p.transition.queueConfigured(newTransitionBuffer(newTransitionDecoder(preparation.watch)), settings, preparation.id, gain, admission, rejection)
+			buffer := newTransitionBuffer(newTransitionDecoder(preparation.watch))
+			if settings.AutoMix {
+				buffer = newAnalyzedTransitionBuffer(newTransitionDecoder(preparation.watch), true)
+				if p.AutoMixEngine != nil {
+					// 前奏裁点、最长乐句及恢复原速均已离线渲染；保留足够原始前段供一次性消费。
+					buffer.prefixLimit = 96 * automix.SampleRate * 2
+					buffer.capacity = (96*automix.SampleRate + 1023) / 1024
+				}
+			}
+			p.transition.queueConfigured(buffer, settings, preparation.id, gain, admission, rejection)
 			preparation.ready = true
 			installed <- nil
 		})
@@ -327,6 +367,7 @@ func (p *Player) watchTransitions(generation int, out audioOutput) {
 					if p.gen == generation && p.out == out && p.playing {
 						p.commitTransitions()
 						p.prepareTransition()
+						p.prepareAutoMix()
 					}
 				})
 			}
@@ -384,6 +425,13 @@ func (p *Player) commitTransitions() {
 		if position < 0 {
 			continue
 		}
+		if preparation.autoMixRenderCancel != nil {
+			// 原曲已自然接到下一首时，不再为已过期的接点占用 CPU，也不取消新曲的播放流。
+			preparation.autoMixRenderCancel()
+			if !preparation.autoMixDone {
+				p.autoMixStatus = "fallback"
+			}
+		}
 		p.transitionNext, p.transitionCancel = nil, nil
 		p.at = position
 		p.track = &preparation.track
@@ -391,7 +439,7 @@ func (p *Player) commitTransitions() {
 		p.playback = preparation.playback
 		p.gain = normGain(p.info)
 		p.transitionStart = event.frame
-		p.transitionOffset = 0
+		p.transitionOffset = silenceTrimOffset(preparation.stream)
 		p.transitionID = event.id
 		p.applyGain()
 		p.pending = 0

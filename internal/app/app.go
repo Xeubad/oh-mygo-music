@@ -13,6 +13,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"mygo-music/internal/automix"
 	"mygo-music/internal/betterlyrics"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/local"
@@ -127,6 +128,8 @@ type app struct {
 	betterLyricsTrackKey  string
 	betterLyricsTrackID   uint64
 	betterLyricsStatus    string
+	autoMix               autoMixSettingsState
+	ai                    aiSettingsState
 
 	suggestions suggestState // what the search field's query may be after
 
@@ -377,6 +380,16 @@ func Run() error {
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
 		a.pl.Transitions = func() player.TransitionSettings { return a.settings.playbackTransitions() }
+		a.pl.AutoMixAdvisor = func() automix.Planner { return a.autoMix.advisor }
+		if runtime.GOOS == "windows" {
+			if executable, err := os.Executable(); err == nil {
+				a.pl.AutoMixEngine = &automix.LocalEngine{
+					Root: filepath.Join(filepath.Dir(executable), "automix-engine"),
+					Cache: userDataDir("automix"),
+				}
+			}
+		}
+		a.configureAutoMixAdvisor()
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
 		a.pl.Changed = func() {
 			a.keepSession()
