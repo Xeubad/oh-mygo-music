@@ -1,7 +1,6 @@
 package automix
 
 import (
-	"encoding/json"
 	"math"
 	"slices"
 	"testing"
@@ -30,52 +29,6 @@ func TestPlanUsesMusicAndRejectsUnknownEnd(t *testing.T) {
 	if unknown := BuildRequest(first.Snapshot(), second.Snapshot(), -1, 0); len(unknown.Candidates) != 0 {
 		t.Fatal("未知曲尾被当作有效截断点")
 	}
-	encoded, err := json.Marshal(request)
-	if err != nil || len(encoded) > MaxRequestBytes {
-		t.Fatalf("模型特征请求无界: size=%d err=%v", len(encoded), err)
-	}
-}
-
-// 模型只能选本地候选；不能用自报置信度绕过边界、注入新候选或重复 JSON 字段。
-func TestDecisionRejectsUnsafeOrInventedPlan(t *testing.T) {
-	first, second := NewAnalyzer(0), NewAnalyzer(0)
-	first.Feed(rhythmFixture(16, 120, .1))
-	second.Feed(rhythmFixture(16, 124, .15))
-	request := BuildRequest(first.Snapshot(), second.Snapshot(), 16*SampleRate, 0)
-	if len(request.Candidates) == 0 {
-		t.Fatal("没有可供模型选择的本地候选")
-	}
-	validID := request.Candidates[0].ID
-	for _, response := range []string{
-		`{"candidate_id":"invented","profile":"original"}`,
-		`{"candidate_id":"mix-1","profile":"unlimited"}`,
-		`{"candidate_id":"mix-1","profile":"original","start_frame":0}`,
-		`{"candidate_id":"mix-1","candidate_id":"mix-2","profile":"original"}`,
-		`{"candidate_id":"mix-1","profile":"original"} extra`,
-	} {
-		if _, err := ParseDecision([]byte(response), request); err == nil {
-			t.Fatalf("接受危险模型输出: %s", response)
-		}
-	}
-	valid := `{"candidate_id":"` + validID + `","profile":"` + request.Candidates[0].Profiles[0] + `"}`
-	if _, err := ParseDecision([]byte(valid), request); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// 最长特征窗口也必须压缩到请求上限以内，不能退化成逐样本上传。
-func TestFeatureRequestStaysBoundedAtFullHistory(t *testing.T) {
-	first, second := NewAnalyzer(0), NewAnalyzer(0)
-	first.Feed(rhythmFixture(30, 118.4, .1))
-	second.Feed(rhythmFixture(16, 120, .15))
-	request := BuildRequest(first.Snapshot(), second.Snapshot(), 30*SampleRate, 18*SampleRate)
-	encoded, err := json.Marshal(request)
-	if err != nil || len(encoded) > MaxRequestBytes {
-		t.Fatalf("完整历史特征超限: size=%d err=%v", len(encoded), err)
-	}
-	if len(request.Current.Envelope) > 48 || len(request.Next.Envelope) > 48 {
-		t.Fatal("模型输入没有聚合特征时间窗")
-	}
 }
 
 // 乐句证据可信时自动按小节交接，并优先选择音高轮廓相容的过渡候选。
@@ -100,7 +53,7 @@ func TestPlanAutomaticallyAlignsPhrasesAndPrefersCompatibleTonalProfile(t *testi
 	for _, candidate := range request.Candidates {
 		if candidate.BarAligned {
 			phraseCount++
-			currentTempo, nextTempo := request.Current.Tempo, request.Next.Tempo
+			currentTempo, nextTempo := current.Snapshot().Tempo, compatible.Tempo
 			beatPeriod := 60 * SampleRate / currentTempo.BPM
 			barPeriod := 4 * beatPeriod
 			currentBar := float64(currentTempo.Phase) + float64(currentTempo.BarPhase)*beatPeriod

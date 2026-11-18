@@ -8,7 +8,6 @@ import (
 
 	"github.com/egoist/mygo"
 
-	"mygo-music/internal/automix"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/player"
 )
@@ -88,15 +87,10 @@ type settings struct {
 	// Normalize evens out the loudness of tracks, by what their source
 	// measured of each.
 	Normalize bool `json:"normalize"`
-	// 本机计算与云端增强独立选择，旧 gapless 不迁移成会变速的智能过渡。
-	AutoMixEnabled      bool               `json:"autoMixEnabled"`
-	AutoMixAIEnabled    bool               `json:"autoMixAIEnabled"`
-	AutoMixEndpoint     string             `json:"autoMixEndpoint,omitempty"`
-	AutoMixModel        string             `json:"autoMixModel,omitempty"`
-	AIProviders         []automix.Provider `json:"aiProviders,omitempty"`
-	AutoMixProviderID   string             `json:"autoMixProviderId,omitempty"`
-	CrossfadeEnabled    bool               `json:"crossfadeEnabled"`
-	CrossfadeDurationMs int                `json:"crossfadeDurationMs"`
+	// 旧 gapless 不迁移成会变速的智能过渡，保留用户已有的接续偏好。
+	AutoMixEnabled      bool `json:"autoMixEnabled"`
+	CrossfadeEnabled    bool `json:"crossfadeEnabled"`
+	CrossfadeDurationMs int  `json:"crossfadeDurationMs"`
 	// 开启默认项不能省略 false，否则重启会丢失用户关闭的选择。
 	GaplessEnabled      bool `json:"gaplessEnabled"`
 	PlaybackFadeEnabled bool `json:"playbackFadeEnabled"`
@@ -159,7 +153,6 @@ func loadSettings() settings {
 		}
 		s.path = path
 	}
-	s.migrateAIProviders()
 	return s
 }
 

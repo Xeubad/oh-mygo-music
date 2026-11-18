@@ -36,14 +36,6 @@ func (p *Player) prepareAdaptiveAutoMix() {
 		parent = context.Background()
 	}
 	engine := p.AutoMixEngine
-	var advisor automix.Planner
-	if p.AutoMixAdvisor != nil {
-		advisor = p.AutoMixAdvisor()
-	}
-	adviceContext, adviceCancel := context.WithCancel(parent)
-	p.autoMixCloudCancel = adviceCancel
-	p.autoMixCloudEpoch++
-	adviceEpoch := p.autoMixCloudEpoch
 	earliest := current.absoluteSourceFrame(position) + 2*automix.SampleRate
 	oldGain, nextGain := 1.0, 1.0
 	if p.Normalize != nil && p.Normalize() {
@@ -53,7 +45,6 @@ func (p *Player) prepareAdaptiveAutoMix() {
 	preparation.autoMixRenderCancel = cancel
 	go func() {
 		defer cancel()
-		defer adviceCancel()
 		directory, err := os.MkdirTemp("", "mygo-automix-pcm-*")
 		if err == nil {
 			defer os.RemoveAll(directory)
@@ -68,7 +59,6 @@ func (p *Player) prepareAdaptiveAutoMix() {
 			if err == nil {
 				result, err = engine.Render(ctx, automix.AdaptiveJob{
 					Current: oldPath, Next: nextPath, Earliest: earliest, GainRatio: oldGain / nextGain,
-					Advisor: advisor, AdvisorContext: adviceContext,
 				})
 			}
 		}
@@ -82,17 +72,8 @@ func (p *Player) prepareAdaptiveAutoMix() {
 				p.autoMixStatus = "fallback"
 				return
 			}
-			if result.AISelected && p.autoMixCloudEpoch != adviceEpoch {
-				preparation.autoMixDone = false
-				p.autoMixStatus = "waiting"
-				p.prepareAdaptiveAutoMix()
-				return
-			}
 			if output.installAdaptive(currentID, preparation.id, result) {
 				p.autoMixStatus = "local"
-				if result.AISelected {
-					p.autoMixStatus = "ai"
-				}
 			} else {
 				// 结果到达时已经过了接点，保留原曲和原待接流，不把过期方案硬塞进输出。
 				p.autoMixStatus = "fallback"

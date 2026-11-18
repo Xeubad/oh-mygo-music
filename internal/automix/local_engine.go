@@ -15,12 +15,10 @@ import (
 )
 
 type AdaptiveJob struct {
-	Current        string
-	Next           string
-	Earliest       int64
-	GainRatio      float64
-	Advisor        Planner
-	AdvisorContext context.Context
+	Current   string
+	Next      string
+	Earliest  int64
+	GainRatio float64
 }
 
 type AdaptiveRenderer interface {
@@ -41,7 +39,6 @@ type AdaptiveResult struct {
 	Mixed         string          `json:"mixed"`
 	Consumed      int64           `json:"consumed"`
 	Anchors       []Anchor        `json:"mapping"`
-	AISelected    bool            `json:"ai_selected"`
 	Samples       []float32       `json:"-"`
 }
 
@@ -152,7 +149,6 @@ func (engine *LocalEngine) Render(parent context.Context, job AdaptiveJob) (*Ada
 		"schema": "adaptive-1", "current": job.Current, "next": job.Next,
 		"earliest": float64(job.Earliest) / SampleRate, "gain_ratio": job.GainRatio,
 		"cache": filepath.Join(engine.Cache, "analysis"), "output": directory,
-		"advisor": job.Advisor != nil,
 	})
 	if err != nil {
 		return nil, err
@@ -173,52 +169,8 @@ func (engine *LocalEngine) Render(parent context.Context, job AdaptiveJob) (*Ada
 		command.Stdout, command.Stderr = writer, writer
 	}
 	// 子进程无窗口、无音频设备，日志不包含 URL、凭据或原始 PCM。
-	if err = command.Start(); err != nil {
+	if err = command.Run(); err != nil {
 		return nil, fmt.Errorf("automix: local engine failed: %w", err)
-	}
-	finished := make(chan error, 1)
-	go func() { finished <- command.Wait() }()
-	advisorDone := false
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-waiting:
-	for {
-		select {
-		case err = <-finished:
-			if err != nil {
-				return nil, fmt.Errorf("automix: local engine failed: %w", err)
-			}
-			break waiting
-		case <-ticker.C:
-			if advisorDone || job.Advisor == nil {
-				continue
-			}
-			features, readErr := os.ReadFile(filepath.Join(directory, "request.json"))
-			if readErr != nil {
-				continue
-			}
-			advisorDone = true
-			var request Request
-			if len(features) > MaxRequestBytes || json.Unmarshal(features, &request) != nil {
-				continue
-			}
-			adviceParent := job.AdvisorContext
-			if adviceParent == nil {
-				adviceParent = ctx
-			}
-			advice, stop := context.WithTimeout(adviceParent, 3*time.Second)
-			decision, adviceErr := job.Advisor.Plan(advice, request)
-			if adviceErr == nil && advice.Err() == nil {
-				if _, resolveErr := request.Resolve(decision); resolveErr == nil {
-					data, _ := json.Marshal(decision)
-					temporary := filepath.Join(directory, "decision.part")
-					if os.WriteFile(temporary, data, 0600) == nil {
-						os.Rename(temporary, filepath.Join(directory, "decision.json"))
-					}
-				}
-			}
-			stop()
-		}
 	}
 	file, err := os.Open(filepath.Join(directory, "result.json"))
 	if err != nil {

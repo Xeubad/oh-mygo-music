@@ -9,14 +9,6 @@ import (
 
 func (p *Player) AutoMixStatus() string { return p.autoMixStatus }
 
-func (p *Player) CancelAutoMixEnhancement() {
-	p.autoMixCloudEpoch++
-	if p.autoMixCloudCancel != nil {
-		p.autoMixCloudCancel()
-		p.autoMixCloudCancel = nil
-	}
-}
-
 func (p *Player) prepareAutoMix() {
 	preparation, output := p.transitionNext, p.transition
 	if !p.transitionSettings().AutoMix || p.repeat == RepeatOne || preparation == nil || !preparation.ready || preparation.autoMixDone || preparation.autoMixPlanning || output == nil || !p.playing {
@@ -37,18 +29,11 @@ func (p *Player) prepareAutoMix() {
 	preparation.autoMixPlanning = true
 	p.autoMixStatus = "analyzing"
 	generation := p.gen
-	var advisor automix.Planner
-	if p.AutoMixAdvisor != nil {
-		advisor = p.AutoMixAdvisor()
-	}
 	parent := preparation.context
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	p.autoMixCloudCancel = cancel
-	p.autoMixCloudEpoch++
-	cloudEpoch := p.autoMixCloudEpoch
 	post := p.post
 	go func() {
 		defer cancel()
@@ -78,7 +63,7 @@ func (p *Player) prepareAutoMix() {
 			})
 			return
 		}
-		install := func(decision automix.Decision, mode string) {
+		install := func(decision automix.Decision) {
 			candidate, err := request.Resolve(decision)
 			if err != nil || candidate.Entry*2 >= int64(len(prefix)) {
 				return
@@ -96,23 +81,14 @@ func (p *Player) prepareAutoMix() {
 				if p.gen != generation || p.transition != output || p.transitionNext != preparation || !p.transitionSettings().AutoMix {
 					return
 				}
-				// 取消时连已投递到主线程的云结果也要失效；取消不影响本机计划。
-				if mode == "ai" && (p.autoMixCloudEpoch != cloudEpoch || p.AutoMixAdvisor == nil || p.AutoMixAdvisor() == nil) {
-					return
-				}
 				preparation.autoMixPlanning, preparation.autoMixDone = false, true
 				if output.installAutoMix(currentID, preparation.id, candidate, intro, mapping, len(prefix)) {
-					p.autoMixStatus = mode
+					p.autoMixStatus = "local"
 				}
 			})
 		}
-		// 本机先交付可执行方案；AI 慢、离线或拒绝建议时，不得取消已经可用的本机结果。
-		install(decision, "local")
-		if advisor == nil {
-			return
-		}
-		if enhanced, err := advisor.Plan(ctx, request); err == nil && ctx.Err() == nil {
-			install(enhanced, "ai")
+		if ctx.Err() == nil {
+			install(decision)
 		}
 	}()
 }

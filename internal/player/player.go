@@ -44,8 +44,6 @@ type Player struct {
 	Normalize func() bool
 	// Transitions 在开始下一次过渡时读取；当前过渡持有自己的参数快照。
 	Transitions func() TransitionSettings
-	// AutoMixAdvisor 是可选增强；没有配置或请求失败时仍采用本机计算的候选。
-	AutoMixAdvisor func() automix.Planner
 	// AutoMixEngine 接收同一份本机解码音源，提前完成逐拍分轨渲染与质量检查。
 	AutoMixEngine automix.AdaptiveRenderer
 	// Cache keeps the songs played, if set.
@@ -123,8 +121,6 @@ type Player struct {
 	transitionID       uint64
 	transitionDone     chan struct{}
 	autoMixStatus      string
-	autoMixCloudCancel context.CancelFunc
-	autoMixCloudEpoch  uint64
 }
 
 func New(post func(func())) *Player {
@@ -811,7 +807,6 @@ func (p *Player) Levels() ([Bands]float32, bool) {
 }
 
 func (p *Player) stop() {
-	p.CancelAutoMixEnhancement()
 	// 停止不需要重建未听到的缓冲，直接关闭输出先唤醒任何等待网络的解码。
 	if p.transition != nil {
 		p.transition.Close()

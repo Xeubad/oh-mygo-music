@@ -1,9 +1,7 @@
 package player
 
 import (
-	"context"
 	"encoding/binary"
-	"errors"
 	"io"
 	"math"
 	"os"
@@ -16,62 +14,6 @@ import (
 	"mygo-music/internal/automix"
 	"mygo-music/internal/music"
 )
-
-type waitingAutoMixAdvisor struct {
-	called   chan struct{}
-	canceled chan struct{}
-}
-
-func (advisor waitingAutoMixAdvisor) Plan(ctx context.Context, request automix.Request) (automix.Decision, error) {
-	close(advisor.called)
-	<-ctx.Done()
-	close(advisor.canceled)
-	return automix.Decision{}, ctx.Err()
-}
-
-// 云端请求尚未返回时，手动切换队列要立即取消请求，不能让旧模型结果复活。
-func TestAutoMixQueueChangeCancelsOptionalAdvisor(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		current, posted, _ := transitionPlayerFixture(t)
-		path := autoMixSongFixture(t, 120, .1)
-		source := &autoMixTestSource{files: map[string]string{"a": path, "b": path, "c": path}}
-		current.Source = func(string) music.Source { return source }
-		current.Transitions = func() TransitionSettings { return TransitionSettings{AutoMix: true} }
-		advisor := waitingAutoMixAdvisor{called: make(chan struct{}), canceled: make(chan struct{})}
-		current.AutoMixAdvisor = func() automix.Planner { return advisor }
-		current.PlayQueue([]music.Track{{ID: "a", Source: "test"}, {ID: "b", Source: "test"}}, 0)
-		entered := false
-		for step := 0; step < 1000; step++ {
-			synctest.Wait()
-			pumpTransitionPosts(posted)
-			advanceTransitionPlayer(current, posted, 480)
-			select {
-			case <-advisor.called:
-				entered = true
-			default:
-			}
-			if entered {
-				break
-			}
-		}
-		if !entered {
-			t.Fatal("未进入可选 AI 分析")
-		}
-		current.PlayNext(music.Track{ID: "c", Source: "test"})
-		synctest.Wait()
-		select {
-		case <-advisor.canceled:
-		default:
-			t.Fatal("改变队列没有取消旧云请求")
-		}
-		if current.Current().ID != "a" {
-			t.Fatal("候选准备提前修改了当前歌曲")
-		}
-		current.stop()
-		time.Sleep(200 * time.Millisecond)
-		pumpTransitionPosts(posted)
-	})
-}
 
 // 在线流预分析不得吞样本；未知长度只能在正常 EOF 后变为可信结束帧。
 func TestAutoMixBufferReplaysEveryStreamFrame(t *testing.T) {
@@ -121,115 +63,45 @@ func (source *autoMixTestSource) Stream(id, quality string) (*music.Stream, erro
 	return &music.Stream{URL: music.FileURL(source.files[id])}, nil
 }
 
-type failingAutoMixAdvisor struct{}
-
-func (failingAutoMixAdvisor) Plan(context.Context, automix.Request) (automix.Decision, error) {
-	return automix.Decision{}, errors.New("synthetic offline advisor")
-}
-
-type gatedAutoMixAdvisor struct {
-	called  chan struct{}
-	release chan struct{}
-}
-
-func (advisor gatedAutoMixAdvisor) Plan(ctx context.Context, request automix.Request) (automix.Decision, error) {
-	close(advisor.called)
-	select {
-	case <-advisor.release:
-		decision, _ := request.LocalDecision()
-		return decision, nil
-	case <-ctx.Done():
-		return automix.Decision{}, ctx.Err()
-	}
-}
-
-// 模型结果已排队但尚未应用时，取消增强仍必须使其失效，本机方案继续工作。
-func TestAutoMixCancellationRejectsAlreadyPostedAdvisorDecision(t *testing.T) {
+// 本机分析须在自然曲尾前交接，设备与历史各保持一次。
+func TestAutoMixPlayerWorksLocally(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		current, posted, _ := transitionPlayerFixture(t)
-		path := autoMixSongFixture(t, 120, .1)
-		source := &autoMixTestSource{files: map[string]string{"a": path, "b": path}}
+		source := &autoMixTestSource{files: map[string]string{
+			"a": autoMixSongFixture(t, 120, .1),
+			"b": autoMixSongFixture(t, 124, .15),
+		}}
 		current.Source = func(string) music.Source { return source }
 		current.Transitions = func() TransitionSettings { return TransitionSettings{AutoMix: true} }
-		advisor := gatedAutoMixAdvisor{called: make(chan struct{}), release: make(chan struct{})}
-		current.AutoMixAdvisor = func() automix.Planner { return advisor }
 		current.PlayQueue([]music.Track{{ID: "a", Source: "test"}, {ID: "b", Source: "test"}}, 0)
-		entered := false
-		for step := 0; step < 1000; step++ {
+		for range 20 {
+			synctest.Wait()
+			pumpTransitionPosts(posted)
+		}
+		original := current.out
+		for step := 0; step < 1600 && current.Current().ID != "b"; step++ {
 			advanceTransitionPlayer(current, posted, 480)
-			select {
-			case <-advisor.called:
-				entered = true
-			default:
-			}
-			if entered {
-				break
-			}
 		}
-		if !entered || current.AutoMixStatus() != "local" {
-			t.Fatalf("AI 返回前本机方案未就绪: entered=%v status=%s", entered, current.AutoMixStatus())
+		if current.Current().ID != "b" || current.out != original {
+			t.Fatalf("本机 AutoMix 没有连续交接: current=%+v same=%v status=%s", current.Current(), current.out == original, current.AutoMixStatus())
 		}
-		close(advisor.release)
-		synctest.Wait()
-		current.CancelAutoMixEnhancement()
-		pumpTransitionPosts(posted)
+		if position := original.Position(); position >= 16*time.Second {
+			t.Fatalf("AutoMix 没有提前融接: %v", position)
+		}
 		if current.AutoMixStatus() != "local" {
-			t.Fatal("已取消的云结果覆盖了本机方案")
+			t.Fatalf("本机计划没有生效: %s", current.AutoMixStatus())
+		}
+		synctest.Wait()
+		if records := source.records(); !reflect.DeepEqual(records, []string{"a", "b"}) {
+			t.Fatalf("交接记录重复或提前: %v", records)
+		}
+		if current.Position() < 0 || current.Position() > time.Second {
+			t.Fatalf("变速首帧源时间映射错误: %v", current.Position())
 		}
 		current.stop()
 		time.Sleep(200 * time.Millisecond)
 		pumpTransitionPosts(posted)
 	})
-}
-
-// 不配置 AI 或 AI 失败时，本机分析都必须在自然曲尾前完成动态交接，设备与历史各保持一次。
-func TestAutoMixPlayerWorksLocallyAndIgnoresAdvisorFailure(t *testing.T) {
-	for _, useAdvisor := range []bool{false, true} {
-		t.Run(map[bool]string{false: "local", true: "cloud-offline"}[useAdvisor], func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				current, posted, _ := transitionPlayerFixture(t)
-				source := &autoMixTestSource{files: map[string]string{
-					"a": autoMixSongFixture(t, 120, .1),
-					"b": autoMixSongFixture(t, 124, .15),
-				}}
-				current.Source = func(string) music.Source { return source }
-				current.Transitions = func() TransitionSettings {
-					return TransitionSettings{AutoMix: true}
-				}
-				if useAdvisor {
-					current.AutoMixAdvisor = func() automix.Planner { return failingAutoMixAdvisor{} }
-				}
-				current.PlayQueue([]music.Track{{ID: "a", Source: "test"}, {ID: "b", Source: "test"}}, 0)
-				for range 20 {
-					synctest.Wait()
-					pumpTransitionPosts(posted)
-				}
-				original := current.out
-				for step := 0; step < 1600 && current.Current().ID != "b"; step++ {
-					advanceTransitionPlayer(current, posted, 480)
-				}
-				if current.Current().ID != "b" || current.out != original {
-					t.Fatalf("本机 AutoMix 没有连续交接: current=%+v same=%v status=%s", current.Current(), current.out == original, current.AutoMixStatus())
-				}
-				if position := original.Position(); position >= 16*time.Second {
-					t.Fatalf("AutoMix 没有提前融接: %v", position)
-				}
-				if current.AutoMixStatus() != "local" {
-					t.Fatalf("AI 不可用影响本机计划: %s", current.AutoMixStatus())
-				}
-				synctest.Wait()
-				if records := source.records(); !reflect.DeepEqual(records, []string{"a", "b"}) {
-					t.Fatalf("交接记录重复或提前: %v", records)
-				}
-				if current.Position() < 0 || current.Position() > time.Second {
-					t.Fatalf("变速首帧源时间映射错误: %v", current.Position())
-				}
-				current.stop()
-				time.Sleep(200 * time.Millisecond)
-				pumpTransitionPosts(posted)
-			})
-		})
-	}
 }
 
 // 连续三首都使用本机计算，第三首不能混入上一轮尾轨，也不能重新建立设备输出。

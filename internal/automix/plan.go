@@ -1,25 +1,12 @@
 package automix
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"slices"
 	"sort"
 )
-
-const MaxRequestBytes = 32 << 10
-
-type Summary struct {
-	Start         int64   `json:"start_frame"`
-	End           int64   `json:"end_frame"`
-	Tempo         Tempo   `json:"tempo"`
-	Envelope      []Point `json:"envelope"`
-	VocalActivity *bool   `json:"vocal_activity"`
-}
 
 type Candidate struct {
 	ID         string   `json:"id"`
@@ -36,10 +23,6 @@ type Candidate struct {
 }
 
 type Request struct {
-	Schema     string      `json:"schema"`
-	SampleRate int         `json:"sample_rate"`
-	Current    Summary     `json:"current"`
-	Next       Summary     `json:"next"`
 	Candidates []Candidate `json:"candidates"`
 }
 
@@ -47,45 +30,6 @@ type Decision struct {
 	CandidateID string `json:"candidate_id"`
 	Profile     string `json:"profile"`
 }
-
-func summarize(features Features) Summary {
-	summary := Summary{Start: features.Start, End: features.End, Tempo: features.Tempo}
-	for start := 0; start < len(features.Points); start += 50 {
-		end := min(start+50, len(features.Points))
-		point := Point{Frame: features.Points[start].Frame}
-		for _, measured := range features.Points[start:end] {
-			point.Energy += measured.Energy
-			point.Onset += measured.Onset
-			for band := range point.Bands {
-				point.Bands[band] += measured.Bands[band]
-			}
-			for pitch := range point.Chroma {
-				point.Chroma[pitch] += measured.Chroma[pitch]
-			}
-		}
-		divisor := float64(end - start)
-		point.Energy /= divisor
-		point.Onset /= divisor
-		for band := range point.Bands {
-			point.Bands[band] /= divisor
-		}
-		for pitch := range point.Chroma {
-			point.Chroma[pitch] /= divisor
-		}
-		point.Energy = roundFeature(point.Energy)
-		point.Onset = roundFeature(point.Onset)
-		for band := range point.Bands {
-			point.Bands[band] = roundFeature(point.Bands[band])
-		}
-		for pitch := range point.Chroma {
-			point.Chroma[pitch] = roundFeature(point.Chroma[pitch])
-		}
-		summary.Envelope = append(summary.Envelope, point)
-	}
-	return summary
-}
-
-func roundFeature(value float64) float64 { return math.Round(value*1e6) / 1e6 }
 
 func (features Features) Until(end int64) Features {
 	reference := features.Tempo
@@ -123,7 +67,7 @@ func (features Features) Until(end int64) Features {
 
 // BuildRequest 只在可信尾区提出候选；弱节拍使用更短的能量过渡，不猜测人声或小节语义。
 func BuildRequest(current, next Features, end, earliest int64) Request {
-	request := Request{Schema: "ohmygo.automix.features.v1", SampleRate: SampleRate, Current: summarize(current), Next: summarize(next)}
+	request := Request{}
 	if end <= 0 || len(current.Points) < 100 || len(next.Points) < 100 || next.Start != 0 || next.End < SampleRate {
 		return request
 	}
@@ -345,40 +289,4 @@ func (request Request) Resolve(decision Decision) (Candidate, error) {
 		}
 	}
 	return Candidate{}, errors.New("automix: decision is outside the offered candidates")
-}
-
-func ParseDecision(data []byte, request Request) (Decision, error) {
-	if len(data) > 2048 {
-		return Decision{}, errors.New("automix: oversized decision")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	open, err := decoder.Token()
-	if err != nil || open != json.Delim('{') {
-		return Decision{}, errors.New("automix: decision must be one JSON object")
-	}
-	fields := map[string]string{}
-	for decoder.More() {
-		token, err := decoder.Token()
-		key, valid := token.(string)
-		if err != nil || !valid || key != "candidate_id" && key != "profile" {
-			return Decision{}, errors.New("automix: unexpected decision field")
-		}
-		if _, duplicate := fields[key]; duplicate {
-			return Decision{}, errors.New("automix: duplicate decision field")
-		}
-		var value string
-		if err := decoder.Decode(&value); err != nil {
-			return Decision{}, errors.New("automix: invalid decision value")
-		}
-		fields[key] = value
-	}
-	if _, err := decoder.Token(); err != nil {
-		return Decision{}, errors.New("automix: incomplete decision")
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return Decision{}, errors.New("automix: trailing decision data")
-	}
-	decision := Decision{CandidateID: fields["candidate_id"], Profile: fields["profile"]}
-	_, err = request.Resolve(decision)
-	return decision, err
 }

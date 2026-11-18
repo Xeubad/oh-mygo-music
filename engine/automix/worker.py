@@ -203,40 +203,7 @@ def main():
 
     plans = plan_pair(current, incoming, profile=profile, power=power)
     print(f"safe_phrase_candidates:{len(plans['candidates'])}:{time.perf_counter()-started:.2f}s", flush=True)
-    preferred = None
-    if job.get("advisor") and plans["candidates"]:
-        offered = plans["candidates"][:16]
-        # 云端只见聚合节奏和本机候选，不含 PCM、源路径、歌曲标识或任何来源凭据。
-        request = {
-            "schema": "ohmygo.automix.features.v1", "sample_rate": 48000,
-            "current": {"start_frame": round(current["analysis_start"]*48000),
-                        "end_frame": current["original_frames"], "vocal_activity": True,
-                        "tempo": {"bpm": offered[0]["current_tempo"]["bpm"], "confidence": 1}},
-            "next": {"start_frame": 0, "end_frame": round(incoming["analysis_end"]*48000),
-                     "vocal_activity": True,
-                     "tempo": {"bpm": offered[0]["next_tempo"]["bpm"], "confidence": 1}},
-            "candidates": [
-                {"id": f"mix-{index+1}", "start_frame": round(candidate["mix_start"]*48000),
-                 "end_frame": round(candidate["mix_end"]*48000), "entry_frame": round(candidate["entry"]*48000),
-                 "speed_ratio": candidate["ratio"], "harmony_score": candidate["actual_chroma_similarity"],
-                 "bar_aligned": True, "local_score": candidate["score"], "profiles": ["matched"]}
-                for index, candidate in enumerate(offered)
-            ],
-        }
-        write_json(output / "request.json", request)
-        deadline = time.monotonic() + 3.5
-        while time.monotonic() < deadline:
-            decision_path = output / "decision.json"
-            if decision_path.exists():
-                decision = json.loads(decision_path.read_text(encoding="utf-8"))
-                allowed = {f"mix-{index+1}": candidate for index, candidate in enumerate(offered)}
-                if decision.get("profile") == "matched":
-                    preferred = allowed.get(decision.get("candidate_id"))
-                break
-            time.sleep(.05)
     candidates = plans["candidates"][:20]
-    if preferred is not None:
-        candidates = [preferred] + [candidate for candidate in candidates if candidate != preferred]
     attempts = []
     for index, candidate in enumerate(candidates):
         if candidate["mix_start"] < job.get("earliest", 0):
@@ -275,7 +242,6 @@ def main():
         ]
         result = {
             "schema": VERSION, "status": "accepted", "checks": report["checks"], "attempts": attempts,
-            "ai_selected": preferred is not None and candidate == preferred,
             "start": round(candidate["mix_start"] * 48000), "end": round(candidate["mix_end"] * 48000),
             "entry": round(candidate["entry"] * 48000), "beats": candidate["outgoing_beats"],
             "incoming_beats": candidate["incoming_beats"], "ratio": candidate["ratio"],
