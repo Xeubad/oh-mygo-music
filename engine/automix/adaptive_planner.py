@@ -98,7 +98,8 @@ def plan_pair(current, incoming, profile=None, power=None):
     if any(sum(region["end"] - region["start"] for region in track["vocal_regions_estimated"])
            < max(3, track["duration"] * .02) for track in (current, incoming)):
         return {"status": "rejected", "reason": "no_reliable_vocal_handoff", "candidates": []}
-    last_voice, first_voice = old_regions[-1]["end"], new_regions[0]["start"]
+    # 首次模型输出可能是 NumPy 标量；在边界转为 Python 数字，保证报告布尔值可写入 JSON。
+    last_voice, first_voice = float(old_regions[-1]["end"]), float(new_regions[0]["start"])
     results = []
     reasons = Counter()
     grid_cache = {}
