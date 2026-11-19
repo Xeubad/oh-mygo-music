@@ -80,9 +80,9 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 	defer roundCancel()
 	candidateBudget := policy.candidate
 	last := error(music.ErrUnavailable)
-	seen := map[[4]string]bool{}
-	// 后备只能活在当前轮次；用完整身份及实际档位索引，不改变计划的候选顺序。
-	fallbacks := map[[4]string]music.Stream{}
+	seen := map[[5]string]bool{}
+	// 同曲同档仍可有多个 provider；去重及本轮低档后备都必须隔离来源，不能冒用地址。
+	fallbacks := map[[5]string]music.Stream{}
 	for _, candidate := range plan.Candidates {
 		if scheduled && !time.Now().Before(deadline) {
 			return nil, nil, context.DeadlineExceeded
@@ -90,7 +90,7 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 		if err := round.Err(); err != nil {
 			return nil, nil, err
 		}
-		identity := [4]string{candidate.Platform, candidate.AccountID, candidate.TrackID, candidate.Quality}
+		identity := [5]string{candidate.Platform, candidate.AccountID, candidate.TrackID, candidate.SourceID, candidate.Quality}
 		if seen[identity] {
 			continue
 		}
@@ -131,7 +131,7 @@ func (p *Player) openCooperative(ctx context.Context, src music.CooperativeSourc
 		}
 		var lower *lowerQualityResult
 		if errors.As(err, &lower) && guarded.Err() == nil {
-			fallbacks[[4]string{candidate.Platform, candidate.AccountID, candidate.TrackID, lower.info.Quality}] = lower.info
+			fallbacks[[5]string{candidate.Platform, candidate.AccountID, candidate.TrackID, candidate.SourceID, lower.info.Quality}] = lower.info
 		}
 		if err == nil && commit != nil {
 			// 准备仍受原截止；主线程成功交接时同步解除下载取消，而非等后台回执。

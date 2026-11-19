@@ -128,6 +128,81 @@ export function resolveCandidate({candidate, roundID}) {
 	p.TogglePlay()
 }
 
+// 同平台同账号同曲目同档的备用 provider 曾被去重跳过；解析或媒体准备失败后仍须实际开播备用。
+func TestCooperativeSameTrackProvidersFallThroughToVerifiedAudio(t *testing.T) {
+	for _, tc := range []struct{ name, first string }{
+		{"resolver", `throw Object.assign(new Error("provider unavailable"), {code:"unavailable"});`},
+		{"media", `return {stream:{url:"file:///missing-custom-source-fixture.flac"}};`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := cooperativePlugin(t, fmt.Sprintf(`
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",accountID:"same",trackID:"one",quality:"flac",sourceID:"primary",sourceRevision:"r1"},
+{id:"b",platform:"wy",accountID:"same",trackID:"one",quality:"flac",sourceID:"backup",sourceRevision:"r2"}]}; }
+export function resolveCandidate({candidate}) {
+ if(candidate.id === "a") { %s }
+ if(candidate.sourceID !== "backup" || candidate.sourceRevision !== "r2") throw new Error("provider identity lost");
+ return {stream:{url:%s,type:"mp3",quality:"32k"}};
+}
+`, tc.first, audioPath(t, "seek.flac")))
+			p, posts := cooperativePlayer(src)
+			p.SetVolume(0)
+			p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+			finishLoading(t, p, posts)
+			defer func() {
+				if p.Playing() || p.Loading() {
+					p.TogglePlay()
+				}
+			}()
+			if !p.Ready() || !p.Playing() || p.Err() != "" || p.Stream() == nil || p.Stream().Quality != "flac" || p.Stream().Type != "flac" {
+				t.Fatalf("同曲备用 provider 未实际开播已核验媒体：ready=%v playing=%v stream=%+v error=%q", p.Ready(), p.Playing(), p.Stream(), p.Err())
+			}
+		})
+	}
+}
+
+// 来源在媒体准备后被停用、删除或替换时，旧结果不能迟到开播；同平台备用仍在原轮次继续。
+func TestCooperativeSourceControlsInvalidatePreparedProvider(t *testing.T) {
+	for _, action := range []string{"setSourceEnabled", "removeSource", "replaceSource"} {
+		t.Run(action, func(t *testing.T) {
+			src := cooperativePlugin(t, fmt.Sprintf(`
+let invalidated = false;
+export function aggregate({input}) { if(input.id === "primary") invalidated = true; return {}; }
+export function candidateValid({candidate}) {
+ if(candidate.sourceRevision !== "r1") throw new Error("source revision lost");
+ return candidate.sourceID !== "primary" || !invalidated;
+}
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"a",platform:"wy",accountID:"a",trackID:"one",quality:"flac",sourceID:"primary",sourceRevision:"r1",playbackID:"played-primary"},
+{id:"b",platform:"wy",accountID:"a",trackID:"one",quality:"flac",sourceID:"backup",sourceRevision:"r1",playbackID:"played-backup"}]}; }
+export function resolveCandidate() { return {stream:{url:%s}}; }
+`, audioPath(t, "seek.flac")))
+			p, posts := cooperativePlayer(src)
+			p.SetVolume(0)
+			invalidated := false
+			p.Normalize = func() bool {
+				if !invalidated {
+					invalidated = true
+					if _, err := src.Aggregate(action, map[string]any{"id": "primary", "enabled": false, "url": "synthetic-replacement"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return false
+			}
+			p.PlayTrack([]music.Track{{ID: "queued", Source: "cooperative"}, {ID: "next", Source: "cooperative"}}, 0)
+			finishLoading(t, p, posts)
+			defer func() {
+				if p.Playing() || p.Loading() {
+					p.TogglePlay()
+				}
+			}()
+			if !invalidated || !p.Ready() || !p.Playing() || p.Stream() == nil || p.Stream().PlaybackID != "played-backup" || p.Current().ID != "queued" || len(p.Queue()) != 2 || p.Err() != "" {
+				t.Fatalf("收紧后的旧 provider 仍开播或未继续备用：stream=%+v current=%+v queue=%+v error=%q", p.Stream(), p.Current(), p.Queue(), p.Err())
+			}
+		})
+	}
+}
+
 // 同一聚合身份重复入队时，拆分后仅已播位置跟随实际来源，未播位置仍用入队锚点。
 func TestCooperativeSplitKeepsPlayedVersionWithoutChangingQueue(t *testing.T) {
 	src := cooperativePlugin(t, fmt.Sprintf(`
@@ -580,6 +655,31 @@ export async function resolveCandidate({candidate,signal}) {
 	}
 	if len(got) != 2 || got[0] != "/wy-flac" || got[1] != "/tx-flac" {
 		t.Fatalf("后备越过未完成的 FLAC 来源，或重复解析了同轮结果: %v", got)
+	}
+}
+
+// 同曲低档后备曾跨 provider 复用；轮到备用 provider 时必须解析它自己的地址，不能冒用首源媒体。
+func TestCooperativeLowerQualityFallbackIsolatedByProvider(t *testing.T) {
+	src := cooperativePlugin(t, fmt.Sprintf(`
+export function playbackPlan() { return {targetQuality:"flac",minimumQuality:"128k",candidates:[
+{id:"primary-flac",platform:"wy",accountID:"a",trackID:"one",quality:"flac",sourceID:"primary"},
+{id:"backup-128k",platform:"wy",accountID:"a",trackID:"one",quality:"128k",sourceID:"backup"}]}; }
+export function resolveCandidate({candidate}) {
+ if(candidate.sourceID === "backup") return {stream:{url:%s,type:"mp3",quality:"32k"}};
+ return {stream:{url:%s,type:"flac",quality:"flac"}};
+}
+`, audioPath(t, "seek.flac"), audioPath(t, "seek.mp3")))
+	p, posts := cooperativePlayer(src)
+	p.SetVolume(0)
+	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
+	finishLoading(t, p, posts)
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	if !p.Ready() || !p.Playing() || p.Stream() == nil || p.Stream().Quality != "flac" || p.Stream().Type != "flac" || p.Err() != "" {
+		t.Fatalf("备用 provider 复用了其他来源的低档地址：ready=%v stream=%+v error=%q", p.Ready(), p.Stream(), p.Err())
 	}
 }
 

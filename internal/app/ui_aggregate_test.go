@@ -720,8 +720,8 @@ func aggregateCloudRefreshTest(t *testing.T, partial bool) {
 	}
 }
 
-// 安全保存后，重载设置页只显示凭据状态，不回填可复制的秘密。
-func TestAggregateSettingsNeverPrefillSavedResolverKey(t *testing.T) {
+// 新插件通过正式设置入口展示音源管理，不再回填或展示旧密钥输入。
+func TestAggregateSettingsCustomSourcesReplaceLegacyKeys(t *testing.T) {
 	a, src, tt, post := aggregateApp(t)
 	const secret = "synthetic-key-that-must-not-appear"
 	// 测试只用当前插件 VM 中的临时值，不向开发机的系统凭据库写入。
@@ -732,12 +732,20 @@ func TestAggregateSettingsNeverPrefillSavedResolverKey(t *testing.T) {
 	edit := a.aggregateEdits[a.library]
 	until(t, post, func() bool { return edit != nil && edit.loaded })
 	tt.Frame()
-	n, ok := tt.AccessByRole(ui.RoleTextField, "Resolver Key")
-	if !ok {
-		t.Fatal("缺少解析密钥输入")
+	n, ok := tt.AccessByRole(ui.RoleTextField, "Source Link")
+	if !ok || !n.Password || n.Value != "" {
+		t.Fatal("新插件未展示空白的密码链接输入")
 	}
-	if n.Value != "" || strings.Contains(n.Value, secret) {
-		t.Fatalf("设置页回填了系统凭据: %q", n.Value)
+	if _, ok := tt.AccessByRole(ui.RoleButton, "Add Source"); !ok {
+		t.Fatal("正式设置入口缺少音源添加操作")
+	}
+	for _, label := range []string{"Resolver Key", "NetEase Resolver Key", "QQ Resolver Key", "Qishui Resolver Key"} {
+		if _, ok := tt.AccessByRole(ui.RoleTextField, label); ok {
+			t.Fatalf("新插件仍暴露旧密钥输入：%s", label)
+		}
+	}
+	if strings.Contains(strings.Join(tt.Texts(), " "), secret) {
+		t.Fatal("设置页面泄露旧密钥")
 	}
 	raw, err := src.Aggregate("status", nil)
 	if err != nil {

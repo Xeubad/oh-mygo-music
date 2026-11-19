@@ -16,7 +16,15 @@ func (p *Plugin) Aggregate(action string, input map[string]any) (json.RawMessage
 			p.diagnostics.remember(value)
 		}
 	}
-	if action == "revokeLink" || action == "logout" {
+	if action == "addSource" || action == "replaceSource" {
+		// 链接可能带密，连校验失败的输入也须在脚本读取、记录之前保护。
+		if value, ok := input["url"].(string); ok {
+			p.diagnostics.remember(value)
+		}
+	}
+	// 新增、更新、重排不能扩展旧计划；替换、删除及启停则与最终开播串行收紧资格。
+	tightens := action == "revokeLink" || action == "logout" || action == "replaceSource" || action == "removeSource" || action == "setSourceEnabled"
+	if tightens {
 		unlock, err := p.lockCandidateGate(context.Background())
 		if err != nil {
 			return nil, err
@@ -25,7 +33,7 @@ func (p *Plugin) Aggregate(action string, input map[string]any) (json.RawMessage
 	}
 	var out json.RawMessage
 	err := p.call("aggregate", map[string]any{"action": action, "input": input}, &out)
-	if err == nil && (action == "revokeLink" || action == "logout") {
+	if err == nil && tightens {
 		// 仅收紧操作广播变化；播放端自行判断当前候选，不能因别的来源变化停掉音频。
 		p.mu.Lock()
 		if p.candidateChanges != nil {

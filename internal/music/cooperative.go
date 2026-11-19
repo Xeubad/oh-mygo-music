@@ -18,6 +18,9 @@ type PlaybackCandidate struct {
 	AccountID string `json:"accountID,omitempty"`
 	TrackID   string `json:"trackID"`
 	Quality   string `json:"quality"`
+	// 公开 provider 身份及冻结版本，不携带订阅链接或凭据。
+	SourceID       string `json:"sourceID,omitempty"`
+	SourceRevision string `json:"sourceRevision,omitempty"`
 	// 仅成功交接后记录的重播身份，不替换队列项原始 ID。
 	PlaybackID string `json:"playbackID,omitempty"`
 }

@@ -38,6 +38,7 @@ type aggregateQualityTarget struct {
 }
 
 type aggregateReply struct {
+	CustomSources  *aggregateCustomSources  `json:"customSources"`
 	Refresh        aggregateRefresh         `json:"refresh"`
 	QualityTargets []aggregateQualityTarget `json:"qualityTargets"`
 	Settings       struct {
@@ -92,6 +93,10 @@ type aggregateEdit struct {
 	qqKey, qqCredentialState string
 	qsKey, qsCredentialState string
 	qualityTargets           []aggregateQualityTarget
+	sources                  *aggregateCustomSources
+	sourceLink, sourceTarget string // 唯一链接草稿仅归当前界面；公开状态不提供或回填链接。
+	sourceNextPoll           time.Time
+	sourcePolls              int
 }
 
 var aggregateTimingFields = []struct{ key, label string }{
@@ -129,8 +134,13 @@ func (a *app) aggregateCommand(lib *library, e *aggregateEdit, action string, in
 	}
 	e.busy, e.err = true, ""
 	go func() {
-		raw, err := src.Aggregate(action, input)
-		if err == nil && action != "status" {
+		command := action
+		if action == "source-status" {
+			command = "status"
+		} // 自动重取不覆盖普通设置草稿。
+		raw, err := src.Aggregate(command, input)
+		succeeded := err == nil
+		if err == nil && command != "status" {
 			// 写入回执只表示操作成功；再读公开状态，避免把 {ok:true} 当作零值设置回填。
 			raw, err = src.Aggregate("status", nil)
 		}
@@ -144,6 +154,10 @@ func (a *app) aggregateCommand(lib *library, e *aggregateEdit, action string, in
 				return
 			}
 			e.busy = false
+			// 写入已成功时即清空敏感草稿；后续状态重取失败不能留下可重复提交的链接。
+			if succeeded && (action == "addSource" || action == "replaceSource" || action == "removeSource" && input["id"] == e.sourceTarget) {
+				e.sourceLink, e.sourceTarget = "", ""
+			}
 			if err != nil {
 				e.loaded = true
 				e.err = err.Error()
@@ -153,6 +167,10 @@ func (a *app) aggregateCommand(lib *library, e *aggregateEdit, action string, in
 				e.apply(reply)
 			}
 			e.loaded = true
+			e.sources = reply.CustomSources
+			if action != "source-status" {
+				e.sourcePolls, e.sourceNextPoll = 0, time.Time{}
+			}
 			e.credentialState = reply.ResolverCredential.State
 			e.wyCredentialState = reply.ResolverCredentials["wy"].State
 			e.qqCredentialState = reply.ResolverCredentials["tx"].State
@@ -265,61 +283,65 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 			}
 		})
 		ui.Text(c, T("Stall detection must be below the recovery budget; changes apply to new playback flows.")).FontSize(11.5).TextColor(p.muted)
-		aggregateField(c, "Resolver Key", func() {
-			ui.TextInput(c.Key("key"), &e.key).Label(T("Resolver Key")).Password().Width(260).Disabled(e.busy)
-		})
-		stateText := map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.credentialState]
-		ui.Text(c, stateText).FontSize(11.5).TextColor(p.muted)
-		ui.Row(c).Gap(8).Children(func() {
-			if ui.Button(c.Key("save-key"), T("Save Resolver Key Securely")).Disabled(e.busy || e.key == "").Clicked() {
-				a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"value": e.key, "temporary": false})
+		if e.sources != nil {
+			a.aggregateSourceSettings(c, lib, e, p)
+		} else {
+			aggregateField(c, "Resolver Key", func() {
+				ui.TextInput(c.Key("key"), &e.key).Label(T("Resolver Key")).Password().Width(260).Disabled(e.busy)
+			})
+			stateText := map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.credentialState]
+			ui.Text(c, stateText).FontSize(11.5).TextColor(p.muted)
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c.Key("save-key"), T("Save Resolver Key Securely")).Disabled(e.busy || e.key == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"value": e.key, "temporary": false})
+				}
+				if ui.Button(c.Key("temporary-key"), T("Use Once")).Disabled(e.busy || e.key == "").Clicked() {
+					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"value": e.key, "temporary": true})
+				}
+			})
+			if e.wyCredentialState != "" {
+				aggregateField(c, T("NetEase Resolver Key"), func() {
+					ui.TextInput(c.Key("wy-key"), &e.wyKey).Label(T("NetEase Resolver Key")).Password().Width(260).Disabled(e.busy)
+				})
+				ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.wyCredentialState]).FontSize(11.5).TextColor(p.muted)
+				ui.Row(c).Gap(8).Children(func() {
+					if ui.Button(c.Key("save-wy-key"), T("Save NetEase Key Securely")).Disabled(e.busy || e.wyKey == "").Clicked() {
+						a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": false})
+					}
+					if ui.Button(c.Key("temporary-wy-key"), T("Use NetEase Key Once")).Disabled(e.busy || e.wyKey == "").Clicked() {
+						a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": true})
+					}
+				})
 			}
-			if ui.Button(c.Key("temporary-key"), T("Use Once")).Disabled(e.busy || e.key == "").Clicked() {
-				a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"value": e.key, "temporary": true})
+			if e.qqCredentialState != "" {
+				aggregateField(c, T("QQ Resolver Key"), func() {
+					ui.TextInput(c.Key("qq-key"), &e.qqKey).Label(T("QQ Resolver Key")).Password().Width(260).Disabled(e.busy)
+				})
+				ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.qqCredentialState]).FontSize(11.5).TextColor(p.muted)
+				ui.Row(c).Gap(8).Children(func() {
+					if ui.Button(c.Key("save-qq-key"), T("Save QQ Key Securely")).Disabled(e.busy || e.qqKey == "").Clicked() {
+						a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "tx", "value": e.qqKey, "temporary": false})
+					}
+					if ui.Button(c.Key("temporary-qq-key"), T("Use QQ Key Once")).Disabled(e.busy || e.qqKey == "").Clicked() {
+						a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "tx", "value": e.qqKey, "temporary": true})
+					}
+				})
 			}
-		})
-		if e.wyCredentialState != "" {
-			aggregateField(c, T("NetEase Resolver Key"), func() {
-				ui.TextInput(c.Key("wy-key"), &e.wyKey).Label(T("NetEase Resolver Key")).Password().Width(260).Disabled(e.busy)
-			})
-			ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.wyCredentialState]).FontSize(11.5).TextColor(p.muted)
-			ui.Row(c).Gap(8).Children(func() {
-				if ui.Button(c.Key("save-wy-key"), T("Save NetEase Key Securely")).Disabled(e.busy || e.wyKey == "").Clicked() {
-					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": false})
-				}
-				if ui.Button(c.Key("temporary-wy-key"), T("Use NetEase Key Once")).Disabled(e.busy || e.wyKey == "").Clicked() {
-					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "wy", "value": e.wyKey, "temporary": true})
-				}
-			})
-		}
-		if e.qqCredentialState != "" {
-			aggregateField(c, T("QQ Resolver Key"), func() {
-				ui.TextInput(c.Key("qq-key"), &e.qqKey).Label(T("QQ Resolver Key")).Password().Width(260).Disabled(e.busy)
-			})
-			ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.qqCredentialState]).FontSize(11.5).TextColor(p.muted)
-			ui.Row(c).Gap(8).Children(func() {
-				if ui.Button(c.Key("save-qq-key"), T("Save QQ Key Securely")).Disabled(e.busy || e.qqKey == "").Clicked() {
-					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "tx", "value": e.qqKey, "temporary": false})
-				}
-				if ui.Button(c.Key("temporary-qq-key"), T("Use QQ Key Once")).Disabled(e.busy || e.qqKey == "").Clicked() {
-					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "tx", "value": e.qqKey, "temporary": true})
-				}
-			})
-		}
-		// 旧插件未声明汽水凭据状态时不显示该范围，避免把其他服务的已保存状态套用过来。
-		if e.qsCredentialState != "" {
-			aggregateField(c, T("Qishui Resolver Key"), func() {
-				ui.TextInput(c.Key("qs-key"), &e.qsKey).Label(T("Qishui Resolver Key")).Password().Width(260).Disabled(e.busy)
-			})
-			ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.qsCredentialState]).FontSize(11.5).TextColor(p.muted)
-			ui.Row(c).Gap(8).Children(func() {
-				if ui.Button(c.Key("save-qs-key"), T("Save Qishui Key Securely")).Disabled(e.busy || e.qsKey == "").Clicked() {
-					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "qs", "value": e.qsKey, "temporary": false})
-				}
-				if ui.Button(c.Key("temporary-qs-key"), T("Use Qishui Key Once")).Disabled(e.busy || e.qsKey == "").Clicked() {
-					a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "qs", "value": e.qsKey, "temporary": true})
-				}
-			})
+			// 旧插件未声明汽水凭据状态时不显示该范围，避免把其他服务的已保存状态套用过来。
+			if e.qsCredentialState != "" {
+				aggregateField(c, T("Qishui Resolver Key"), func() {
+					ui.TextInput(c.Key("qs-key"), &e.qsKey).Label(T("Qishui Resolver Key")).Password().Width(260).Disabled(e.busy)
+				})
+				ui.Text(c, map[string]string{"saved": T("Saved securely"), "temporary": T("Temporary only"), "unavailable": T("Credential store unavailable; temporary input allowed"), "empty": T("Not saved")}[e.qsCredentialState]).FontSize(11.5).TextColor(p.muted)
+				ui.Row(c).Gap(8).Children(func() {
+					if ui.Button(c.Key("save-qs-key"), T("Save Qishui Key Securely")).Disabled(e.busy || e.qsKey == "").Clicked() {
+						a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "qs", "value": e.qsKey, "temporary": false})
+					}
+					if ui.Button(c.Key("temporary-qs-key"), T("Use Qishui Key Once")).Disabled(e.busy || e.qsKey == "").Clicked() {
+						a.aggregateCommand(lib, e, "setResolverKey", map[string]any{"platform": "qs", "value": e.qsKey, "temporary": true})
+					}
+				})
+			}
 		}
 		if e.err != "" {
 			ui.Text(c, e.err).FontSize(12).TextColor(p.accent).LineHeight(1.4)
