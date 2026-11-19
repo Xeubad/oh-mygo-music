@@ -358,10 +358,14 @@ func mediaQuality(s stream) (quality, codec string, bitrate int) {
 	}
 	if mp3, ok := s.(*mp3Stream); ok {
 		bitrate = frameBitRate(dl.peek(mp3.start, 4))
-		for _, level := range []int{320, 256, 128, 64, 32} {
-			if bitrate >= level {
-				return fmt.Sprintf("%dk", level), "mp3", bitrate
-			}
+		return lossyQuality(bitrate), "mp3", bitrate
+	}
+	if adts, ok := s.(*adtsStream); ok {
+		return adtsQuality(adts)
+	}
+	if _, ok := s.(*decodedStream); ok {
+		if head := dl.peek(0, 8); len(head) == 8 && string(head[4:]) == "ftyp" {
+			return mp4Quality(dl)
 		}
 	}
 	return "", "", 0
