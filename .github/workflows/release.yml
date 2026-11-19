@@ -87,15 +87,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11.9"
-      - uses: astral-sh/setup-uv@v7
-      - name: Build local AutoMix runtime
-        run: python scripts/build_automix.py --cache "$RUNNER_TEMP/automix-build"
-      - name: Test adaptive phrase planning
-        run: |
-          resources/windows/automix-engine/python/python.exe -m unittest discover -s engine/automix -p "test_*.py"
       # setup-go's own cache is keyed on the runner and go.sum alone, so the
       # Windows and Linux jobs, both on Ubuntu, race for one key and only
       # one of them keeps its build cache, and any change to go.sum, like
@@ -121,6 +112,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         run: go tool mygo build -platform "${{ matrix.platform }}" -upload
-      - name: Test packaged AutoMix runtime
-        run: |
-          python scripts/verify_automix_package.py build/windows-amd64/mygo-music-*-windows-amd64.tar.gz

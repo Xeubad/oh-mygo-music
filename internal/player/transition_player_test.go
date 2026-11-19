@@ -293,8 +293,8 @@ func TestTransitionPlayerBufferedErrorStartsRecoveryAtAudibleBoundary(t *testing
 	})
 }
 
-// AutoMix 独立启用时也裁掉完整歌曲首尾静音，并保留歌曲中间停顿。
-func TestAutoMixPlayerTrimsOnlySongEdgesWithoutGapless(t *testing.T) {
+// 交叉淡化只裁掉完整歌曲首尾静音，并保留歌曲中间停顿。
+func TestCrossfadePlayerTrimsOnlySongEdges(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		current, posted, source := transitionPlayerFixture(t)
 		const rate = 48000
@@ -328,9 +328,7 @@ func TestAutoMixPlayerTrimsOnlySongEdgesWithoutGapless(t *testing.T) {
 		current.SetVolume(.8)
 		current.Transitions = func() TransitionSettings {
 			settings := DefaultTransitionSettings()
-			settings.AutoMix = true
-			settings.Gapless = false
-			settings.Crossfade = false
+			settings.Crossfade = true
 			settings.PlaybackFade = false
 			return settings
 		}
@@ -842,8 +840,8 @@ func TestTransitionPlayerRepeatOneRecordsEachPlayback(t *testing.T) {
 	})
 }
 
-// 只开启无缝时也提前准备输出帧，两首自然交接复用同一个设备输出且不重取来源。
-func TestTransitionPlayerGaplessPreparesBeforeBoundary(t *testing.T) {
+// 交叉淡化提前准备输出帧，交接复用同一个设备输出且不重取来源。
+func TestTransitionPlayerPreparesBeforeBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		current, posted, source := transitionPlayerFixture(t)
 		current.Transitions = func() TransitionSettings {
@@ -862,7 +860,7 @@ func TestTransitionPlayerGaplessPreparesBeforeBoundary(t *testing.T) {
 			advanceTransitionPlayer(current, posted, 480)
 		}
 		if current.Current().ID != "b" || current.out != original {
-			t.Fatalf("无缝交接重新创建了设备输出: current=%+v same=%v", current.Current(), current.out == original)
+			t.Fatalf("交接重新创建了设备输出: current=%+v same=%v", current.Current(), current.out == original)
 		}
 		source.mu.Lock()
 		requested := source.requests["b"]
@@ -884,7 +882,6 @@ func TestTransitionPlayerCrossfadeHandsOffBeforeSongEnds(t *testing.T) {
 			settings := DefaultTransitionSettings()
 			settings.Crossfade = true
 			settings.CrossfadeDuration = time.Second
-			settings.Gapless = false
 			settings.PlaybackFade = false
 			return settings
 		}
@@ -915,10 +912,14 @@ func TestTransitionPlayerCrossfadeHandsOffBeforeSongEnds(t *testing.T) {
 }
 
 // 暂停淡出跨过旧曲末尾时，EOF 不能覆盖暂停意图而自动启动下一首。
-func TestTransitionPlayerPauseAtGaplessBoundaryStaysPaused(t *testing.T) {
+func TestTransitionPlayerPauseAtBoundaryStaysPaused(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		current, posted, source := transitionPlayerFixture(t)
-		current.Transitions = DefaultTransitionSettings
+		current.Transitions = func() TransitionSettings {
+			settings := DefaultTransitionSettings()
+			settings.CrossfadeDuration = 0
+			return settings
+		}
 		current.PlayQueue([]music.Track{{ID: "a", Source: "test"}, {ID: "b", Source: "test"}}, 0)
 		for step := 0; step < 396; step++ {
 			synctest.Wait()

@@ -17,10 +17,10 @@ func TestPlaybackTransitionChoicesSurviveRestart(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"volume":0.35}`), &preferences); err != nil {
 		t.Fatal(err)
 	}
-	if !preferences.GaplessEnabled || !preferences.PlaybackFadeEnabled {
+	if !preferences.CrossfadeEnabled || !preferences.PlaybackFadeEnabled {
 		t.Fatal("旧配置没有补齐音频过渡")
 	}
-	preferences.GaplessEnabled = false
+	preferences.CrossfadeEnabled = false
 	preferences.PlaybackFadeEnabled = false
 	encoded, err := json.Marshal(preferences)
 	if err != nil {
@@ -30,8 +30,40 @@ func TestPlaybackTransitionChoicesSurviveRestart(t *testing.T) {
 	if err = json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.GaplessEnabled || restored.PlaybackFadeEnabled || restored.PauseFadeOutMs != 180 || restored.PlayFadeInMs != 260 || restored.Volume != .35 {
+	if restored.CrossfadeEnabled || restored.PlaybackFadeEnabled || restored.PauseFadeOutMs != 180 || restored.PlayFadeInMs != 260 || restored.Volume != .35 {
 		t.Fatalf("重启丢失选择: %+v", restored)
+	}
+}
+
+// 旧自动模式改用交叉淡化，保存后丢弃已移除的配置，并保留用户随后关闭淡化的选择。
+func TestRetiredAutoMixMigratesToCrossfade(t *testing.T) {
+	preferences := defaultSettings()
+	if err := json.Unmarshal([]byte(`{"autoMixEnabled":true,"gaplessEnabled":true,"crossfadeEnabled":false,"crossfadeDurationMs":7000,"volume":0.35}`), &preferences); err != nil {
+		t.Fatal(err)
+	}
+	if !preferences.playbackTransitions().Crossfade || preferences.CrossfadeDurationMs != 7000 || preferences.Volume != .35 {
+		t.Fatalf("旧设置迁移失败: %+v", preferences)
+	}
+	preferences.CrossfadeEnabled = false
+	encoded, err := json.Marshal(preferences)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &saved); err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"autoMixEnabled", "gaplessEnabled"} {
+		if _, exists := saved[removed]; exists {
+			t.Fatalf("仍保存已移除的配置 %s", removed)
+		}
+	}
+	restored := defaultSettings()
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.CrossfadeEnabled {
+		t.Fatal("重启后覆盖了用户关闭淡化的选择")
 	}
 }
 

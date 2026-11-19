@@ -86,13 +86,10 @@ type settings struct {
 	Shortcuts *shortcutConfig `json:"globalShortcuts,omitempty"`
 	// Normalize evens out the loudness of tracks, by what their source
 	// measured of each.
-	Normalize bool `json:"normalize"`
-	// 旧 gapless 不迁移成会变速的智能过渡，保留用户已有的接续偏好。
-	AutoMixEnabled      bool `json:"autoMixEnabled"`
+	Normalize           bool `json:"normalize"`
 	CrossfadeEnabled    bool `json:"crossfadeEnabled"`
 	CrossfadeDurationMs int  `json:"crossfadeDurationMs"`
 	// 开启默认项不能省略 false，否则重启会丢失用户关闭的选择。
-	GaplessEnabled      bool `json:"gaplessEnabled"`
 	PlaybackFadeEnabled bool `json:"playbackFadeEnabled"`
 	PauseFadeOutMs      int  `json:"pauseFadeOutMs"`
 	PlayFadeInMs        int  `json:"playFadeInMs"`
@@ -119,7 +116,24 @@ type settings struct {
 }
 
 func defaultSettings() settings {
-	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard", CrossfadeDurationMs: 5000, GaplessEnabled: true, PlaybackFadeEnabled: true, PauseFadeOutMs: 180, PlayFadeInMs: 260}
+	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard", CrossfadeEnabled: true, CrossfadeDurationMs: 5000, PlaybackFadeEnabled: true, PauseFadeOutMs: 180, PlayFadeInMs: 260}
+}
+
+func (s *settings) UnmarshalJSON(data []byte) error {
+	type savedSettings settings
+	var stored struct {
+		*savedSettings
+		AutoMix bool `json:"autoMixEnabled"`
+	}
+	stored.savedSettings = (*savedSettings)(s)
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+	// 旧自动模式曾禁用手动淡化，移除后接续为交叉淡化，后续保存不再携带旧字段。
+	if stored.AutoMix {
+		s.CrossfadeEnabled = true
+	}
+	return nil
 }
 
 func (s settings) playbackTransitions() player.TransitionSettings {
@@ -133,7 +147,7 @@ func (s settings) playbackTransitions() player.TransitionSettings {
 	if play < 50 || play > 1000 {
 		play = 260
 	}
-	return player.TransitionSettings{AutoMix: s.AutoMixEnabled, Crossfade: s.CrossfadeEnabled, CrossfadeDuration: time.Duration(crossfade) * time.Millisecond, Gapless: s.GaplessEnabled, PlaybackFade: s.PlaybackFadeEnabled, PauseFadeOut: time.Duration(pause) * time.Millisecond, PlayFadeIn: time.Duration(play) * time.Millisecond}
+	return player.TransitionSettings{Crossfade: s.CrossfadeEnabled, CrossfadeDuration: time.Duration(crossfade) * time.Millisecond, PlaybackFade: s.PlaybackFadeEnabled, PauseFadeOut: time.Duration(pause) * time.Millisecond, PlayFadeIn: time.Duration(play) * time.Millisecond}
 }
 
 func settingsPath() (string, error) {

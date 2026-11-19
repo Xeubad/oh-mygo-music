@@ -7,30 +7,27 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/audio"
-
-	"mygo-music/internal/automix"
 )
 
 // TransitionSettings 是下一次过渡的快照；已开始的交叉不受设置修改影响。
 type TransitionSettings struct {
-	AutoMix           bool          `json:"autoMixEnabled"`
 	Crossfade         bool          `json:"crossfadeEnabled"`
 	CrossfadeDuration time.Duration `json:"-"`
-	Gapless           bool          `json:"gaplessEnabled"`
 	PlaybackFade      bool          `json:"playbackFadeEnabled"`
 	PauseFadeOut      time.Duration `json:"-"`
 	PlayFadeIn        time.Duration `json:"-"`
 }
 
 func DefaultTransitionSettings() TransitionSettings {
-	return TransitionSettings{CrossfadeDuration: 5 * time.Second, Gapless: true, PlaybackFade: true, PauseFadeOut: fadeOut, PlayFadeIn: fadeIn}
+	return TransitionSettings{Crossfade: true, CrossfadeDuration: 5 * time.Second, PlaybackFade: true, PauseFadeOut: fadeOut, PlayFadeIn: fadeIn}
 }
 
 type transitionEvent struct {
-	id     uint64
-	frame  int64
-	failed error
-	ended  bool
+	id        uint64
+	frame     int64
+	failed    error
+	ended     bool
+	crossfade bool
 }
 
 type transitionVoice struct {
@@ -97,9 +94,6 @@ type transitionOutput struct {
 	segments            []transitionEvent
 	voices              map[uint64]*transitionVoice
 	terminal            *transitionEvent
-	autoMixPlan         *automix.Candidate
-	mixEngine           automix.MixEngine
-	mixProfile          string
 }
 
 func newTransitionOutput(first audio.Decoder) *transitionOutput {
@@ -116,11 +110,6 @@ func (output *transitionOutput) queue(next audio.Decoder, settings TransitionSet
 }
 
 func (output *transitionOutput) queueConfigured(next audio.Decoder, settings TransitionSettings, id uint64, gain float64, admit func() error, reject func(error)) {
-	if settings.AutoMix {
-		// 自动模式独立接管计划与安全回退，仅修改本次快照，不覆盖用户保存的手动偏好。
-		settings.Crossfade = false
-		settings.Gapless = true
-	}
 	if buffered, ok := next.(*transitionBuffer); ok {
 		buffered.ready()
 	}
@@ -139,7 +128,6 @@ func (output *transitionOutput) queueConfigured(next audio.Decoder, settings Tra
 	output.next = &transitionVoice{decoder: next, length: next.Len(), gain: gain, id: id, admit: admit, reject: reject}
 	output.voices[id] = output.next
 	output.settings = settings
-	output.autoMixPlan = nil
 }
 
 func (output *transitionOutput) eventsAt(frame int64) []transitionEvent {
@@ -171,14 +159,29 @@ func (output *transitionOutput) Read(dst []float32) (int, error) {
 	defer output.mu.Unlock()
 	count := 0
 	var refreshed *transitionVoice
+	var fadeEnd int64
 	for count+1 < len(dst) {
 		if output.closed || output.current == nil {
 			return count, io.EOF
 		}
 		current := output.current
 		if current != refreshed {
-			if buffered, ok := current.decoder.(*transitionBuffer); ok && buffered.analyzer != nil {
+			if buffered, ok := current.decoder.(*transitionBuffer); ok {
 				_, current.length = buffered.lengths()
+			}
+			fadeEnd = current.length
+			if output.settings.Crossfade {
+				if buffered, ok := current.decoder.(*transitionBuffer); ok {
+					if audibleEnd := buffered.crossfadeEnd(fadeEnd); audibleEnd >= current.pos {
+						fadeEnd = audibleEnd
+					}
+				}
+				if output.next != nil {
+					if buffered, ok := output.next.decoder.(*transitionBuffer); ok {
+						buffered.skipLeadingSilence()
+						_, output.next.length = buffered.lengths()
+					}
+				}
 			}
 			refreshed = current
 		}
@@ -216,7 +219,7 @@ func (output *transitionOutput) Read(dst []float32) (int, error) {
 				output.mu.Lock()
 				continue
 			}
-			if output.next == nil || !output.settings.Gapless {
+			if output.next == nil || !output.settings.Crossfade {
 				return output.finish(count, io.EOF)
 			}
 			if buffered, ok := output.next.decoder.(*transitionBuffer); ok && !buffered.ready() {
@@ -235,7 +238,7 @@ func (output *transitionOutput) Read(dst []float32) (int, error) {
 			output.events = append(output.events, transitionEvent{id: current.id, frame: output.frame})
 		}
 		mixed := false
-		if output.tail == nil && output.next != nil && output.allowNext && (output.settings.Crossfade || output.autoMixPlan != nil) && current.length >= 0 {
+		if output.tail == nil && output.next != nil && output.allowNext && output.settings.Crossfade && current.length >= 0 {
 			if buffered, ok := output.next.decoder.(*transitionBuffer); ok && !buffered.ready() {
 				frame[0] *= float32(current.gain)
 				frame[1] *= float32(current.gain)
@@ -244,13 +247,10 @@ func (output *transitionOutput) Read(dst []float32) (int, error) {
 				output.frame++
 				continue
 			}
-			remaining := current.length - (current.pos - 1)
+			end := fadeEnd
+			remaining := end - (current.pos - 1)
 			duration := int64(output.settings.CrossfadeDuration) * 48000 / int64(time.Second)
-			start := current.length - duration
-			if plan := output.autoMixPlan; plan != nil {
-				start, duration = plan.Start, plan.End-plan.Start
-				remaining = plan.End - (current.pos - 1)
-			}
+			start := end - duration
 			if output.next.length >= 0 {
 				duration = min(duration, output.next.length)
 			}
@@ -321,6 +321,12 @@ func (output *transitionOutput) finish(count int, failure error) (int, error) {
 
 func (output *transitionOutput) begin(overlap int64) error {
 	next := output.next
+	if overlap > 0 && output.settings.Crossfade {
+		if buffered, ok := next.decoder.(*transitionBuffer); ok {
+			buffered.skipLeadingSilence()
+			_, next.length = buffered.lengths()
+		}
+	}
 	// 先证明下一首确有样本；空文件/开头读错绝不能使正常旧曲进入淡出。
 	output.mu.Unlock()
 	_, ok, failure := next.readFrame()
@@ -357,9 +363,6 @@ func (output *transitionOutput) begin(overlap int64) error {
 	}
 	next.offset -= 2
 	next.pos--
-	if buffered, ok := next.decoder.(*transitionBuffer); ok && buffered.analyzer != nil {
-		buffered.activate()
-	}
 	if overlap > 0 {
 		output.tail = output.current
 	} else {
@@ -367,15 +370,10 @@ func (output *transitionOutput) begin(overlap int64) error {
 		output.retired = append(output.retired, output.current)
 	}
 	output.current, output.next = next, nil
-	output.mixProfile = automix.ProfileOriginal
-	if overlap > 0 && output.autoMixPlan != nil && len(output.autoMixPlan.Profiles) > 0 {
-		// 执行策略独立于待接计划，交接清理及下一曲准备不能覆盖正在混音的策略。
-		output.mixProfile = output.autoMixPlan.Profiles[len(output.autoMixPlan.Profiles)-1]
-	}
-	output.mixEngine.Reset()
-	output.autoMixPlan = nil
 	output.overlap, output.progress = overlap, 0
-	output.events = append(output.events, transitionEvent{id: next.id, frame: output.frame})
+	output.events = append(output.events, transitionEvent{
+		id: next.id, frame: output.frame, crossfade: overlap > 0,
+	})
 	output.segments = append(output.segments, transitionEvent{id: next.id, frame: output.frame})
 	return nil
 }
@@ -385,30 +383,16 @@ func (output *transitionOutput) mix(tail, incoming [2]float32) [2]float32 {
 	if output.overlap == 1 {
 		progress = 1
 	}
-	profile := output.autoMixProfile()
 	oldGain, newGain := math.Cos(progress*math.Pi/2), math.Sin(progress*math.Pi/2)
 	var mixed [2]float32
-	if profile == "rendered" {
-		// 预混音已包含旧曲尾声和新曲，不能再进行一次交叉淡化或重复叠加尾轨。
-		for channel := range mixed {
-			mixed[channel] = incoming[channel] * float32(output.current.gain)
-		}
-	} else if profile == automix.ProfileMatched {
-		tailGain := 1.0
-		if output.tail != nil {
-			tailGain = output.tail.gain
-		}
-		mixed = output.mixEngine.MixWithGains(profile, progress, tail, incoming, tailGain, output.current.gain)
-	} else {
-		if output.tail != nil {
-			oldGain *= output.tail.gain
-		}
-		newGain *= output.current.gain
-		for channel := range mixed {
-			value := float64(tail[channel])*oldGain + float64(incoming[channel])*newGain
-			// 只在和超过满幅时共同限峰，避免相关双轨触发引擎最后一层硬削波。
-			mixed[channel] = float32(value)
-		}
+	if output.tail != nil {
+		oldGain *= output.tail.gain
+	}
+	newGain *= output.current.gain
+	for channel := range mixed {
+		value := float64(tail[channel])*oldGain + float64(incoming[channel])*newGain
+		// 只在和超过满幅时共同限峰，避免相关双轨触发引擎最后一层硬削波。
+		mixed[channel] = float32(value)
 	}
 	peak := max(math.Abs(float64(mixed[0])), math.Abs(float64(mixed[1])))
 	if peak > 1 {
@@ -422,13 +406,6 @@ func (output *transitionOutput) mix(tail, incoming [2]float32) [2]float32 {
 		output.tail = nil
 	}
 	return mixed
-}
-
-func (output *transitionOutput) autoMixProfile() string {
-	if output.tail == nil {
-		return automix.ProfileOriginal
-	}
-	return output.mixProfile
 }
 
 func (output *transitionOutput) SetPosition(frame int64) error {
@@ -448,7 +425,6 @@ func (output *transitionOutput) SetPosition(frame int64) error {
 		delete(output.voices, output.next.id)
 		output.next = nil
 	}
-	output.autoMixPlan = nil
 	output.current.buffer = nil
 	output.current.offset = 0
 	output.current.err = nil
@@ -505,7 +481,6 @@ func (output *transitionOutput) cancelNext() {
 		delete(output.voices, output.next.id)
 		output.next = nil
 	}
-	output.autoMixPlan = nil
 }
 
 func (output *transitionOutput) setAllowed(allowed bool) {
@@ -590,7 +565,7 @@ func (output *transitionOutput) lengthOf(id uint64) int64 {
 	if voice == nil {
 		return -1
 	}
-	if buffered, ok := voice.decoder.(*transitionBuffer); ok && buffered.analyzer != nil {
+	if buffered, ok := voice.decoder.(*transitionBuffer); ok {
 		source, _ := buffered.lengths()
 		return source
 	}
@@ -608,41 +583,10 @@ func (output *transitionOutput) sourceFrameOf(id uint64, frame int64) int64 {
 	return frame
 }
 
-func (output *transitionOutput) analysisPair(id uint64) (*transitionBuffer, *transitionBuffer, uint64, int64) {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-	if output.closed || output.current == nil || output.next == nil || output.next.id != id || output.tail != nil {
-		return nil, nil, 0, 0
-	}
-	current, _ := output.current.decoder.(*transitionBuffer)
-	next, _ := output.next.decoder.(*transitionBuffer)
-	return current, next, output.current.id, output.current.pos
-}
-
 func (output *transitionOutput) hasTail() bool {
 	output.mu.Lock()
 	defer output.mu.Unlock()
 	return output.tail != nil
-}
-
-func (output *transitionOutput) installAutoMix(currentID, nextID uint64, candidate automix.Candidate, intro []float32, mapping automix.Mapping, consumed int) bool {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-	if output.closed || output.current == nil || output.current.id != currentID || output.next == nil || output.next.id != nextID || output.tail != nil {
-		return false
-	}
-	current, currentOK := output.current.decoder.(*transitionBuffer)
-	next, nextOK := output.next.decoder.(*transitionBuffer)
-	if !currentOK || !nextOK {
-		return false
-	}
-	candidate.Start, candidate.End = current.outputFrame(candidate.Start), current.outputFrame(candidate.End)
-	if candidate.Start <= output.current.pos || candidate.End <= candidate.Start || !next.installIntro(intro, mapping, consumed) {
-		return false
-	}
-	_, output.next.length = next.lengths()
-	output.autoMixPlan = &candidate
-	return true
 }
 
 func (output *transitionOutput) failureAudible(id uint64, position time.Duration) bool {

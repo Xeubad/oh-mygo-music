@@ -2,11 +2,11 @@ package player
 
 import (
 	"io"
+	"math"
 	"sync"
+	"time"
 
 	"github.com/egoist/mygo/audio"
-
-	"mygo-music/internal/automix"
 )
 
 type transitionChunk struct {
@@ -29,35 +29,23 @@ type transitionBuffer struct {
 	length      int64
 	started     bool
 	capacity    int
-	analyzer    *automix.Analyzer
-	prefix      []float32
-	prefixLimit int
 	produced    int64
 	consumed    int64
 	actualEnd   int64
-	intro       []float32
-	introAt     int
 	discard     int
-	mapping     *automix.Mapping
+	sourceSkip  int64
+	firstActive int64
+	lastActive  int64
+	energy      float64
+	windowCount int
 }
 
 func newTransitionBuffer(decoder audio.Decoder) *transitionBuffer {
-	buffer := &transitionBuffer{decoder: decoder, length: decoder.Len(), capacity: 8, actualEnd: -1}
-	buffer.chunks = make(chan transitionChunk, 8)
+	// 十二秒淡化还需要提前看到正常 EOF；轻量预读只测音量，不运行节拍或模型分析。
+	buffer := &transitionBuffer{decoder: decoder, length: decoder.Len(), capacity: (16*48000 + 1023) / 1024, actualEnd: -1, firstActive: -1}
+	buffer.chunks = make(chan transitionChunk, buffer.capacity)
 	buffer.done = make(chan struct{})
 	buffer.stop = sync.OnceFunc(func() { close(buffer.done) })
-	return buffer
-}
-
-func newAnalyzedTransitionBuffer(decoder audio.Decoder, incoming bool) *transitionBuffer {
-	buffer := newTransitionBuffer(decoder)
-	// 最长十二秒重叠还需要两秒规划提前量；只预读十二秒会让长方案生成时已经过期。
-	const seconds = 16
-	if incoming {
-		buffer.prefixLimit = 16 * automix.SampleRate * 2
-	}
-	buffer.capacity = (seconds*automix.SampleRate + 1023) / 1024
-	buffer.analyzer = automix.NewAnalyzer(0)
 	return buffer
 }
 
@@ -77,17 +65,30 @@ func (buffer *transitionBuffer) start() {
 			if count == 0 && failure == nil {
 				failure = io.ErrNoProgress
 			}
-			if buffer.analyzer != nil {
-				buffer.analyzer.Feed(samples[:count])
-			}
 			select {
 			case chunks <- transitionChunk{samples: samples[:count], err: failure}:
 				buffer.mu.Lock()
-				if buffer.prefixLimit > len(buffer.prefix) {
-					kept := min(count, buffer.prefixLimit-len(buffer.prefix))
-					buffer.prefix = append(buffer.prefix, samples[:kept]...)
+				for offset := 0; offset+1 < count; offset += 2 {
+					left, right := float64(samples[offset]), float64(samples[offset+1])
+					buffer.energy += left*left + right*right
+					buffer.windowCount += 2
+					buffer.produced++
+					if buffer.windowCount == 960 {
+						if math.Sqrt(buffer.energy/960) >= .0031622776601683794 {
+							if buffer.firstActive < 0 {
+								buffer.firstActive = buffer.produced - 480
+							}
+							buffer.lastActive = buffer.produced
+						}
+						buffer.energy, buffer.windowCount = 0, 0
+					}
 				}
-				buffer.produced += int64(count / 2)
+				if failure == io.EOF && buffer.windowCount > 0 && math.Sqrt(buffer.energy/float64(buffer.windowCount)) >= .0031622776601683794 {
+					if buffer.firstActive < 0 {
+						buffer.firstActive = buffer.produced - int64(buffer.windowCount/2)
+					}
+					buffer.lastActive = buffer.produced
+				}
 				if failure == io.EOF {
 					buffer.actualEnd = buffer.produced
 				}
@@ -109,7 +110,7 @@ func (buffer *transitionBuffer) Read(dst []float32) (int, error) {
 	if !buffer.started && !buffer.closed {
 		buffer.start()
 	}
-	// 变速前段已离线准备；原始前段仍在同一回放队列，只在交接消费时跳过一次。
+	// 淡化入口只跳过已确认的片头静音，不改动歌曲中间的停顿。
 	for buffer.discard > 0 && !buffer.closed {
 		if len(buffer.current) == 0 {
 			chunks, done := buffer.chunks, buffer.done
@@ -131,16 +132,6 @@ func (buffer *transitionBuffer) Read(dst []float32) (int, error) {
 			buffer.mu.Unlock()
 			return 0, failure
 		}
-	}
-	if buffer.introAt < len(buffer.intro) && !buffer.closed {
-		count := copy(dst, buffer.intro[buffer.introAt:])
-		buffer.introAt += count
-		buffer.consumed += int64(count / 2)
-		if buffer.introAt == len(buffer.intro) {
-			buffer.intro, buffer.introAt = nil, 0
-		}
-		buffer.mu.Unlock()
-		return count, nil
 	}
 	for len(buffer.current) == 0 && buffer.failure == nil && !buffer.closed {
 		chunks, done := buffer.chunks, buffer.done
@@ -167,67 +158,45 @@ func (buffer *transitionBuffer) Read(dst []float32) (int, error) {
 	return count, nil
 }
 
-func (buffer *transitionBuffer) activate() {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	buffer.prefix, buffer.prefixLimit = nil, 0
-}
-
-func (buffer *transitionBuffer) analysis() (automix.Features, int64, []float32) {
-	if buffer.analyzer == nil {
-		return automix.Features{}, -1, nil
-	}
-	snapshot := buffer.analyzer.Snapshot()
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	end := buffer.length
-	if buffer.actualEnd >= 0 {
-		end = buffer.actualEnd
-	}
-	return snapshot, end, append([]float32(nil), buffer.prefix...)
-}
-
-func (buffer *transitionBuffer) installIntro(samples []float32, mapping automix.Mapping, consumed int) bool {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	if buffer.closed || buffer.consumed != 0 || consumed > len(buffer.prefix) || consumed%2 != 0 {
-		return false
-	}
-	buffer.intro, buffer.introAt, buffer.discard = samples, 0, consumed
-	buffer.mapping = &mapping
-	return true
-}
-
 func (buffer *transitionBuffer) sourceFrame(frame int64) int64 {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
-	if buffer.mapping != nil {
-		return buffer.mapping.SourceFrame(frame)
-	}
-	return frame
-}
-
-func (buffer *transitionBuffer) outputFrame(frame int64) int64 {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	if buffer.mapping != nil {
-		return buffer.mapping.OutputFrame(frame)
-	}
-	return frame
+	return frame + buffer.sourceSkip
 }
 
 func (buffer *transitionBuffer) lengths() (int64, int64) {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	source := buffer.length
-	if buffer.analyzer != nil && buffer.actualEnd >= 0 {
+	if buffer.actualEnd >= 0 {
 		source = buffer.actualEnd
 	}
-	output := source
-	if source >= 0 && buffer.mapping != nil {
-		output = buffer.mapping.OutputFrame(source)
+	output := source - buffer.sourceSkip
+	if source < 0 {
+		output = source
 	}
 	return source, output
+}
+
+func (buffer *transitionBuffer) crossfadeEnd(length int64) int64 {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	last := buffer.lastActive
+	// 只有正常 EOF 证明后面全是尾静音，才能把淡化提前；曲中停顿不参与裁剪。
+	if last > 0 && buffer.actualEnd-last >= int64(trimSilenceMinimumRun)*48000/int64(time.Second) {
+		return last - buffer.sourceSkip
+	}
+	return length
+}
+
+func (buffer *transitionBuffer) skipLeadingSilence() {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	first := buffer.firstActive
+	if buffer.consumed == 0 && buffer.sourceSkip == 0 && first >= int64(trimSilenceMinimumRun)*48000/int64(time.Second) {
+		buffer.sourceSkip = first
+		buffer.discard = int(first * 2)
+	}
 }
 func (buffer *transitionBuffer) ready() bool {
 	buffer.mu.Lock()
@@ -258,11 +227,10 @@ func (buffer *transitionBuffer) SetPosition(frame int64) error {
 	buffer.current = nil
 	buffer.failure = nil
 	buffer.produced, buffer.consumed, buffer.actualEnd = 0, 0, -1
-	buffer.prefix, buffer.intro, buffer.mapping = nil, nil, nil
-	buffer.introAt, buffer.discard = 0, 0
-	if buffer.analyzer != nil {
-		buffer.analyzer = automix.NewAnalyzer(0)
-	}
+	buffer.sourceSkip = 0
+	buffer.discard = 0
+	buffer.firstActive, buffer.lastActive = -1, 0
+	buffer.energy, buffer.windowCount = 0, 0
 	if buffer.closed {
 		return io.ErrClosedPipe
 	}
