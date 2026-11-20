@@ -7,7 +7,6 @@ export default ({ command }: { command: string }) => ({
   slug: "mygo-music",
   version: release.version,
   out: "build",
-  resourcesExclude: ["windows/automix-engine", "windows/automix-engine/**"],
   urlSchemes: [command === "dev" ? "mygo-music-dev" : "mygo-music"],
   updates: {
     publicKey: release.updatePublicKey,
