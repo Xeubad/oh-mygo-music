@@ -44,6 +44,13 @@ func aggregateApp(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) 
 		until(t, post, func() bool {
 			edit, view := a.aggregateEdits[a.library], a.aggregateViews[a.library]
 			// 设置页还会异步查询账号，必须等回执落地，避免 Close 后被迟到调用重启。
+			if edit != nil {
+				for _, account := range edit.accounts {
+					if account.busy {
+						return false
+					}
+				}
+			}
 			return !a.library.accountBusy && (edit == nil || !edit.busy) && (view == nil || !view.busy && !view.loadingLists) && !a.pl.Loading()
 		})
 		if a.pl.Playing() {
@@ -560,7 +567,7 @@ func TestAggregateSettingsCanReorderPlatforms(t *testing.T) {
 	edit := a.aggregateEdits[a.library]
 	until(t, post, func() bool { return edit != nil && edit.loaded })
 	tt.Frame()
-	if err := tt.Click("Move Up tx"); err != nil {
+	if err := tt.Click("Move Up QQ Music"); err != nil {
 		t.Fatal(err)
 	}
 	if err := tt.Click("Save Aggregate Settings"); err != nil {
@@ -732,12 +739,16 @@ func TestAggregateSettingsCustomSourcesReplaceLegacyKeys(t *testing.T) {
 	edit := a.aggregateEdits[a.library]
 	until(t, post, func() bool { return edit != nil && edit.loaded })
 	tt.Frame()
+	if err := tt.Click("Add Source"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
 	n, ok := tt.AccessByRole(ui.RoleTextField, "Source Link")
 	if !ok || !n.Password || n.Value != "" {
 		t.Fatal("新插件未展示空白的密码链接输入")
 	}
-	if _, ok := tt.AccessByRole(ui.RoleButton, "Add Source"); !ok {
-		t.Fatal("正式设置入口缺少音源添加操作")
+	if _, ok := tt.AccessByRole(ui.RoleButton, "Confirm Add Source"); !ok {
+		t.Fatal("展开后缺少确认添加操作")
 	}
 	for _, label := range []string{"Resolver Key", "NetEase Resolver Key", "QQ Resolver Key", "Qishui Resolver Key"} {
 		if _, ok := tt.AccessByRole(ui.RoleTextField, label); ok {

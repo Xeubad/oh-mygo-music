@@ -38,10 +38,11 @@ type aggregateQualityTarget struct {
 }
 
 type aggregateReply struct {
-	CustomSources  *aggregateCustomSources  `json:"customSources"`
-	Refresh        aggregateRefresh         `json:"refresh"`
-	QualityTargets []aggregateQualityTarget `json:"qualityTargets"`
-	Settings       struct {
+	AccountPlatforms []string                 `json:"accountPlatforms"`
+	CustomSources    *aggregateCustomSources  `json:"customSources"`
+	Refresh          aggregateRefresh         `json:"refresh"`
+	QualityTargets   []aggregateQualityTarget `json:"qualityTargets"`
+	Settings         struct {
 		TargetQuality           string   `json:"targetQuality"`
 		MinimumQuality          string   `json:"minimumQuality"`
 		CandidateTimeoutMs      int      `json:"candidateTimeoutMs"`
@@ -97,6 +98,10 @@ type aggregateEdit struct {
 	sourceLink, sourceTarget string // 唯一链接草稿仅归当前界面；公开状态不提供或回填链接。
 	sourceNextPoll           time.Time
 	sourcePolls              int
+	sourceInput, advanced    bool
+	saved                    *aggregateReply
+	accountPlatforms         []string
+	accounts                 map[string]*aggregateAccountEdit
 }
 
 var aggregateTimingFields = []struct{ key, label string }{
@@ -109,6 +114,8 @@ var aggregateTimingFields = []struct{ key, label string }{
 }
 
 func (e *aggregateEdit) apply(reply aggregateReply) {
+	e.saved = &reply
+	e.accountPlatforms = append([]string(nil), reply.AccountPlatforms...)
 	s := reply.Settings
 	e.target, e.minimum = s.TargetQuality, s.MinimumQuality
 	e.order = append([]string(nil), s.PlatformOrder...)
@@ -156,7 +163,7 @@ func (a *app) aggregateCommand(lib *library, e *aggregateEdit, action string, in
 			e.busy = false
 			// 写入已成功时即清空敏感草稿；后续状态重取失败不能留下可重复提交的链接。
 			if succeeded && (action == "addSource" || action == "replaceSource" || action == "removeSource" && input["id"] == e.sourceTarget) {
-				e.sourceLink, e.sourceTarget = "", ""
+				e.sourceLink, e.sourceTarget, e.sourceInput = "", "", false
 			}
 			if err != nil {
 				e.loaded = true
@@ -217,6 +224,10 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 			if ui.Button(c.Key("reload"), T("Reload aggregate status")).Disabled(e.busy).Clicked() {
 				a.aggregateCommand(lib, e, "status", nil)
 			}
+			return
+		}
+		if e.sources != nil {
+			a.aggregateSettingsLayout(c, lib, e, p)
 			return
 		}
 		qualities := []string{"flac", "320k", "256k", "128k", "64k", "32k"}
@@ -350,8 +361,9 @@ func (a *app) aggregateSettings(c *ui.Context, lib *library, p palette) {
 }
 
 func aggregateField(c *ui.Context, label string, control func()) {
-	ui.Row(c).Gap(12).AlignItems(ui.Center).MinHeight(36).Children(func() {
-		ui.Text(c, label).FontSize(12.5).Width(164)
+	// 窄窗让控件整体换行，不能把排序箭头或输入框推出内容区。
+	ui.Row(c).Wrap().Gap(12).AlignItems(ui.Center).MinHeight(36).Children(func() {
+		ui.Text(c, label).FontSize(12.5).Width(164).Shrink(0)
 		control()
 	})
 }

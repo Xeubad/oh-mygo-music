@@ -146,13 +146,7 @@ func TestAggregateCustomSourcesMoveAndDisableFromSettings(t *testing.T) {
 	}
 	runPost(t, post)
 	tt.Frame()
-	if err := tt.Click("Source Actions Second"); err != nil {
-		t.Fatal(err)
-	}
-	tt.Frame()
-	if err := tt.ChooseMenuItem("Disable Source"); err != nil {
-		t.Fatal(err)
-	}
+	clickSettingRole(t, tt, ui.RoleSwitch, "Enable Source Second")
 	runPost(t, post)
 	tt.Frame()
 	raw, err := src.Aggregate("status", nil)
@@ -178,9 +172,13 @@ func TestAggregateCustomSourcesMoveAndDisableFromSettings(t *testing.T) {
 // 替换复用空白链接输入而非回显旧链接，成功后清空目标和草稿并显示新的来源状态。
 func TestAggregateCustomSourcesReplaceFromSettings(t *testing.T) {
 	src, tt, post := customSourcesSettings(t)
+	if err := tt.Click("Add Source"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
 	clickSettingRole(t, tt, ui.RoleTextField, "Source Link")
 	tt.Type("https://fixture.invalid/source?key=synthetic-only")
-	if err := tt.Click("Add Source"); err != nil {
+	if err := tt.Click("Confirm Add Source"); err != nil {
 		t.Fatal(err)
 	}
 	runPost(t, post)
@@ -212,8 +210,11 @@ func TestAggregateCustomSourcesReplaceFromSettings(t *testing.T) {
 		t.Fatalf("替换未提交：%s", raw)
 	}
 	button, ok = tt.AccessByRole(ui.RoleButton, "Add Source")
-	if !ok || !button.Disabled {
-		t.Fatal("替换成功后未清空链接或仍绑定旧目标")
+	if !ok || button.Disabled {
+		t.Fatal("替换后没有恢复添加入口")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleTextField, "Source Link"); ok {
+		t.Fatal("替换后敏感输入没有收起")
 	}
 }
 
@@ -227,6 +228,14 @@ func TestAggregateCustomSourcesPollKeepsDrafts(t *testing.T) {
 		t.Fatal(err)
 	}
 	runPost(t, post)
+	tt.Frame()
+	if err := tt.Click("Advanced Settings"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Add Source"); err != nil {
+		t.Fatal(err)
+	}
 	tt.Frame()
 	clickSettingRole(t, tt, ui.RoleTextField, "Candidate Timeout (ms)")
 	tt.Key(ui.Cmd, ui.KeyA)
@@ -260,7 +269,7 @@ func TestAggregateCustomSourcesPollKeepsDrafts(t *testing.T) {
 		t.Fatal("更新结束后仍轮询")
 	}
 	// 密码输入的无障碍值刻意为空，通过随后成功提交验证草稿仍在。
-	if err := tt.Click("Add Source"); err != nil {
+	if err := tt.Click("Confirm Add Source"); err != nil {
 		t.Fatal(err)
 	}
 	runPost(t, post)
@@ -274,9 +283,13 @@ func TestAggregateCustomSourcesPollKeepsDrafts(t *testing.T) {
 // 添加从公开设置提交链接，公开状态新增音源但不泄露链接，成功后输入清空。
 func TestAggregateCustomSourcesAddFromSettings(t *testing.T) {
 	src, tt, post := customSourcesSettings(t)
+	if err := tt.Click("Add Source"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
 	clickSettingRole(t, tt, ui.RoleTextField, "Source Link")
 	tt.Type("https://fixture.invalid/source?key=synthetic-only")
-	if err := tt.Click("Add Source"); err != nil {
+	if err := tt.Click("Confirm Add Source"); err != nil {
 		t.Fatal(err)
 	}
 	runPost(t, post)
@@ -298,8 +311,11 @@ func TestAggregateCustomSourcesAddFromSettings(t *testing.T) {
 		t.Fatalf("设置未提交添加：%s", raw)
 	}
 	button, ok := tt.AccessByRole(ui.RoleButton, "Add Source")
-	if !ok || !button.Disabled {
-		t.Fatal("添加成功后未清空链接输入，仍可重复提交")
+	if !ok || button.Disabled {
+		t.Fatal("添加成功后没有恢复添加入口")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleTextField, "Source Link"); ok {
+		t.Fatal("添加成功后没有清空并收起链接输入")
 	}
 	if strings.Contains(string(raw), "synthetic-only") || strings.Contains(string(raw), "fixture.invalid") || strings.Contains(strings.Join(tt.Texts(), " "), "synthetic-only") {
 		t.Fatal("链接被公开状态或界面回填")

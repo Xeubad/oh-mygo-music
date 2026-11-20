@@ -723,7 +723,7 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 			})
 			a.pluginUpdateButton(c, lib)
 			switch {
-			case !enabled:
+			case !enabled || a.aggregateHasPlatformAccounts(lib):
 			case lib.account == nil && lib.accountUnknown():
 				// A source not yet used hasn't said who's signed in: asked now, its
 				// row offers no sign-in to someone who already is.
@@ -747,6 +747,9 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 			a.pluginPermissions(c.Key("permissions"), lib, g, p)
 		}
 		for _, st := range info.Settings {
+			if edit := a.aggregateEdits[lib]; edit != nil && edit.sources != nil && (st.Key == "catalogPlatform" || len(edit.accountPlatforms) > 0 && st.Key == "accountPlatform") {
+				continue
+			}
 			a.sourceSetting(c.Key(st.Key), lib, st, p)
 		}
 		a.aggregateSettings(c.Key("aggregate"), lib, p)

@@ -26,14 +26,15 @@ func mygoOpenFolders(a *app) ([]string, error) {
 // signInDialog is signing in to a source. The source does it its own way, in
 // the listener's browser or wherever, which can take minutes.
 type signInDialog struct {
-	open    bool
-	lib     *library
-	here    bool // asked in the settings window, which shows it, not the main one
-	waiting bool
-	gen     int // counts the ones started, to tell the last
-	err     string
-	prompt  music.SignInPrompt // what the source wants shown
-	qr      *qr.Code           // prompt's QR, encoded
+	open     bool
+	lib      *library
+	here     bool   // asked in the settings window, which shows it, not the main one
+	platform string // 聚合设置明确点选的平台，不临时改写全局账号选择。
+	waiting  bool
+	gen      int // counts the ones started, to tell the last
+	err      string
+	prompt   music.SignInPrompt // what the source wants shown
+	qr       *qr.Code           // prompt's QR, encoded
 
 	// asked is when the dialog first showed this sign-in on its way, by the
 	// view's clock, and last is the error of the one before. Until it has
@@ -125,7 +126,7 @@ func (a *app) startSignIn() {
 	d.waiting, d.err, d.last = true, "", d.err
 	d.prompt, d.qr = music.SignInPrompt{}, nil
 	d.asked = time.Time{}
-	gen := d.gen
+	gen, platform := d.gen, d.platform
 	over := a.win
 	if d.here && a.settingsWin != nil {
 		over = a.settingsWin
@@ -143,7 +144,17 @@ func (a *app) startSignIn() {
 		})
 	}
 	go func() {
-		acc, err := lib.src.SignIn()
+		var acc *music.Account
+		var err error
+		if platform != "" {
+			if src, ok := lib.src.(aggregatePlatformSource); ok {
+				acc, err = src.SignInPlatform(platform)
+			} else {
+				err = fmt.Errorf("platform sign-in unavailable")
+			}
+		} else {
+			acc, err = lib.src.SignIn()
+		}
 		a.post(func() {
 			current := a.signIn.gen == gen
 			if current {
@@ -158,6 +169,15 @@ func (a *app) startSignIn() {
 			}
 			if current {
 				a.signIn.open = false
+			}
+			if platform != "" {
+				// 仅刷新点选行；通用账号按原读取入口重取，避免其他平台的迟到回执串号。
+				if e := a.aggregateEdits[lib]; e != nil {
+					a.loadAggregateAccount(lib, e, platform)
+				}
+				a.afterAccount(lib)
+				a.loadAccount(lib)
+				return
 			}
 			lib.account = acc
 			a.afterAccount(lib)
@@ -215,6 +235,9 @@ func (a *app) signInDialog(c *ui.Context, p palette, settings bool) {
 		name := ""
 		if d.lib != nil {
 			name = d.lib.name()
+			if d.platform != "" {
+				name = aggregatePlatformName(d.platform)
+			}
 		}
 		ui.Text(c, Tf("Sign in to %s", name)).FontSize(17).FontWeight(700)
 		waiting := d.waiting
