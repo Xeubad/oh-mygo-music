@@ -58,10 +58,20 @@ type shareDraft struct {
 	onlinePublishing        bool
 	onlineError             error
 	onlineCancel            context.CancelFunc
+	clipStart, clipEnd      time.Duration
+	clipHead                time.Duration
 	clipPreview             *player.ClipPreview
 	clipPreviewCancel       context.CancelFunc
 	clipPreviewLoading      bool
+	clipPreviewActive       bool
 	clipPreviewSerial       int
+}
+
+func (draft *shareDraft) clipRange() (time.Duration, time.Duration, bool) {
+	if draft.clipEnd > draft.clipStart {
+		return draft.clipStart, draft.clipEnd, true
+	}
+	return shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable)
 }
 
 func (a *app) openShare(track music.Track) {

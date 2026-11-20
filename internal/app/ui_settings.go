@@ -516,7 +516,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 		})
 		row(T("Even Out Loudness"), T("Adjust each song's volume by what its plugin measured of it, for them to sound as loud as each other"), func() {
 			if ui.Switch(c.Key("normalize"), &s.Normalize).Label(T("Even Out Loudness")).Changed() {
-				a.pl.SetVolume(a.volume)
+				a.setPlayerVolume(a.volume)
 				a.changed()
 			}
 		})

@@ -36,7 +36,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 	}
 	if f, st, ok := p.Cache.find(t.Source, t.ID, quality); ok {
 		if t.PlaybackID == "" || st.PlaybackID == t.PlaybackID {
-			return &Song{Type: st.Type, file: f}, nil
+			return &Song{Type: st.Type, file: f, st: st}, nil
 		}
 		f.Close()
 	}

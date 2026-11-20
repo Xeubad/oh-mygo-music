@@ -660,6 +660,17 @@ func (p *Player) TogglePlay() {
 	p.sync()
 }
 
+func (p *Player) PauseForPreview() {
+	if p.playing {
+		p.TogglePlay()
+	}
+	if !p.playing && p.out != nil {
+		// 试听紧接着起音，不能等常规淡出，也不能让待完成的定位重新起播。
+		p.fade.attach(p.out, 0)
+		p.out.Pause()
+	}
+}
+
 // seekGap is how long a seek waits for what plays to fade out, which the
 // audio player does over 5 ms, as it pauses: within the next buffer or
 // two it sends the system.

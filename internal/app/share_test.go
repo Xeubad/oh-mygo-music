@@ -40,6 +40,61 @@ func TestInitialShareLineFollowsPlaybackPosition(t *testing.T) {
 	}
 }
 
+// 拖动试听边界更新待发布区间并让旧链接失效，拖动播放头只改变试听位置。
+func TestShareClipTimelineDrag(t *testing.T) {
+	a := newTestApp()
+	draft := &shareDraft{
+		open: true, track: song("shared", "Shared"), onlineMode: "clip", timingReliable: true,
+		selected: map[int]bool{0: true},
+		lines:    []lyrics.Line{{Text: "First", At: 40 * time.Second, End: 80 * time.Second, AtSource: true, EndSource: true}},
+	}
+	draft.onlineURL = "https://example.com/s/old"
+	draft.onlinePublishedRevision = draft.onlineRevision
+	a.sharing = draft
+	tester := ui.NewTester(func(c *ui.Context) {
+		a.pal = paletteFor(c.Theme())
+		a.shareDialog(c)
+	}, 880, 580)
+	tester.Frame()
+	if dir := os.Getenv("MM_FRAMES"); dir != "" {
+		saveFrame(t, dir, "share-clip-timeline.png", tester.Image())
+	}
+	bounds, ok := tester.Find("Clip Range:")
+	if !ok {
+		t.Fatal("missing clip timeline")
+	}
+	top := bounds.Y + bounds.H/2
+	tester.Press(bounds.X+bounds.W*.20, top)
+	tester.Move(bounds.X+bounds.W*.10, top)
+	tester.Release(bounds.X+bounds.W*.10, top)
+	if draft.clipStart < 15*time.Second || draft.clipStart > 25*time.Second || draft.clipEnd != 81*time.Second {
+		t.Fatalf("dragged start = %v, end = %v", draft.clipStart, draft.clipEnd)
+	}
+	tester.Press(bounds.X+bounds.W*.40, top)
+	tester.Move(bounds.X+bounds.W*.65, top)
+	tester.Release(bounds.X+bounds.W*.65, top)
+	if draft.clipEnd < 125*time.Second || draft.clipEnd > 135*time.Second {
+		t.Fatalf("dragged end = %v", draft.clipEnd)
+	}
+	if a.onlineLinkMatchesDraft(draft) {
+		t.Fatal("previous link still matches changed clip bounds")
+	}
+	revision := draft.onlineRevision
+	if err := tester.Click("Preview Playhead"); err != nil {
+		t.Fatal(err)
+	}
+	if draft.clipHead <= draft.clipStart || draft.clipHead >= draft.clipEnd {
+		t.Fatalf("playhead = %v, outside (%v, %v)", draft.clipHead, draft.clipStart, draft.clipEnd)
+	}
+	if draft.onlineRevision != revision {
+		t.Fatal("moving the playhead invalidated the current share")
+	}
+	metadata, err := a.onlineShareMetadata(draft)
+	if err != nil || metadata.ClipStartMs != draft.clipStart.Milliseconds() || metadata.ClipEndMs != draft.clipEnd.Milliseconds() {
+		t.Fatalf("published range %d–%d differs from preview %v–%v: %v", metadata.ClipStartMs, metadata.ClipEndMs, draft.clipStart, draft.clipEnd, err)
+	}
+}
+
 // 列表分享另一首歌只操作分享草稿，所选文字不借用正在播放的歌词。
 func TestShareMenuKeepsPlaybackAndCopiesSelection(t *testing.T) {
 	var copied string

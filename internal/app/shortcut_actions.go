@@ -70,6 +70,9 @@ func (a *app) setPlayerVolume(value float64) {
 	}
 	a.volume = value
 	a.pl.SetVolume(value)
+	if draft := a.sharing; draft != nil && draft.clipPreview != nil {
+		draft.clipPreview.SetVolume(value, a.settings.Normalize)
+	}
 	a.settings.Volume, a.settings.MutedFrom = a.volume, a.mutedFrom
 }
 

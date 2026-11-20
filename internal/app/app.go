@@ -392,6 +392,9 @@ func Run() error {
 		a.configureAutoMixAdvisor()
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
 		a.pl.Changed = func() {
+			if draft := a.sharing; draft != nil && draft.clipPreviewActive && a.pl.Playing() {
+				a.stopSharePreview(draft)
+			}
 			a.keepSession()
 			a.syncCaptions()
 			a.publishBetterLyrics()
@@ -465,6 +468,9 @@ func Run() error {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
+		if a.sharing != nil {
+			a.stopSharePreview(a.sharing)
+		}
 		a.endShortcutRecording()
 		if a.globalShortcuts != nil {
 			a.globalShortcuts.stop()

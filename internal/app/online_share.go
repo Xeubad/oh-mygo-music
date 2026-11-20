@@ -179,22 +179,30 @@ func (a *app) stopSharePreview(draft *shareDraft) {
 		draft.clipPreviewCancel()
 		draft.clipPreviewCancel = nil
 	}
-	if draft.clipPreview != nil {
-		draft.clipPreview.Close()
-		draft.clipPreview = nil
+	draft.clipPreview = nil
+	if draft.clipPreviewLoading && draft.status == T("Preparing clip preview…") {
+		draft.status = ""
 	}
-	draft.clipPreviewLoading = false
+	draft.clipPreviewLoading, draft.clipPreviewActive = false, false
 }
 
 func (a *app) previewShareClip(draft *shareDraft) {
-	a.stopSharePreview(draft)
-	start, end, ok := shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable)
+	if draft.clipPreviewLoading {
+		return
+	}
+	if draft.clipPreview != nil {
+		a.playSharePreview(draft)
+		return
+	}
+	start, end, ok := draft.clipRange()
 	lib := a.trackLib(&draft.track)
 	if !ok || lib == nil || lib.src == nil {
+		draft.status = T("Could not preview clip")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	draft.clipPreviewCancel, draft.clipPreviewLoading = cancel, true
+	draft.status = T("Preparing clip preview…")
 	serial, track, quality, source, currentPlayer := draft.clipPreviewSerial, draft.track, draft.onlineQuality, lib.src, a.pl
 	go func() {
 		defer cancel()
@@ -203,6 +211,7 @@ func (a *app) previewShareClip(draft *shareDraft) {
 			a.post(func() {
 				if a.sharing == draft && serial == draft.clipPreviewSerial {
 					draft.clipPreviewLoading = false
+					draft.clipPreviewCancel = nil
 					draft.status = T("Could not preview clip")
 				}
 			})
@@ -214,15 +223,17 @@ func (a *app) previewShareClip(draft *shareDraft) {
 			path := filepath.Join(directory, "preview."+song.Type)
 			err = song.SaveToContext(ctx, path)
 			if err == nil {
-				preview, err = player.OpenClipPreview(path, start, end)
+				preview, err = song.OpenClipPreview(path, start, end)
 			}
 		}
 		workerErr := ctx.Err()
 		a.post(func() {
-			// 选句或来源变化后，旧试听结果不能播放，更不能改动主播放队列。
-			if a.sharing != draft || !draft.open || serial != draft.clipPreviewSerial || workerErr != nil {
-				if a.sharing == draft && serial == draft.clipPreviewSerial {
+			// 被取消的试听不能改动主播放器，当前请求则使用载入期间调整过的边界。
+			if a.quitting || a.sharing != draft || !draft.open || serial != draft.clipPreviewSerial || err != nil || workerErr != nil {
+				if a.sharing == draft && draft.open && serial == draft.clipPreviewSerial {
 					draft.clipPreviewLoading = false
+					draft.clipPreviewCancel = nil
+					draft.status = T("Could not preview clip")
 				}
 				if preview != nil {
 					preview.Close()
@@ -231,20 +242,24 @@ func (a *app) previewShareClip(draft *shareDraft) {
 				return
 			}
 			draft.clipPreviewLoading = false
-			if err != nil {
-				draft.status = T("Could not preview clip")
-				os.RemoveAll(directory)
-				return
-			}
+			draft.status = ""
 			draft.clipPreview = preview
-			if a.pl.Playing() {
-				a.pl.TogglePlay()
-			}
-			// 文件句柄释放后才删除临时目录，兼容 Windows 文件占用约束。
-			draft.clipPreviewCancel = func() { cancel(); preview.Close(); os.RemoveAll(directory) }
-			preview.Play()
+			draft.clipPreviewCancel = func() { preview.Close(); os.RemoveAll(directory) }
+			a.playSharePreview(draft)
 		})
 	}()
+}
+
+func (a *app) playSharePreview(draft *shareDraft) {
+	start, end, _ := draft.clipRange()
+	if draft.clipHead < start || draft.clipHead >= end {
+		draft.clipHead = start
+	}
+	a.pl.PauseForPreview()
+	draft.clipPreview.SetRange(start, end, draft.clipHead)
+	draft.clipPreview.SetVolume(a.volume, a.settings.Normalize)
+	draft.clipPreview.Play()
+	draft.clipPreviewActive = true
 }
 
 func (a *app) finishOnlineShare(draft *shareDraft, result *shareResult, err error, revision uint64, snapshot string) {
@@ -346,7 +361,7 @@ func (a *app) onlineShareMetadata(draft *shareDraft) (shareMetadata, error) {
 		return shareMetadata{}, errors.New(T("Song duration is unavailable"))
 	}
 	if metadata.Mode == "clip" {
-		start, end, ok := shareClipRange(draft.lines, draft.selected, time.Duration(metadata.DurationMs)*time.Millisecond, draft.timingReliable)
+		start, end, ok := draft.clipRange()
 		if !ok {
 			return shareMetadata{}, errors.New(T("Selected lyrics have no reliable timing"))
 		}
