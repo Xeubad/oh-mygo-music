@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -67,8 +69,145 @@ func TestShortcutNormalizationAndConflicts(t *testing.T) {
 	if _, err := validateShortcuts(cfg); err == nil {
 		t.Fatal("accepted a duplicate stored on a disabled action")
 	}
-	if _, err := shortcutFromInput(ui.KeyP, ui.Ctrl|ui.Super); err == nil {
+	if _, err := shortcutFromInput(ui.KeyP, ui.Ctrl|ui.Super); runtime.GOOS == "darwin" {
+		if err != nil {
+			t.Fatalf("Command with Control: %v", err)
+		}
+	} else if err == nil {
 		t.Fatal("accepted the Windows modifier")
+	}
+}
+
+// macOS takes Command as a shortcut modifier; Windows still refuses it.
+func TestShortcutCommandModifier(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		if _, err := shortcutFromInput(ui.KeyP, ui.Super); err == nil {
+			t.Fatal("accepted a modifier this platform cannot register")
+		}
+		return
+	}
+	if got, err := shortcutFromInput(ui.KeyP, ui.Super); err != nil || got != "Super+P" {
+		t.Fatalf("Command alone: %q, %v", got, err)
+	}
+	if _, err := shortcutFromInput(ui.KeyP, ui.Shift); err == nil || !strings.Contains(err.Error(), "Command") {
+		t.Fatalf("Shift alone on macOS: %v", err)
+	}
+	if got, err := shortcutFromInput(ui.KeyLeft, ui.Super|ui.Ctrl|ui.Alt|ui.Shift); err != nil || got != "Super+Ctrl+Alt+Shift+Left" {
+		t.Fatalf("four modifiers: %q, %v", got, err)
+	}
+}
+
+// Command combinations record and normalize to one canonical form.
+func TestShortcutCommandNormalization(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Command is the macOS modifier")
+	}
+	for input, want := range map[string]string{
+		"cmd+p":                        "Super+P",
+		"Command + shift + P":          "Super+Shift+P",
+		"option+left":                  "Alt+Left",
+		"command+control+option+right": "Super+Ctrl+Alt+Right",
+		"super+ctrl+alt+shift+f12":     "Super+Ctrl+Alt+Shift+F12",
+		// A stored Control+Option combination keeps meaning Control and Option.
+		"ctrl+alt+p": "Ctrl+Alt+P",
+	} {
+		got, err := normalizeShortcut(input)
+		if err != nil || got != want {
+			t.Errorf("%q: %q, %v", input, got, err)
+		}
+		if again, err := normalizeShortcut(got); err != nil || again != got {
+			t.Errorf("%q is not canonical: %q, %v", got, again, err)
+		}
+	}
+	for _, input := range []string{"cmd", "cmd+shift", "cmd+escape", "cmd++", "win+p"} {
+		if _, err := normalizeShortcut(input); err == nil {
+			t.Errorf("accepted %q", input)
+		}
+	}
+}
+
+// A recorded Command binding saves as an accelerator and registers again after a restart.
+func TestShortcutCommandSaveAndRestart(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Command is the macOS modifier")
+	}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	a := newTestApp()
+	a.settings.path = path
+	registrar := newFakeShortcutRegistrar()
+	cfg := completeShortcuts(nil)
+	cfg.Enabled = true
+	a.globalShortcuts = newShortcutManager(cfg, registrar, a.globalShortcutAction)
+	a.globalShortcuts.retry()
+
+	next := a.globalShortcuts.config.clone()
+	next.Bindings[shortcutPlay] = shortcutBinding{"Super+P", true}
+	if err := a.globalShortcuts.apply(next, false, a.saveShortcutConfig); err != nil {
+		t.Fatal(err)
+	}
+	if registrar.keys["Super+P"] == nil || registrar.keys["Ctrl+Alt+P"] != nil || a.settings.Shortcuts.Bindings[shortcutPlay].Key != "Super+P" {
+		t.Fatal("Command binding did not replace the old registration")
+	}
+
+	// Read the file back the way startup does, with a fresh registrar.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved settings
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	again := newFakeShortcutRegistrar()
+	restarted := newShortcutManager(completeShortcuts(saved.Shortcuts), again, func(shortcutAction) {})
+	restarted.retry()
+	if again.keys["Super+P"] == nil || len(again.keys) != 8 || again.keys["Ctrl+Alt+Left"] == nil {
+		t.Fatalf("restart did not register the saved keys: %v", len(again.keys))
+	}
+}
+
+// macOS shows the standard symbols for modifiers and navigation keys.
+func TestShortcutDisplaySymbols(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("symbols are macOS's")
+	}
+	for input, want := range map[string]string{
+		"Super+P":           "⌘P",
+		"Ctrl+Alt+Shift+P":  "⌃⌥⇧P",
+		"Super+Alt+Left":    "⌘⌥←",
+		"Ctrl+Alt+PageDown": "⌃⌥⇟",
+		"Alt+Enter":         "⌥↩",
+		"Super+Shift+Space": "⌘⇧␣",
+	} {
+		if got := shortcutDisplay(input); got != want {
+			t.Errorf("%q: %q, want %q", input, got, want)
+		}
+	}
+}
+
+// Elsewhere a shortcut shows the accelerator as it is stored.
+func TestShortcutDisplayOtherPlatforms(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS shows symbols")
+	}
+	if got := shortcutDisplay("Ctrl+Alt+P"); got != "Ctrl+Alt+P" {
+		t.Fatalf("changed the stored form: %q", got)
+	}
+}
+
+// macOS records the key's position, which is what registration binds.
+func TestShortcutInputKey(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("positions matter on macOS")
+	}
+	if got := shortcutInputKey(ui.InputEvent{Key: ui.KeyR, PhysicalKey: ui.KeyP}); got != ui.KeyP {
+		t.Fatalf("used the layout character: %v", got)
+	}
+	if got := shortcutInputKey(ui.InputEvent{Key: ui.KeyP}); got != ui.KeyP {
+		t.Fatalf("lost a key with no position: %v", got)
+	}
+	if got := shortcutInputKey(ui.InputEvent{PhysicalKey: ui.KeyP}); got != ui.KeyP {
+		t.Fatalf("lost a position with no key: %v", got)
 	}
 }
 

@@ -52,10 +52,7 @@ func (a *app) recordShortcut(ev ui.InputEvent) bool {
 		if ev.Repeat {
 			return true
 		}
-		key := ev.Key
-		if key == ui.KeyUnknown {
-			key = ev.PhysicalKey
-		}
+		key := shortcutInputKey(ev)
 		if key == ui.KeyUnknown {
 			return true // 单独按修饰键继续等待，不当成一次无效提交。
 		}
@@ -67,10 +64,7 @@ func (a *app) recordShortcut(ev ui.InputEvent) bool {
 		editor.candidate, editor.held = candidate, key
 		return true
 	case ui.InputKeyUp:
-		key := ev.Key
-		if key == ui.KeyUnknown {
-			key = ev.PhysicalKey
-		}
+		key := shortcutInputKey(ev)
 		if key != editor.held || editor.candidate == "" {
 			return true
 		}
@@ -101,7 +95,7 @@ func (a *app) shortcutSettings(c *ui.Context, p palette, row settingsRow, block 
 	})
 	block(T("Shortcut Help"), func() {
 		ui.Column(c).Padding(10, 16).Gap(5).Children(func() {
-			ui.Text(c, T("Click a key to record. Use Ctrl or Alt; Shift is optional. Esc cancels.")).FontSize(12).TextColor(p.muted)
+			ui.Text(c, shortcutHelpText()).FontSize(12).TextColor(p.muted)
 			ui.Text(c, T("While recording, all global shortcuts are paused. Hold a key to trigger only once.")).FontSize(12).TextColor(p.muted)
 			if a.shortcutEdit.error != nil {
 				ui.Text(c, a.shortcutEdit.error.Error()).FontSize(12).TextColor(p.accent)
@@ -171,7 +165,7 @@ func (a *app) shortcutSettingsRow(c *ui.Context, p palette, id shortcutAction, l
 			if recording {
 				text := T("Press keys…")
 				if editor.candidate != "" {
-					text = editor.candidate
+					text = shortcutDisplay(editor.candidate)
 				}
 				recorder := ui.ButtonBase(c.Key("recorder")).Bind(&editor.handle).Label(Tf("Record %s", label)).
 					MinWidth(136).Padding(6, 9).Radius(6).Border(1, p.accent).Background(p.hover)
@@ -182,7 +176,7 @@ func (a *app) shortcutSettingsRow(c *ui.Context, p palette, id shortcutAction, l
 				}
 				ui.Button(c, T("Cancel")).OnClick(a.endShortcutRecording)
 			} else {
-				ui.Button(c.Key("key"), binding.Key).Label(Tf("Change %s shortcut", label)).MinWidth(136).
+				ui.Button(c.Key("key"), shortcutDisplay(binding.Key)).Label(Tf("Change %s shortcut", label)).MinWidth(136).
 					Disabled(editor.recording != "").OnClick(func() { a.startShortcutRecording(c, id) })
 				on := binding.Enabled
 				if ui.Switch(c.Key("enabled"), &on).Label(Tf("Enable %s shortcut", label)).Disabled(editor.recording != "").Changed() {

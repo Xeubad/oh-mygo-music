@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"maps"
+	"runtime"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -91,16 +92,50 @@ var shortcutKeyNames = func() map[ui.Key]string {
 	return keys
 }()
 
+// shortcutPolicy 返回本平台能登记的修饰键，以及其中必须出现的一个。
+// macOS 的 ui.Super 是 Command，Carbon 可以直接登记；Windows 侧策略与文案保持不变。
+func shortcutPolicy() (allowed, required ui.Modifiers) {
+	if runtime.GOOS == "darwin" {
+		return ui.Super | ui.Ctrl | ui.Alt | ui.Shift, ui.Super | ui.Ctrl | ui.Alt
+	}
+	return ui.Ctrl | ui.Alt | ui.Shift, ui.Ctrl | ui.Alt
+}
+
+func shortcutInputError() error {
+	if runtime.GOOS == "darwin" {
+		return fmt.Errorf("%s", T("Use Command, Control or Option, optionally with Shift, and a supported key"))
+	}
+	return fmt.Errorf("%s", T("Use Ctrl or Alt, optionally with Shift, and a supported key"))
+}
+
+func shortcutModifier(part string) (ui.Modifiers, bool) {
+	switch strings.ToLower(strings.TrimSpace(part)) {
+	case "super", "cmd", "command", "meta":
+		return ui.Super, true
+	case "ctrl", "control":
+		return ui.Ctrl, true
+	case "alt":
+		return ui.Alt, true
+	case "option":
+		return ui.Alt, runtime.GOOS == "darwin"
+	case "shift":
+		return ui.Shift, true
+	}
+	return 0, false
+}
+
 func shortcutFromInput(key ui.Key, mods ui.Modifiers) (string, error) {
 	name, ok := shortcutKeyNames[key]
-	if !ok || mods&^(ui.Ctrl|ui.Alt|ui.Shift) != 0 || mods&(ui.Ctrl|ui.Alt) == 0 {
-		return "", fmt.Errorf("%s", T("Use Ctrl or Alt, optionally with Shift, and a supported key"))
+	allowed, required := shortcutPolicy()
+	if !ok || mods&^allowed != 0 || mods&required == 0 {
+		return "", shortcutInputError()
 	}
+	// 规范顺序与 upstream accelerator 一致，保证同一组合只有一种写法。
 	var parts []string
 	for _, modifier := range []struct {
 		mask ui.Modifiers
 		name string
-	}{{ui.Ctrl, "Ctrl"}, {ui.Alt, "Alt"}, {ui.Shift, "Shift"}} {
+	}{{ui.Super, "Super"}, {ui.Ctrl, "Ctrl"}, {ui.Alt, "Alt"}, {ui.Shift, "Shift"}} {
 		if mods&modifier.mask != 0 {
 			parts = append(parts, modifier.name)
 		}
@@ -112,16 +147,11 @@ func normalizeShortcut(text string) (string, error) {
 	parts := strings.Split(text, "+")
 	var mods ui.Modifiers
 	for _, part := range parts[:len(parts)-1] {
-		switch strings.ToLower(strings.TrimSpace(part)) {
-		case "ctrl", "control":
-			mods |= ui.Ctrl
-		case "alt":
-			mods |= ui.Alt
-		case "shift":
-			mods |= ui.Shift
-		default:
-			return "", fmt.Errorf("%s", T("Use Ctrl or Alt, optionally with Shift, and a supported key"))
+		modifier, ok := shortcutModifier(part)
+		if !ok {
+			return "", shortcutInputError()
 		}
+		mods |= modifier
 	}
 	name := strings.TrimSpace(parts[len(parts)-1])
 	for key, canonical := range shortcutKeyNames {
@@ -129,7 +159,46 @@ func normalizeShortcut(text string) (string, error) {
 			return shortcutFromInput(key, mods)
 		}
 	}
-	return "", fmt.Errorf("%s", T("Use Ctrl or Alt, optionally with Shift, and a supported key"))
+	return "", shortcutInputError()
+}
+
+var shortcutSymbols = map[string]string{
+	"Super": "⌘", "Ctrl": "⌃", "Alt": "⌥", "Shift": "⇧",
+	"Enter": "↩", "Tab": "⇥", "Space": "␣", "Backspace": "⌫", "Delete": "⌦",
+	"Left": "←", "Right": "→", "Up": "↑", "Down": "↓",
+	"Home": "↖", "End": "↘", "PageUp": "⇞", "PageDown": "⇟",
+}
+
+func shortcutHelpText() string {
+	if runtime.GOOS == "darwin" {
+		return T("Click a key to record. Use Command, Control or Option; Shift is optional. Esc cancels.")
+	}
+	return T("Click a key to record. Use Ctrl or Alt; Shift is optional. Esc cancels.")
+}
+
+// shortcutDisplay 只改变展示；存储始终是 accelerator 文本。
+func shortcutDisplay(text string) string {
+	if runtime.GOOS != "darwin" || text == "" {
+		return text
+	}
+	parts := strings.Split(text, "+")
+	for index, part := range parts {
+		if symbol, ok := shortcutSymbols[part]; ok {
+			parts[index] = symbol
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// shortcutInputKey macOS 按物理位置登记，布局字符可能和 ANSI keycode 对不上。
+func shortcutInputKey(ev ui.InputEvent) ui.Key {
+	if runtime.GOOS == "darwin" && ev.PhysicalKey != ui.KeyUnknown {
+		return ev.PhysicalKey
+	}
+	if ev.Key != ui.KeyUnknown {
+		return ev.Key
+	}
+	return ev.PhysicalKey
 }
 
 func validateShortcuts(cfg shortcutConfig) (shortcutConfig, error) {
