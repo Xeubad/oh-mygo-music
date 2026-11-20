@@ -461,7 +461,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 
 	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) { a.sourceSettings(c, row, block, p) })
 	if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && a.globalShortcuts != nil {
-		add("shortcuts", T("Shortcuts"), iconLaptop, func(row settingsRow, block settingsBlock) {
+		add("shortcuts", T("Shortcuts"), iconKeyboard, func(row settingsRow, block settingsBlock) {
 			a.shortcutSettings(c, p, row, block)
 		})
 	}
