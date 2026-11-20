@@ -190,15 +190,29 @@ func (a *app) shareClipControls(c *ui.Context, draft *shareDraft, start, end tim
 		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
 			ui.Text(c, fmt.Sprintf("%s %s – %s", T("Clip Range:"), shareClipTime(start), shareClipTime(end))).FontSize(12).TextColor(a.pal.muted)
 			ui.Spacer(c)
-			if draft.clipPreviewLoading || draft.clipPreviewActive {
+			if draft.clipPreviewLoading {
 				ui.Button(c.Key("stop-clip-preview"), T("Stop Preview")).OnClick(func() {
-					if draft.clipPreviewLoading {
-						a.stopSharePreview(draft)
-					} else {
+					a.stopSharePreview(draft)
+				})
+			} else if draft.clipPreview != nil {
+				toggleLabel := T("Play Preview")
+				if draft.clipPreviewActive && draft.clipPreview.Playing() {
+					toggleLabel = T("Pause Preview")
+				}
+				ui.Button(c.Key("toggle-clip-preview"), toggleLabel).OnClick(func() {
+					if draft.clipPreview.Playing() {
 						draft.clipPreview.Pause()
-						draft.clipPreviewActive, draft.clipHead = false, start
-						draft.clipPreview.Seek(start)
+						draft.clipPreviewActive = false
+						draft.clipHead = draft.clipPreview.Position()
+						return
 					}
+					a.playSharePreview(draft)
+				})
+				ui.Button(c.Key("stop-clip-preview"), T("Stop Preview")).OnClick(func() {
+					draft.clipPreview.Pause()
+					draft.clipPreviewActive = false
+					draft.clipHead = start
+					draft.clipPreview.Seek(start)
 				})
 			} else {
 				ui.Button(c.Key("preview-clip"), T("Preview Clip")).OnClick(func() { a.previewShareClip(draft) })
@@ -230,7 +244,8 @@ func (a *app) shareClipControls(c *ui.Context, draft *shareDraft, start, end tim
 			}
 		})
 		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
-			ui.Text(c, T("Preview Playhead")).FontSize(12).TextColor(a.pal.muted)
+			ui.Text(c, fmt.Sprintf("%s %s / %s", T("Preview Playhead"), shareClipTime(secs(head)), shareClipTime(end))).
+				FontSize(12).TextColor(a.pal.muted)
 			ui.Slider(c.Key("clip-playhead"), &head, start.Seconds(), end.Seconds()).Grow(1).Label(T("Preview Playhead")).
 				OnChange(func() {
 					draft.clipHead = clipSliderTime(head)
@@ -238,7 +253,6 @@ func (a *app) shareClipControls(c *ui.Context, draft *shareDraft, start, end tim
 						draft.clipPreview.Seek(draft.clipHead)
 					}
 				})
-			ui.Text(c, shareClipTime(secs(head))).FontSize(12).TextColor(a.pal.muted)
 		})
 	})
 }

@@ -636,6 +636,8 @@ var zhCN = map[string]string{
 	"Preview Clip":                                                  "试听片段",
 	"Preview Playhead":                                              "试听位置",
 	"Preparing clip preview…":                                       "正在准备试听…",
+	"Play Preview":                                                  "播放试听",
+	"Pause Preview":                                                 "暂停试听",
 	"Stop Preview":                                                  "停止试听",
 	"Could not preview clip":                                        "片段试听失败，请重试",
 	"a minute ago":                                                  "1 分钟前",
