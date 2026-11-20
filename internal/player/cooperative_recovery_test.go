@@ -236,14 +236,22 @@ export function playbackPlan() {
  {id:"metadata",platform:"wy",trackID:"one",quality:"flac"},
  {id:"audio",platform:"tx",trackID:"one",quality:"flac"}]};
 }
-export function resolveCandidate({candidate}) { return {stream:{url:candidate.id==="metadata"?%q:%s}}; }
-`, server.URL, audioPath(t, "seek.flac")))
+export function resolveCandidate({candidate}) {
+ // 后备只确认同轮继续；真实音频开播另有集成覆盖，不能要求其在 100ms 内完成解码。
+ if (candidate.id === "audio") throw new Error("next candidate reached");
+ return {stream:{url:%q}};
+}
+`, server.URL))
 	p, posts := cooperativePlayer(src)
 	p.PlayTrack([]music.Track{{ID: "one", Source: "cooperative"}}, 0)
 	finishLoading(t, p, posts)
-	defer p.TogglePlay()
-	if !p.Ready() || !p.Playing() || p.Err() != "" || p.Stream().Platform != "tx" {
-		t.Fatalf("未解码音频的候选被当成首次开播成功：stream=%+v error=%q", p.Stream(), p.Err())
+	defer func() {
+		if p.Playing() || p.Loading() {
+			p.TogglePlay()
+		}
+	}()
+	if p.Ready() || p.Playing() || p.Stream() != nil || p.Err() != "next candidate reached" || p.Current().ID != "one" {
+		t.Fatalf("未解码音频被接受或首次候选截止后未继续：stream=%+v current=%+v error=%q", p.Stream(), p.Current(), p.Err())
 	}
 	select {
 	case <-canceled:

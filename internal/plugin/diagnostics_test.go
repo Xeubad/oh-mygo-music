@@ -39,6 +39,44 @@ export function resolveCandidate() {
 	}
 }
 
+// 新增或替换订阅链接即使被脚本拒绝，也必须在执行前保护原文，不能依赖合法 URL 的通用遮蔽。
+func TestSourceLinkDiagnosticsProtectedBeforeScript(t *testing.T) {
+	for _, action := range []string{"addSource", "replaceSource"} {
+		t.Run(action, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previous) })
+			p := load(t, plain, `
+let previous;
+export function aggregate({input}) {
+ previous = input.url;
+ console.error("source link rejected", input.url);
+ throw Object.assign(new Error("invalid source link: " + input.url), {code:"unavailable"});
+}
+export function suggest() { throw new Error("previous source link: " + previous); }
+`)
+			const secret = "synthetic-invalid-source-link-with-credential"
+			_, err := p.Aggregate(action, map[string]any{"id": "source", "url": secret})
+			if !errors.Is(err, music.ErrUnavailable) {
+				t.Fatal("链接脱敏丢失原错误分类")
+			}
+			_, later := p.Suggest("check")
+			if later == nil {
+				t.Fatal("缺少异步诊断回归的错误")
+			}
+			for _, output := range []string{err.Error(), later.Error(), logs.String()} {
+				if strings.Contains(output, secret) {
+					t.Fatal("脚本拒绝链接后的异常或日志泄露了输入原文")
+				}
+			}
+			if !strings.Contains(err.Error(), "invalid source link") || !strings.Contains(logs.String(), "source link rejected") {
+				t.Fatal("链接诊断脱敏丢失安全上下文")
+			}
+		})
+	}
+}
+
 // 顶层初始化失败不经过导出函数的异常回调，启动错误也不能暴露播放地址。
 func TestPlaybackDiagnosticsRedactStartupFailure(t *testing.T) {
 	p := load(t, plain, `

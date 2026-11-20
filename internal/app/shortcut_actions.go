@@ -12,11 +12,11 @@ import (
 
 func (a *app) initGlobalShortcuts() {
 	var registrar shortcutRegistrar
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		registrar = mygo.GlobalShortcut
 	}
 	a.globalShortcuts = newShortcutManager(completeShortcuts(a.settings.Shortcuts), registrar, a.globalShortcutAction)
-	if runtime.GOOS == "windows" {
+	if registrar != nil {
 		a.globalShortcuts.retry()
 	}
 }

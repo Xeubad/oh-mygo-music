@@ -11,7 +11,6 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/audio"
 
-	"mygo-music/internal/automix"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
@@ -44,10 +43,6 @@ type Player struct {
 	Normalize func() bool
 	// Transitions 在开始下一次过渡时读取；当前过渡持有自己的参数快照。
 	Transitions func() TransitionSettings
-	// AutoMixAdvisor 是可选增强；没有配置或请求失败时仍采用本机计算的候选。
-	AutoMixAdvisor func() automix.Planner
-	// AutoMixEngine 接收同一份本机解码音源，提前完成逐拍分轨渲染与质量检查。
-	AutoMixEngine automix.AdaptiveRenderer
 	// Cache keeps the songs played, if set.
 	Cache *Cache
 	// Changed, if set, hears that what plays, where it is or whether it
@@ -122,9 +117,6 @@ type Player struct {
 	transitionOffset   time.Duration
 	transitionID       uint64
 	transitionDone     chan struct{}
-	autoMixStatus      string
-	autoMixCloudCancel context.CancelFunc
-	autoMixCloudEpoch  uint64
 }
 
 func New(post func(func())) *Player {
@@ -207,7 +199,8 @@ func (p *Player) ended() {
 		preparation := p.transitionNext
 		for position, index := range p.order {
 			if index == preparation.index {
-				p.loadPlayback(position, len(preparation.failed), forward, true, 0, &playbackAttempt{dir: forward, skipped: len(preparation.failed), failed: preparation.failed})
+				playback := &playbackAttempt{dir: forward, skipped: len(preparation.failed), failed: preparation.failed}
+				p.loadPlayback(position, len(preparation.failed), forward, true, 0, playback)
 				return
 			}
 		}
@@ -240,7 +233,7 @@ func (p *Player) ended() {
 		p.sync()
 		return
 	}
-	p.Next()
+	p.next()
 }
 
 // PlayQueue replaces the queue with tracks and plays the one at start, or the
@@ -496,6 +489,10 @@ func (p *Player) PlayOrder() ([]int, int) { return p.order, p.at }
 
 func (p *Player) Next() {
 	p.commitTransitions()
+	p.next()
+}
+
+func (p *Player) next() {
 	if len(p.order) == 0 {
 		return
 	}
@@ -508,7 +505,7 @@ func (p *Player) Next() {
 		}
 		at = 0
 	}
-	p.load(at)
+	p.loadSkipping(at, 0, forward, true, 0)
 }
 
 // Prev plays the track before this one, however far this one has played:
@@ -822,7 +819,6 @@ func (p *Player) Levels() ([Bands]float32, bool) {
 }
 
 func (p *Player) stop() {
-	p.CancelAutoMixEnhancement()
 	// 停止不需要重建未听到的缓冲，直接关闭输出先唤醒任何等待网络的解码。
 	if p.transition != nil {
 		p.transition.Close()
@@ -986,7 +982,7 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 					err      error
 				}
 				for {
-					if settings := p.transitionSettings(); (settings.AutoMix || settings.Gapless || settings.Crossfade) && !(settings.AutoMix && p.AutoMixEngine != nil) {
+					if p.transitionSettings().Crossfade {
 						var err error
 						s, err = trimSilenceStream(s)
 						if err != nil {
@@ -1045,7 +1041,7 @@ func (p *Player) loadPlayback(at, skipped, dir int, play bool, from time.Duratio
 		} else {
 			info, s, err = p.open(src, t, quality, pre)
 			settings := p.transitionSettings()
-			if err == nil && p.Transitions != nil && (settings.AutoMix || settings.Gapless || settings.Crossfade) && !(settings.AutoMix && p.AutoMixEngine != nil) {
+			if err == nil && p.Transitions != nil && settings.Crossfade {
 				s, err = trimSilenceStream(s)
 			}
 			if err == nil && p.Transitions != nil {
@@ -1104,9 +1100,6 @@ func (p *Player) startLoaded(ctx context.Context, gen int, s stream, info *music
 			positioned.origin = frame
 		}
 		buffer := newTransitionBuffer(positioned)
-		if p.transitionSettings().AutoMix {
-			buffer = newAnalyzedTransitionBuffer(positioned, false)
-		}
 		p.transition = newTransitionOutput(buffer)
 		p.transitionID, p.transitionStart = 0, 0
 		p.transitionOffset = max(from, trimOffset)
@@ -1305,7 +1298,8 @@ func (p *Player) loadFailed(source string, err error, skipped, dir int) {
 		for step := 1; step < len(p.order); step++ {
 			next := (p.at + dir*step + len(p.order)) % len(p.order)
 			if !failed[p.order[next]] {
-				p.loadPlayback(next, skipped+1, dir, p.playing, 0, &playbackAttempt{dir: dir, skipped: skipped + 1, failed: failed})
+				attempt := &playbackAttempt{dir: dir, skipped: skipped + 1, failed: failed}
+				p.loadPlayback(next, skipped+1, dir, p.playing, 0, attempt)
 				return
 			}
 		}

@@ -43,7 +43,15 @@ func aggregateApp(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) 
 	t.Cleanup(func() {
 		until(t, post, func() bool {
 			edit, view := a.aggregateEdits[a.library], a.aggregateViews[a.library]
-			return (edit == nil || !edit.busy) && (view == nil || !view.busy && !view.loadingLists) && !a.pl.Loading()
+			// 设置页还会异步查询账号，必须等回执落地，避免 Close 后被迟到调用重启。
+			if edit != nil {
+				for _, account := range edit.accounts {
+					if account.busy {
+						return false
+					}
+				}
+			}
+			return !a.library.accountBusy && (edit == nil || !edit.busy) && (view == nil || !view.busy && !view.loadingLists) && !a.pl.Loading()
 		})
 		if a.pl.Playing() {
 			a.pl.TogglePlay()
@@ -51,6 +59,54 @@ func aggregateApp(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) 
 	})
 	tt := ui.NewTester(func(c *ui.Context) { a.pluginSettings(c, a.library, paletteFor(c.Theme())) }, 760, 1200)
 	return a, src, tt, post
+}
+
+// 设置页启动的账号查询必须在关闭插件前收齐，否则迟到调用可能重建已删除的临时目录。
+func TestAggregateCleanupWaitsForAccount(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var a *app
+	var post chan func()
+	released := false
+	t.Run("pending-account", func(t *testing.T) {
+		a, _, _, post = aggregateApp(t)
+		// NewTester 的首帧可能已经查询账号，先收齐它，再控制下一次查询。
+		until(t, post, func() bool {
+			edit := a.aggregateEdits[a.library]
+			return !a.library.accountBusy && (edit == nil || !edit.busy)
+		})
+		src := newFakeSource("pending-aggregate-account")
+		src.account = func() (*music.Account, error) {
+			close(entered)
+			<-release
+			return nil, nil
+		}
+		a.library.src = src
+		a.library.caps = probeCaps(src)
+		a.loadAccount(a.library)
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("账号查询未进入受控等待")
+		}
+		// 只允许 helper 的清理循环处理该回执；旧条件会直接退出并跳过它。
+		post <- func() {
+			if !released {
+				released = true
+				close(release)
+			}
+		}
+	})
+	if a == nil {
+		t.Skip("聚合插件夹具不可用")
+	}
+	if !released {
+		t.Error("插件关闭前没有等待设置页账号查询")
+		released = true
+		close(release)
+	}
+	if a != nil {
+		until(t, post, func() bool { return !a.library.accountBusy })
+	}
 }
 
 func aggregateFixture(t *testing.T) (*app, *plugin.Plugin, *ui.Tester, chan func()) {
@@ -511,7 +567,7 @@ func TestAggregateSettingsCanReorderPlatforms(t *testing.T) {
 	edit := a.aggregateEdits[a.library]
 	until(t, post, func() bool { return edit != nil && edit.loaded })
 	tt.Frame()
-	if err := tt.Click("Move Up tx"); err != nil {
+	if err := tt.Click("Move Up QQ Music"); err != nil {
 		t.Fatal(err)
 	}
 	if err := tt.Click("Save Aggregate Settings"); err != nil {
@@ -671,8 +727,8 @@ func aggregateCloudRefreshTest(t *testing.T, partial bool) {
 	}
 }
 
-// 安全保存后，重载设置页只显示凭据状态，不回填可复制的秘密。
-func TestAggregateSettingsNeverPrefillSavedResolverKey(t *testing.T) {
+// 新插件通过正式设置入口展示音源管理，不再回填或展示旧密钥输入。
+func TestAggregateSettingsCustomSourcesReplaceLegacyKeys(t *testing.T) {
 	a, src, tt, post := aggregateApp(t)
 	const secret = "synthetic-key-that-must-not-appear"
 	// 测试只用当前插件 VM 中的临时值，不向开发机的系统凭据库写入。
@@ -683,12 +739,24 @@ func TestAggregateSettingsNeverPrefillSavedResolverKey(t *testing.T) {
 	edit := a.aggregateEdits[a.library]
 	until(t, post, func() bool { return edit != nil && edit.loaded })
 	tt.Frame()
-	n, ok := tt.AccessByRole(ui.RoleTextField, "Resolver Key")
-	if !ok {
-		t.Fatal("缺少解析密钥输入")
+	if err := tt.Click("Add Source"); err != nil {
+		t.Fatal(err)
 	}
-	if n.Value != "" || strings.Contains(n.Value, secret) {
-		t.Fatalf("设置页回填了系统凭据: %q", n.Value)
+	tt.Frame()
+	n, ok := tt.AccessByRole(ui.RoleTextField, "Source Link")
+	if !ok || !n.Password || n.Value != "" {
+		t.Fatal("新插件未展示空白的密码链接输入")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "Confirm Add Source"); !ok {
+		t.Fatal("展开后缺少确认添加操作")
+	}
+	for _, label := range []string{"Resolver Key", "NetEase Resolver Key", "QQ Resolver Key", "Qishui Resolver Key"} {
+		if _, ok := tt.AccessByRole(ui.RoleTextField, label); ok {
+			t.Fatalf("新插件仍暴露旧密钥输入：%s", label)
+		}
+	}
+	if strings.Contains(strings.Join(tt.Texts(), " "), secret) {
+		t.Fatal("设置页面泄露旧密钥")
 	}
 	raw, err := src.Aggregate("status", nil)
 	if err != nil {

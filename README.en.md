@@ -41,10 +41,12 @@ These are some of the experiences available today. See the [release notes](https
 
 **[Get the latest release on GitHub →](https://github.com/zxbdzh/oh-mygo-music/releases/latest)**
 
-Installers and archives are currently available for **Windows x64 and ARM64**. The latest release page is the source of truth for available platforms, architectures, and versions.
+Current releases include **macOS DMGs for Apple Silicon and Intel**, alongside **Windows x64 and ARM64** installers. macOS packages are not notarized by Apple, so the first launch may require confirmation in System Settings. Check the latest release page for available platforms, architectures, and versions.
 
 | Your device | Choose on the release page |
 | --- | --- |
+| Apple Silicon Mac | A `.dmg` containing `arm64` |
+| Intel Mac | A `.dmg` containing `amd64` |
 | Most Intel / AMD Windows PCs | An `.exe` installer containing `amd64`, or the matching `.tar.gz` archive |
 | Windows on ARM | An `.exe` installer containing `arm64`, or the matching `.tar.gz` archive |
 
@@ -52,7 +54,7 @@ If you are switching from the original project, install Oh MyGo Music manually f
 
 ## Quick start
 
-1. **Install the player.** Pick the Windows installer for your architecture above.
+1. **Install the player.** Pick the installer for your device above.
 2. **Add music.** Go to **Settings → Plugins → Local Files → Add Folder…**, choose your music folder, let it scan, and return to the main view to play a track. For another music source, install and enable its plugin in **Settings → Plugins**, complete any sign-in or configuration, then switch to that source in the main view.
 3. **Make playback easier.** Enable global shortcuts in **Settings → Shortcuts**, then customize the bindings to suit you.
 

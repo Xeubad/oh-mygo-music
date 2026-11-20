@@ -51,7 +51,6 @@ func (a *app) openSettings() {
 	})
 	a.settingsWin.OnClosed(func() {
 		a.endShortcutRecording()
-		a.closeAIEditor()
 		a.shortcutEdit.confirm = false
 		a.settingsWin = nil
 		// Its sign-in dialog goes with it; a sign-in on its way still counts.
@@ -296,9 +295,6 @@ func (a *app) settingsNavItem(c *ui.Context, p palette, sec settingsSection, sel
 	})
 	if b.Clicked() {
 		a.endShortcutRecording()
-		if sec.id != "ai" {
-			a.cancelAIProbe()
-		}
 		a.shortcutEdit.confirm = false
 		a.settingsPage, a.settingsQuery = sec.id, ""
 	}
@@ -369,7 +365,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	add := func(id, title string, icon *ui.SVG, build func(row settingsRow, block settingsBlock)) {
 		group := 0
 		switch id {
-		case "plugins", "shares", "podcasts", "ai":
+		case "plugins", "shares", "podcasts":
 			group = 1
 		case "cache", "experiments", "updates":
 			group = 2
@@ -464,7 +460,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	})
 
 	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) { a.sourceSettings(c, row, block, p) })
-	if runtime.GOOS == "windows" && a.globalShortcuts != nil {
+	if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && a.globalShortcuts != nil {
 		add("shortcuts", T("Shortcuts"), iconLaptop, func(row settingsRow, block settingsBlock) {
 			a.shortcutSettings(c, p, row, block)
 		})
@@ -473,10 +469,6 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	add("shares", T("Online Sharing"), iconLink, func(row settingsRow, block settingsBlock) {
 		a.onlineShareSettings(c, p, row, block)
 	})
-	add("ai", T("AI and Models"), iconAI, func(row settingsRow, block settingsBlock) {
-		a.aiSettings(c, row, block)
-	})
-
 	// Only on macOS, the one with a notch player.
 	if a.notch != nil {
 		add("notch", T("Notch Player"), iconLaptop, func(row settingsRow, block settingsBlock) {
@@ -731,7 +723,7 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 			})
 			a.pluginUpdateButton(c, lib)
 			switch {
-			case !enabled:
+			case !enabled || a.aggregateHasPlatformAccounts(lib):
 			case lib.account == nil && lib.accountUnknown():
 				// A source not yet used hasn't said who's signed in: asked now, its
 				// row offers no sign-in to someone who already is.
@@ -755,6 +747,9 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 			a.pluginPermissions(c.Key("permissions"), lib, g, p)
 		}
 		for _, st := range info.Settings {
+			if edit := a.aggregateEdits[lib]; edit != nil && edit.sources != nil && (st.Key == "catalogPlatform" || len(edit.accountPlatforms) > 0 && st.Key == "accountPlatform") {
+				continue
+			}
 			a.sourceSetting(c.Key(st.Key), lib, st, p)
 		}
 		a.aggregateSettings(c.Key("aggregate"), lib, p)
