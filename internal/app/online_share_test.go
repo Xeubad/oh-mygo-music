@@ -117,7 +117,7 @@ func TestShareClientProductionContract(t *testing.T) {
 		}}
 		if mode == "clip" {
 			metadata.SelectedLineIndexes = []int{0}
-			metadata.ClipEndMs = 3000
+			metadata.ClipStartMs, metadata.ClipEndMs = 425, 2125
 		}
 		key, err := newShareIdempotencyKey()
 		if err != nil {
@@ -151,13 +151,18 @@ func TestShareClientProductionContract(t *testing.T) {
 			t.Fatal(err)
 		}
 		var published struct {
-			Lyrics []shareLyricLine `json:"lyrics"`
+			DurationMs int64            `json:"durationMs"`
+			Lyrics     []shareLyricLine `json:"lyrics"`
 		}
 		err = json.NewDecoder(response.Body).Decode(&published)
 		response.Body.Close()
 		if err != nil || len(published.Lyrics) == 0 || len(published.Lyrics[0].Words) != 2 ||
-			published.Lyrics[0].Words[1].StartMs != 1000 {
+			published.Lyrics[0].Words[1].StartMs != 1000-metadata.ClipStartMs {
 			t.Fatalf("%s production word timing: %+v, error=%v", mode, published, err)
+		}
+		wantDuration := metadata.ClipEndMs - metadata.ClipStartMs
+		if mode == "clip" && (published.DurationMs < wantDuration-100 || published.DurationMs > wantDuration+100) {
+			t.Fatalf("published clip duration %d ms, want about %d ms", published.DurationMs, wantDuration)
 		}
 	}
 }

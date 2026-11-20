@@ -12,11 +12,11 @@ import (
 
 func (a *app) initGlobalShortcuts() {
 	var registrar shortcutRegistrar
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		registrar = mygo.GlobalShortcut
 	}
 	a.globalShortcuts = newShortcutManager(completeShortcuts(a.settings.Shortcuts), registrar, a.globalShortcutAction)
-	if runtime.GOOS == "windows" {
+	if registrar != nil {
 		a.globalShortcuts.retry()
 	}
 }
@@ -70,6 +70,9 @@ func (a *app) setPlayerVolume(value float64) {
 	}
 	a.volume = value
 	a.pl.SetVolume(value)
+	if draft := a.sharing; draft != nil && draft.clipPreview != nil {
+		draft.clipPreview.SetVolume(value, a.settings.Normalize)
+	}
 	a.settings.Volume, a.settings.MutedFrom = a.volume, a.mutedFrom
 }
 

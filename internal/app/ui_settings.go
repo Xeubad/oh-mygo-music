@@ -460,7 +460,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	})
 
 	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) { a.sourceSettings(c, row, block, p) })
-	if runtime.GOOS == "windows" && a.globalShortcuts != nil {
+	if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && a.globalShortcuts != nil {
 		add("shortcuts", T("Shortcuts"), iconLaptop, func(row settingsRow, block settingsBlock) {
 			a.shortcutSettings(c, p, row, block)
 		})
@@ -508,7 +508,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 		})
 		row(T("Even Out Loudness"), T("Adjust each song's volume by what its plugin measured of it, for them to sound as loud as each other"), func() {
 			if ui.Switch(c.Key("normalize"), &s.Normalize).Label(T("Even Out Loudness")).Changed() {
-				a.pl.SetVolume(a.volume)
+				a.setPlayerVolume(a.volume)
 				a.changed()
 			}
 		})

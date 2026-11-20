@@ -13,8 +13,8 @@ import (
 
 func shortcutSettingsTester(t *testing.T) (*app, *fakeShortcutRegistrar, *ui.Tester) {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		t.Skip("the first shortcut settings page is Windows only")
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("global shortcuts are implemented on Windows and macOS")
 	}
 	a := newTestApp()
 	registrar := newFakeShortcutRegistrar()

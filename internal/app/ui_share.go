@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -54,21 +55,14 @@ func (a *app) shareDialog(c *ui.Context) {
 		})
 		a.shareControls(c, draft)
 		a.shareLinkControls(c, draft)
+		linesHeight := height - 310
 		if draft.onlineMode == "clip" {
-			if start, end, ok := shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable); ok {
-				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, fmt.Sprintf("%s %s – %s", T("Clip Range:"), shareClipTime(start), shareClipTime(end))).FontSize(12).TextColor(palette.muted)
-					if draft.clipPreview != nil || draft.clipPreviewLoading {
-						if ui.Button(c.Key("stop-clip-preview"), T("Stop Preview")).Clicked() {
-							a.stopSharePreview(draft)
-						}
-					} else if ui.Button(c.Key("preview-clip"), T("Preview Clip")).Disabled(draft.onlinePublishing).Clicked() {
-						a.previewShareClip(draft)
-					}
-				})
+			if start, end, ok := draft.clipRange(); ok {
+				a.shareClipControls(c, draft, start, end)
+				linesHeight -= 88
 			}
 		}
-		ui.Row(c).Height(max(180, min(470, height-310))).Gap(24).AlignItems(ui.Stretch).Children(func() {
+		ui.Row(c).Height(max(128, min(470, linesHeight))).Gap(24).AlignItems(ui.Stretch).Children(func() {
 			ui.Scroll(c.Key("share-lines")).Grow(1).Basis(0).MinWidth(0).Children(func() {
 				ui.Column(c).Gap(6).Children(func() {
 					switch {
@@ -96,6 +90,7 @@ func (a *app) shareDialog(c *ui.Context) {
 							})
 							if row.Clicked() {
 								a.stopSharePreview(draft)
+								draft.clipStart, draft.clipEnd, draft.clipHead = 0, 0, 0
 								if c.Modifiers()&ui.Shift != 0 && draft.hasSelectionAnchor {
 									for selected := min(draft.selectionAnchor, index); selected <= max(draft.selectionAnchor, index); selected++ {
 										draft.selected[selected] = true
@@ -179,6 +174,79 @@ func (a *app) shareDialog(c *ui.Context) {
 	}
 }
 
+func (a *app) shareClipControls(c *ui.Context, draft *shareDraft, start, end time.Duration) {
+	if draft.clipPreviewActive {
+		if draft.clipPreview.Playing() {
+			draft.clipHead = draft.clipPreview.Position()
+			c.After(50 * time.Millisecond)
+		} else {
+			draft.clipPreviewActive, draft.clipHead = false, end
+		}
+	}
+	duration := draft.track.Length()
+	low, high := start.Seconds(), end.Seconds()
+	head := min(max(draft.clipHead, start), end).Seconds()
+	ui.Column(c.Key("clip-timeline")).Gap(4).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
+			ui.Text(c, fmt.Sprintf("%s %s – %s", T("Clip Range:"), shareClipTime(start), shareClipTime(end))).FontSize(12).TextColor(a.pal.muted)
+			ui.Spacer(c)
+			if draft.clipPreviewLoading || draft.clipPreviewActive {
+				ui.Button(c.Key("stop-clip-preview"), T("Stop Preview")).OnClick(func() {
+					if draft.clipPreviewLoading {
+						a.stopSharePreview(draft)
+					} else {
+						draft.clipPreview.Pause()
+						draft.clipPreviewActive, draft.clipHead = false, start
+						draft.clipPreview.Seek(start)
+					}
+				})
+			} else {
+				ui.Button(c.Key("preview-clip"), T("Preview Clip")).OnClick(func() { a.previewShareClip(draft) })
+			}
+		})
+		ui.RangeSlider(c.Key("clip-range"), &low, &high, 0, duration.Seconds(), 0).
+			FillWidth().Label(T("Clip Range:")).OnChange(func() {
+			newStart, newEnd := clipSliderTime(low), clipSliderTime(high)
+			// 两端相遇时仍给被拖动的一端留出可试听的区间。
+			minLength := min(100*time.Millisecond, end-start)
+			if newStart != start {
+				newStart = min(newStart, newEnd-minLength)
+			} else {
+				newEnd = max(newEnd, newStart+minLength)
+			}
+			if newStart == start && newEnd == end {
+				return
+			}
+			draft.clipStart, draft.clipEnd = newStart, newEnd
+			if draft.clipHead < newStart || draft.clipHead >= newEnd {
+				draft.clipHead = newStart
+			}
+			if draft.clipPreview != nil {
+				draft.clipPreview.SetRange(newStart, newEnd, draft.clipHead)
+			}
+			draft.onlineRevision++
+			if draft.cardOnline {
+				a.requestShareRender()
+			}
+		})
+		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
+			ui.Text(c, T("Preview Playhead")).FontSize(12).TextColor(a.pal.muted)
+			ui.Slider(c.Key("clip-playhead"), &head, start.Seconds(), end.Seconds()).Grow(1).Label(T("Preview Playhead")).
+				OnChange(func() {
+					draft.clipHead = clipSliderTime(head)
+					if draft.clipPreview != nil {
+						draft.clipPreview.Seek(draft.clipHead)
+					}
+				})
+			ui.Text(c, shareClipTime(secs(head))).FontSize(12).TextColor(a.pal.muted)
+		})
+	})
+}
+
+func clipSliderTime(seconds float64) time.Duration {
+	return time.Duration(math.Round(seconds*1000)) * time.Millisecond
+}
+
 func shareClipTime(at time.Duration) string {
 	seconds := int(at / time.Second)
 	return fmt.Sprintf("%d:%02d.%03d", seconds/60, seconds%60, at.Milliseconds()%1000)
@@ -200,6 +268,7 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 						}
 						draft.track = selectedTrack
 						a.stopSharePreview(draft)
+						draft.clipStart, draft.clipEnd, draft.clipHead = 0, 0, 0
 						draft.recordingSource = &selectedSource
 						draft.pendingAggregateTrackID = ""
 						draft.lines = nil

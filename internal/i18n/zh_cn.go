@@ -634,6 +634,8 @@ var zhCN = map[string]string{
 	"Cancel Upload":                                                 "取消上传",
 	"Online sharing cancelled":                                      "已取消在线分享",
 	"Preview Clip":                                                  "试听片段",
+	"Preview Playhead":                                              "试听位置",
+	"Preparing clip preview…":                                       "正在准备试听…",
 	"Stop Preview":                                                  "停止试听",
 	"Could not preview clip":                                        "片段试听失败，请重试",
 	"a minute ago":                                                  "1 分钟前",
