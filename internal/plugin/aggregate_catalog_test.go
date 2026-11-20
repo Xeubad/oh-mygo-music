@@ -227,11 +227,15 @@ func TestAggregateCatalogNeteasePlaylistPreservesPositions(t *testing.T) {
 // 聚合复用开源网易云搜索，保留分页和原始 ID 的可恢复命名空间，不虚构登录账号。
 func TestAggregateCatalogNeteaseSearchUsesUpstream(t *testing.T) {
 	previous := http.DefaultTransport
-	requests := 0
+	searchRequests, detailRequests, lyricRequests := 0, 0, 0
 	http.DefaultTransport = aggregateCatalogTransport(func(r *http.Request) (*http.Response, error) {
-		requests++
-		if r.URL.Hostname() != "interface.music.163.com" || r.URL.Path != "/eapi/search/get" || r.Method != http.MethodPost {
-			t.Errorf("搜索没有使用已核实的上游请求：%s %s", r.Method, r.URL.Hostname()+r.URL.Path)
+		if r.URL.Hostname() != "interface.music.163.com" || r.Method != http.MethodPost {
+			t.Errorf("搜索没有使用已核实的上游只读请求：%s %s", r.Method, r.URL.Hostname()+r.URL.Path)
+		}
+		for _, name := range []string{"MUSIC_U=", "MUSIC_A=", "NMTID="} {
+			if strings.Contains(r.Header.Get("Cookie"), name) {
+				t.Error("游客搜索或补图携带了登录会话")
+			}
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -241,7 +245,22 @@ func TestAggregateCatalogNeteaseSearchUsesUpstream(t *testing.T) {
 		if err != nil || form.Get("params") == "" {
 			t.Error("现成适配器未生成平台要求的请求参数")
 		}
-		response := `{"code":200,"result":{"songs":[{"id":347230,"name":"测试录音","ar":[{"id":11,"name":"测试歌手"}],"al":{"id":22,"name":"测试专辑"},"dt":185000}],"songCount":102}}`
+		var response string
+		switch r.URL.Path {
+		case "/eapi/search/get":
+			searchRequests++
+			response = `{"code":200,"result":{"songs":[{"id":347230,"name":"测试录音","ar":[{"id":11,"name":"测试歌手"}],"al":{"id":22,"name":"测试专辑"},"dt":185000}],"songCount":102}}`
+		case "/eapi/v3/song/detail":
+			detailRequests++
+			// 详情只补图片，不能覆盖搜索身份、展示信息或可播状态。
+			response = `{"code":200,"songs":[{"id":347230,"name":"详情不同名称","dt":999,"al":{"id":999,"name":"详情不同专辑","picUrl":"http://p1.music.126.net/fixture.jpg"},"privilege":{"st":-1}}]}`
+		case "/eapi/song/lyric/v1":
+			lyricRequests++
+			response = `{"code":200,"lrc":{"lyric":"[00:01.00]测试原词"},"tlyric":{"lyric":"[00:01.00]Translation"}}`
+		default:
+			t.Error("搜索产生了额外接口请求")
+			return nil, errors.New("unexpected_catalog_request")
+		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = previous })
@@ -250,12 +269,23 @@ func TestAggregateCatalogNeteaseSearchUsesUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("已复用的平台搜索不能调用：%v", err)
 	}
-	if requests != 1 || len(got.Tracks) != 1 || !got.More {
-		t.Fatalf("搜索分页或请求次数不符：requests=%d tracks=%d more=%v", requests, len(got.Tracks), got.More)
+	if searchRequests != 1 || detailRequests != 1 || len(got.Tracks) != 1 || !got.More {
+		t.Fatalf("搜索分页或补图请求不符：search=%d detail=%d tracks=%d more=%v", searchRequests, detailRequests, len(got.Tracks), got.More)
 	}
 	track := got.Tracks[0]
-	if track.ID != "catalog:wy:track:347230" || track.Source != p.Info().ID || track.Name != "测试录音" || track.Duration != 185000 || track.ArtistNames() != "测试歌手" {
-		t.Fatalf("聚合搜索丢失原始歌曲信息或身份：%+v", track)
+	if track.ID != "catalog:wy:track:347230" || track.Source != p.Info().ID || track.Name != "测试录音" || track.Duration != 185000 || track.ArtistNames() != "测试歌手" || track.Unavailable || track.Album.ID != "catalog:wy:album:22" || track.Album.Name != "测试专辑" {
+		t.Fatalf("补图改写了搜索原始歌曲信息或身份：%+v", track)
+	}
+	if track.Album.ImageURL != "https://p1.music.126.net/fixture.jpg" {
+		t.Fatal("搜索简表缺图时没有按原曲目补全封面")
+	}
+	// 同一公开曲目直接读取歌词，不依赖播放解析或账号会话。
+	if !p.Can("lyrics") {
+		t.Fatal("插件未声明正式歌词能力")
+	}
+	lyric, err := p.Lyrics(track.ID)
+	if err != nil || lyric == nil || lyric.LRC != "[00:01.00]测试原词" || lyricRequests != 1 {
+		t.Fatalf("公开曲目歌词未进入宿主：lyrics=%v error=%v requests=%d", lyric, err, lyricRequests)
 	}
 	account, err := p.Account()
 	if err != nil || account != nil {
