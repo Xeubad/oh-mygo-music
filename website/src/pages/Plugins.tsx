@@ -79,7 +79,7 @@ export function Plugins() {
 
         <p class="fine download-more">
           <Icon name="download" size={14} />
-          <LangLink to="/download">{t('Install MyGo Music first', '先安装 MyGo Music')}</LangLink>
+          <LangLink to="/download">{t('Install Oh MyGo Music first', '先安装 Oh MyGo Music')}</LangLink>
         </p>
       </section>
     </Layout>

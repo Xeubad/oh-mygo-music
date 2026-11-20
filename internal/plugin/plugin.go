@@ -148,7 +148,7 @@ type NeedsNewerApp struct {
 }
 
 func (e *NeedsNewerApp) Error() string {
-	return fmt.Sprintf("%s needs MyGo Music %s or later", e.Plugin, e.Version)
+	return fmt.Sprintf("%s needs Oh MyGo Music %s or later", e.Plugin, e.Version)
 }
 
 // Plugin is a music.Source in JavaScript. It starts on first use, and again on

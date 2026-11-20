@@ -372,11 +372,12 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 				a.saveLyricChoices()
 			}
 		})
-		available := false
-		for index, line := range draft.lines {
-			if draft.selected[index] && line.Translation != "" {
-				available = true
-			}
+		// 开关也控制未选中的歌词列表，因此按整首歌判断是否有译文。
+		available := hasTranslation(draft.lines)
+		toggleTranslation := func() {
+			a.settings.HideCardTranslation = !a.settings.HideCardTranslation
+			draft.onlineRevision++
+			a.saveLyricChoices()
 		}
 		translationLabel := "Translation On"
 		if a.settings.HideCardTranslation {
@@ -390,11 +391,13 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 			translation.Tooltip(T("No translation available"))
 		}
 		if translation.Clicked() {
-			a.settings.HideCardTranslation = !a.settings.HideCardTranslation
-			draft.onlineRevision++
-			a.saveLyricChoices()
+			toggleTranslation()
 		}
 		ui.Button(c.Key("card-language"), T("Lyrics Display")).Disabled(draft.onlinePublishing).Menu(func(menu *ui.Menu) {
+			if menu.Item(T("Show Translation")).Checked(!a.settings.HideCardTranslation).Disabled(!available).Chosen() {
+				toggleTranslation()
+			}
+			menu.Separator()
 			script := a.settings.LyricsScript
 			original := a.settings.ChineseLyrics[a.lyricKey(&draft.track)]
 			a.lyricScriptItems(menu, &draft.track)

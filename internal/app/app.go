@@ -344,6 +344,7 @@ func (a *app) closeSources() {
 
 // Run runs the app until it quits.
 func Run() error {
+	preserveLegacyAppData()
 	// Opening the app again shows the running one's window: Linux and
 	// Windows would start another, with a second tray icon. Asked before
 	// anything else, so the second one touches no data on its way out.
@@ -494,4 +495,22 @@ func Run() error {
 		a.openLink(link)
 	})
 	return mygo.App.Run()
+}
+
+// preserveLegacyAppData keeps the user's library and settings in the old
+// directory when the display name changes, so renaming the app does not look
+// like a fresh install.
+func preserveLegacyAppData() {
+	if root, err := mygo.App.Path(mygo.PathAppData); err == nil {
+		legacy := filepath.Join(root, "MyGo Music")
+		if _, err := os.Stat(legacy); err == nil {
+			mygo.App.SetPath(mygo.PathUserData, legacy)
+		}
+	}
+	if root, err := os.UserCacheDir(); err == nil {
+		legacy := filepath.Join(root, "MyGo Music")
+		if _, err := os.Stat(legacy); err == nil {
+			mygo.App.SetPath(mygo.PathCache, legacy)
+		}
+	}
 }
