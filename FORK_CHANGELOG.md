@@ -1,5 +1,13 @@
 # 更新日志
 
+## [0.0.11] - 2026-11-21
+
+- macOS 全局快捷键支持 Command、Control、Option 和 Shift 组合，录入与保存后可正常恢复。
+- macOS 快捷键显示改用系统符号，并按 Control、Option、Shift、Command 的顺序展示。
+- 修复 macOS 键盘布局与物理按键位置不一致时的快捷键录入问题。
+
+提供 Windows x64、ARM64 以及 macOS Apple 芯片、Intel 安装包。macOS 包未经 Apple 公证，首次打开可能需要在系统设置中确认。官方插件兼容基线保持为 `0.1.25`。
+
 ## [0.0.10] - 2026-11-21
 
 - 应用正式更名为 Oh MyGo Music，统一 Windows、macOS、托盘和网站使用的蓝青声波 O 图标。
