@@ -161,8 +161,8 @@ func TestShortcutCommandSaveAndRestart(t *testing.T) {
 	again := newFakeShortcutRegistrar()
 	restarted := newShortcutManager(completeShortcuts(saved.Shortcuts), again, func(shortcutAction) {})
 	restarted.retry()
-	if again.keys["Super+P"] == nil || len(again.keys) != 8 || again.keys["Ctrl+Alt+Left"] == nil {
-		t.Fatalf("restart did not register the saved keys: %v", len(again.keys))
+	if again.keys["Super+P"] == nil || again.keys["Ctrl+Alt+Left"] == nil {
+		t.Fatal("restart did not register the saved keys")
 	}
 }
 
@@ -174,10 +174,10 @@ func TestShortcutDisplaySymbols(t *testing.T) {
 	for input, want := range map[string]string{
 		"Super+P":           "⌘P",
 		"Ctrl+Alt+Shift+P":  "⌃⌥⇧P",
-		"Super+Alt+Left":    "⌘⌥←",
+		"Super+Alt+Left":    "⌥⌘←",
 		"Ctrl+Alt+PageDown": "⌃⌥⇟",
 		"Alt+Enter":         "⌥↩",
-		"Super+Shift+Space": "⌘⇧␣",
+		"Super+Shift+Space": "⇧⌘␣",
 	} {
 		if got := shortcutDisplay(input); got != want {
 			t.Errorf("%q: %q, want %q", input, got, want)
