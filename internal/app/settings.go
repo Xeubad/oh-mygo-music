@@ -119,23 +119,6 @@ func defaultSettings() settings {
 	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard", CrossfadeEnabled: true, CrossfadeDurationMs: 5000, PlaybackFadeEnabled: true, PauseFadeOutMs: 180, PlayFadeInMs: 260}
 }
 
-func (s *settings) UnmarshalJSON(data []byte) error {
-	type savedSettings settings
-	var stored struct {
-		*savedSettings
-		AutoMix bool `json:"autoMixEnabled"`
-	}
-	stored.savedSettings = (*savedSettings)(s)
-	if err := json.Unmarshal(data, &stored); err != nil {
-		return err
-	}
-	// 旧自动模式曾禁用手动淡化，移除后接续为交叉淡化，后续保存不再携带旧字段。
-	if stored.AutoMix {
-		s.CrossfadeEnabled = true
-	}
-	return nil
-}
-
 func (s settings) playbackTransitions() player.TransitionSettings {
 	crossfade, pause, play := s.CrossfadeDurationMs, s.PauseFadeOutMs, s.PlayFadeInMs
 	if crossfade < 1000 || crossfade > 12000 {
