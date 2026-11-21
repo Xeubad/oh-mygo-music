@@ -1,6 +1,7 @@
 package app
 
 import (
+	"log"
 	"os"
 	"runtime"
 	"slices"
@@ -81,6 +82,15 @@ func (a *app) changed() {
 
 // systemLanguages are the languages the system prefers; tests replace it.
 var systemLanguages = func() []string { return mygo.App.PreferredLanguages() }
+
+// 自启由系统持有状态，避免本地设置覆盖用户在系统设置里的选择。
+var (
+	openAtLogin = func() bool {
+		// 无头视图没有原生事件循环，应用就绪后才能同步读取系统状态。
+		return mygo.App.IsReady() && mygo.App.OpenAtLogin()
+	}
+	setOpenAtLogin = mygo.App.SetOpenAtLogin
+)
 
 // setLanguage speaks another language from now on: the views say it as they
 // redraw; the menus, and what the sources wrote out in it, are made anew.
@@ -437,10 +447,53 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				go retroBitmaps() // rendered before Now Playing shows them
 			}
 		})
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			settingsHeading(c, block, T("Desktop"), iconLaptop)
+			label := T("Launch at login")
+			startupEnabled := openAtLogin()
+			row(label, "", func() {
+				enabled := startupEnabled
+				ui.Switch(c.Key("open-at-login"), &enabled).Label(label).OnClick(func() {
+					err := setOpenAtLogin(enabled)
+					a.startupFailed = err != nil
+					if err != nil {
+						log.Printf("launch at login: %v", err)
+					}
+					a.redraw()
+				})
+			})
+			if a.startupFailed {
+				// 搜索结果按开关名称保留提示，且不会依赖系统错误的语言。
+				block(label, func() {
+					message := T("Could not change launch at login. Check Settings > Apps > Startup.")
+					if runtime.GOOS == "darwin" {
+						message = T("Could not change launch at login. Check System Settings > General > Login Items.")
+					}
+					ui.Text(c.Key("startup-error"), message).Role(ui.RoleAlert).FontSize(12).TextColor(ui.RGB(184, 54, 54)).Margin(8, 16, 8, 16)
+				})
+			}
+			row(T("Start in background at login"), T("Do not open the main window when the app starts at login"), func() {
+				ui.Switch(c.Key("open-at-login-background"), &s.LaunchAtLoginBackground).
+					Label(T("Start in background at login")).Disabled(!startupEnabled).OnClick(func() {
+						err := s.save()
+						a.startupBackgroundFailed = err != nil
+						if err != nil {
+							s.LaunchAtLoginBackground = !s.LaunchAtLoginBackground
+							log.Printf("save background startup setting: %v", err)
+						}
+						a.redraw()
+					})
+			})
+			if a.startupBackgroundFailed {
+				block(T("Start in background at login"), func() {
+					ui.Text(c.Key("startup-background-error"), T("Could not save background startup setting. Try again.")).
+						Role(ui.RoleAlert).FontSize(12).TextColor(ui.RGB(184, 54, 54)).Margin(8, 16, 8, 16)
+				})
+			}
+		}
 		// Only on macOS: elsewhere the icon is always in the notification
 		// area.
 		if runtime.GOOS == "darwin" {
-			settingsHeading(c, block, T("Desktop"), iconLaptop)
 			row(T("App Icon"), T("Shown in the menu bar, it opens the window again after you close it"), func() {
 				labels := make([]string, len(appIcons))
 				at := 0

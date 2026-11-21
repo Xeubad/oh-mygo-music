@@ -106,6 +106,9 @@ type settings struct {
 	// AppIcon is where the app's icon shows on macOS (appIcons); elsewhere
 	// it is always in the notification area.
 	AppIcon string `json:"appIcon"`
+	// LaunchAtLoginBackground keeps login launches in the tray until the
+	// listener asks to see the main window.
+	LaunchAtLoginBackground bool `json:"launchAtLoginBackground"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`
