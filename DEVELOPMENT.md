@@ -1,6 +1,6 @@
 # Development
 
-[返回项目首页 / Back to Oh MyGo Music](README.md) · [插件开发 / Plugin development](PLUGIN_DEVELOPMENT.md)
+[返回项目首页 / Back to MyGo Music by XEU](README.md) · [插件开发 / Plugin development](PLUGIN_DEVELOPMENT.md)
 
 Go 版本要求见 [go.mod](go.mod)。下方保留原 README 的构建与播客转写运行库维护说明；普通使用者请从[发行页](https://github.com/zxbdzh/oh-mygo-music/releases/latest)下载安装。
 

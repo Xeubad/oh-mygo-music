@@ -344,12 +344,18 @@ func (a *app) closeSources() {
 
 // Run runs the app until it quits.
 func Run() error {
-	// Opening the app again shows the running one's window: Linux and
-	// Windows would start another, with a second tray icon. Asked before
-	// anything else, so the second one touches no data on its way out.
+	// Look up the pre-rename lock before taking it, so launching the new app
+	// still focuses an older instance instead of starting a second player.
+	name := mygo.App.Name()
+	if legacy, ok := legacyLockName(name); ok {
+		mygo.App.SetName(legacy)
+	}
+	// The second instance exits before it changes paths or touches app data.
 	if !mygo.App.RequestSingleInstanceLock() {
 		return nil
 	}
+	mygo.App.SetName(name)
+	keepOldDataDirs()
 	a := &app{
 		signInOver:  new(atomic.Pointer[mygo.Window]),
 		settingText: map[string]*string{},

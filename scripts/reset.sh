@@ -12,7 +12,8 @@
 set -euo pipefail
 
 name="MyGo Music"
-id="dev.egoist.mygomusic"
+display_name="MyGo Music by XEU"
+id="dev.egoist.music"
 release=0 songs=0
 for arg in "$@"; do
 	case "$arg" in
@@ -30,6 +31,7 @@ for arg in "$@"; do
 done
 if [[ $release == 0 ]]; then
 	name+=" Dev"
+	display_name+=" Dev"
 	id+=".dev"
 fi
 
@@ -39,16 +41,17 @@ if [[ $(uname) != Darwin ]]; then
 fi
 data="$HOME/Library/Application Support/$name"
 cache="$HOME/Library/Caches/$name"
+process_pattern='/(MyGo Music|MyGo Music by XEU)( Dev)?\.app/Contents/MacOS/'
 
-if pgrep -f "/$name.app/Contents/MacOS/" >/dev/null; then
-	echo "quitting $name…"
+if pgrep -f "$process_pattern" >/dev/null; then
+	echo "quitting $display_name…"
 	osascript -e "tell application id \"$id\" to quit" >/dev/null 2>&1 || true
 	for _ in $(seq 50); do
-		pgrep -f "/$name.app/Contents/MacOS/" >/dev/null || break
+		pgrep -f "$process_pattern" >/dev/null || break
 		sleep 0.1
 	done
-	if pgrep -f "/$name.app/Contents/MacOS/" >/dev/null; then
-		echo "$name is still running: quit it and try again" >&2
+	if pgrep -f "$process_pattern" >/dev/null; then
+		echo "$display_name is still running: quit it and try again" >&2
 		exit 1
 	fi
 fi

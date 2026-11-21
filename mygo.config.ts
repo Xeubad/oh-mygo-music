@@ -2,7 +2,7 @@ import release from "./internal/buildinfo/release.json";
 
 // The development app opens links of its own scheme, leaving installed links alone.
 export default ({ command }: { command: string }) => ({
-  name: "MyGo Music",
+  name: "MyGo Music by XEU",
   identifier: "dev.egoist.music",
   slug: "mygo-music",
   version: release.version,
@@ -15,8 +15,13 @@ export default ({ command }: { command: string }) => ({
     deltas: 3,
   },
   macos: {
-    icon: "icon/AppIcon.icon",
     minimumSystemVersion: "13.0",
+  },
+  windows: {
+    displayName: "MyGo Music by XEU",
+    // Preserve existing installs and let the installer migrate the old EXE.
+    installDirName: "MyGo Music",
+    installerInclude: "scripts/installer.nsh",
   },
   linux: {
     comment: "A music player for your files and more",

@@ -1,6 +1,6 @@
 # Plugin development
 
-[返回项目首页 / Back to Oh MyGo Music](README.md)
+[返回项目首页 / Back to MyGo Music by XEU](README.md)
 
 本页保留原 README 的插件开发参考。接口对应当前源码；安装插件时，请同时核对[最新发行说明](https://github.com/zxbdzh/oh-mygo-music/releases/latest)中的兼容要求。
 

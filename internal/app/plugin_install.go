@@ -203,7 +203,7 @@ func installError(err error) string {
 		return T("There's no such public repository on GitHub")
 	}
 	if needs, ok := errors.AsType[*plugin.NeedsNewerApp](err); ok {
-		return Tf("%s needs MyGo Music %s or later. Update MyGo Music first.", needs.Plugin, needs.Version)
+		return Tf("%s needs MyGo Music by XEU %s or later. Update MyGo Music by XEU first.", needs.Plugin, needs.Version)
 	}
 	return err.Error()
 }

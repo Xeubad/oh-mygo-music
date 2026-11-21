@@ -37,7 +37,7 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 			delete(a.aggregateViews, lib)
 		}
 	}).Gap(10).Children(func() {
-		ui.Text(c, T("MyGo Music Aggregate")).FontSize(22).FontWeight(700)
+		ui.Text(c, T("MyGo Music by XEU Aggregate")).FontSize(22).FontWeight(700)
 		ui.Text(c, T("Choose the account platform in plugin settings before refreshing. NetEase uses its own resolver key; QQ uses the general key.")).FontSize(12).TextColor(p.muted)
 		ui.Row(c.Key("aggregate-controls")).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Select(c.Key("aggregate-kind"), &view.kind, []string{"All", "Liked", "Playlists"}).Label(T("Content")).Width(140).Disabled(view.busy)

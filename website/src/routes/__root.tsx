@@ -19,7 +19,7 @@ export const Route = createRootRoute({
       { name: 'twitter:card', content: 'summary' },
     ],
     links: [
-      { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
+      { rel: 'icon', href: '/icon.png', type: 'image/png' },
       { rel: 'apple-touch-icon', href: '/icon.png' },
       { rel: 'stylesheet', href: css },
     ],
@@ -36,9 +36,6 @@ function RootDocument(props: { children: JSX.Element }) {
         <script innerHTML={langScript} />
         <script innerHTML={themeScript} />
         <HydrationScript />
-        {import.meta.env.PROD && (
-          <script defer data-domain="music.egoist.dev" src="https://tt.egoist.dev/js/script.js" />
-        )}
       </head>
       <body>
         <HeadContent />

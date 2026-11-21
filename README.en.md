@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src=".github/assets/readme/banner-en.png" width="100%" alt="Oh MyGo Music: Press play. Feel more." />
+<img src=".github/assets/readme/banner-en.png" width="100%" alt="MyGo Music by XEU: Press play. Feel more." />
 
-# Oh MyGo Music
+# MyGo Music by XEU
 
 **Press play. Feel more.**
 
@@ -31,7 +31,7 @@ Start with the music you love. Make room for more.
 These are some of the experiences available today. See the [release notes](https://github.com/zxbdzh/oh-mygo-music/releases) and [changelog in Chinese](FORK_CHANGELOG.md) for more, and share your ideas in [Issues](https://github.com/zxbdzh/oh-mygo-music/issues).
 
 - **Give your music the stage.** Synchronized lyrics, lyric stages, a cover wall, and cover, vinyl, and cassette player styles.
-- **Keep listening while you work.** Windows global shortcuts for playback, track changes, volume, mute, liking a song, and showing or hiding the window. Record your own bindings and see shortcut conflicts.
+- **Keep listening while you work.** Windows and macOS global shortcuts for playback, track changes, volume, mute, liking a song, and showing or hiding the window. Record your own bindings and see shortcut conflicts.
 - **Keep your collection close.** Play local audio with tags, artwork, and `.lrc` lyrics. Browse tracks, albums, and artists, and manage playlists and liked songs.
 - **Make it your own.** Plugins add music sources, podcasts, stations, and pages. Install them from GitHub, a local folder, or a ZIP file.
 - **Take care of the listening details.** Audio caching, fades on pause and seek, loudness normalization, and session restore.
@@ -50,7 +50,7 @@ Current releases include **macOS DMGs for Apple Silicon and Intel**, alongside *
 | Most Intel / AMD Windows PCs | An `.exe` installer containing `amd64`, or the matching `.tar.gz` archive |
 | Windows on ARM | An `.exe` installer containing `arm64`, or the matching `.tar.gz` archive |
 
-If you are switching from the original project, install Oh MyGo Music manually first. Subsequent updates come from this repository.
+If you are switching from the original project, install MyGo Music by XEU manually first. Subsequent updates come from this repository.
 
 ## Quick start
 

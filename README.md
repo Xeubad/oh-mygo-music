@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src=".github/assets/readme/banner.png" width="100%" alt="Oh MyGo Music：让音乐，回到主角。" />
+<img src=".github/assets/readme/banner.png" width="100%" alt="MyGo Music by XEU：让音乐，回到主角。" />
 
-# Oh MyGo Music
+# MyGo Music by XEU
 
 **让音乐，回到主角。**
 
@@ -31,7 +31,7 @@
 这里展示当前版本的一部分体验，更多变化见[更新记录](FORK_CHANGELOG.md)和[发行说明](https://github.com/zxbdzh/oh-mygo-music/releases)。欢迎在 [Issues](https://github.com/zxbdzh/oh-mygo-music/issues) 分享你的使用感受与新想法。
 
 - **把听歌变成一种享受。** 同步歌词、歌词舞台、封面墙，以及封面、黑胶与磁带三种播放器样式。
-- **做其他事，也能随手控歌。** Windows 全局快捷键支持播放／暂停、前后切歌、音量、静音、收藏和窗口显隐，可录制、自定义，并提示冲突。
+- **做其他事，也能随手控歌。** Windows 与 macOS 全局快捷键支持播放／暂停、前后切歌、音量、静音、收藏和窗口显隐，可录制、自定义，并提示冲突。
 - **把熟悉的音乐收藏留在手边。** 播放本地音频，读取标签、封面与 `.lrc` 歌词，按歌曲、专辑、歌手浏览，也能管理歌单和收藏。
 - **按你的需要扩展。** 通过插件接入更多音乐来源、播客、电台与页面；支持从 GitHub、本地目录或 ZIP 安装。
 - **照顾每一次播放。** 音频缓存、暂停与跳转时的淡化、响度归一化，以及播放状态恢复。
@@ -50,7 +50,7 @@
 | 大多数 Intel / AMD Windows 电脑 | 名称含 `amd64` 的 `.exe` 安装包，或对应的 `.tar.gz` 压缩包 |
 | Windows ARM 设备 | 名称含 `arm64` 的 `.exe` 安装包，或对应的 `.tar.gz` 压缩包 |
 
-首次从原项目切换，请手动安装 Oh MyGo Music；后续更新从本仓库获取。
+首次从原项目切换，请先手动安装 MyGo Music by XEU；后续更新从本仓库获取。
 
 ## 快速开始
 

@@ -1,7 +1,7 @@
 import type { Lang } from './i18n'
 import type { Plugin } from './plugins'
 
-export const repo = 'https://github.com/egoist/mygo-music'
+export const repo = 'https://github.com/zxbdzh/oh-mygo-music'
 
 export type Asset = { name: string; size: number; browser_download_url: string }
 export type Release = { tag_name: string; published_at: string; assets: Asset[] }
@@ -16,10 +16,10 @@ export const builtPlugins = __PLUGINS__
 export const mygo = 'https://mygo.egoist.dev'
 
 export const site = {
-  name: 'MyGo Music',
+  name: 'MyGo Music by XEU',
   title: {
-    en: 'MyGo Music — a native music player for your files, and more',
-    zh: 'MyGo Music — 原生的桌面音乐播放器',
+    en: 'MyGo Music by XEU — a native music player for your files, and more',
+    zh: 'MyGo Music by XEU — 原生的桌面音乐播放器',
   } satisfies Record<Lang, string>,
   description: {
     en: 'A desktop music player written in Go with MyGo, no WebView. It plays your local files out of the box, with tags, covers and lyrics, and everything else comes from plugins.',

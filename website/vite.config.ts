@@ -12,7 +12,7 @@ const github = (path: string) =>
   fetch(`https://api.github.com${path}`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
 
 async function latestRelease() {
-  const res = await github('/repos/egoist/mygo-music/releases/latest')
+  const res = await github('/repos/zxbdzh/oh-mygo-music/releases/latest')
   if (!res.ok) throw new Error(`fetching the latest release: GitHub answered ${res.status}`)
   const r = await res.json()
   return {

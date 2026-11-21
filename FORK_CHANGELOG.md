@@ -45,7 +45,7 @@
 - 新增与 BetterLyrics 联动，可直接共享当前歌曲的来源歌词、译文和真实逐字时间。
 - 播放、暂停、拖动进度及切歌时同步歌词位置；改善歌词稍晚加载和重新连接后的显示。
 
-使用时请同时更新 BetterLyrics，并在 MyGo「设置 → 播放」开启「与 BetterLyrics 联动」，再在 BetterLyrics 的播放设置中启用 Oh MyGo Music 接入。此功能默认关闭，仅在本机共享播放信息。
+使用时请同时更新 BetterLyrics，并在 MyGo Music by XEU「设置 → 播放」开启「与 BetterLyrics 联动」，再在 BetterLyrics 的播放设置中启用 MyGo Music by XEU 接入。此功能默认关闭，仅在本机共享播放信息。
 
 提供 Windows x64 和 ARM64 安装包。已有音乐库、插件和设置继续保留，官方插件兼容基线保持为 `0.1.25`。
 
