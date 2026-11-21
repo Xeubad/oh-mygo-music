@@ -101,6 +101,7 @@ type app struct {
 	settingText    map[string]*string           // the settings of sources, as being typed
 	aggregateEdits map[*library]*aggregateEdit  // 来源各自持有联合设置草稿，凭据只在编辑期间暂存
 	aggregateViews map[*library]*aggregateView  // 仅页面筛选，不改变队列和来源快照
+	aggregateWrite aggregateWrite               // 云端写入确认与在途状态，不触碰播放队列
 	settingEdits   map[string]*settingEdit      // pending typed-setting saves, main thread only
 	settingSaves   map[*library]<-chan struct{} // source save order, main thread only
 	settingPending map[string]*settingWrite     // last queued value per source/key

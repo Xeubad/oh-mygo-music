@@ -80,6 +80,11 @@ type aggregateView struct {
 	nextPoll             time.Time
 	owner                aggregateSource
 	page                 route
+	// 云端写入能力与本地乐观喜欢状态都只属于当前浏览视图。
+	writeCapsLoaded  bool
+	loadingWriteCaps bool
+	writeCaps        map[string]map[string]bool // 平台 → 可执行操作
+	writeLiked       map[string]bool            // 原始平台曲目键 → 本地乐观状态
 }
 
 type aggregateEdit struct {

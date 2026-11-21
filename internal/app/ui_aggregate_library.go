@@ -30,6 +30,7 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 	}
 	view.owner, view.page = src, a.route
 	a.aggregateLibraryPoll(c, lib, src, view)
+	a.aggregateWriteLoadCapabilities(lib, src, view)
 	platforms, lists := aggregateFilterOptions(lib.home)
 	ui.Column(c.Key(view)).OnUnmount(func() {
 		// 页面消失后不再续订；旧请求即使稍后回执，也不能写入重新打开的视图。
@@ -54,6 +55,18 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 			if ui.Button(c.Key("reload-local-cache"), T("Reload Cached Data")).Disabled(view.busy).Clicked() {
 				a.aggregateLibraryReload(lib, src)
 			}
+			if accounts := aggregateWriteAccounts(view); len(accounts) > 0 {
+				button := ui.Button(c.Key("create-playlist"), T("Create Playlist")).Disabled(view.busy)
+				button.Menu(func(m *ui.Menu) {
+					for _, account := range accounts {
+						account := account
+						label := aggregatePlatformName(account.platform) + " · " + account.accountID
+						if m.Item(label).Chosen() {
+							a.aggregateWriteStartCreate(src, view, account)
+						}
+					}
+				})
+			}
 		})
 		if view.busy {
 			ui.Text(c, T("Updating aggregate data…")).FontSize(12).TextColor(p.muted)
@@ -71,6 +84,7 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 			ui.Text(c, T("Loading cached lists…")).FontSize(12).TextColor(p.muted)
 		}
 		for _, cached := range view.lists {
+			cached := cached
 			if cached.ListID != "liked" {
 				title := T("Include Cached List")
 				if cached.Selected {
@@ -78,6 +92,18 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 				}
 				if ui.Button(c.Key("cached-list-"+cached.Platform+cached.AccountID+cached.ListID), title+" "+cached.ListName).Disabled(view.busy || view.loadingLists).Clicked() {
 					a.aggregateLibrarySelectList(lib, src, view, cached, !cached.Selected)
+				}
+				operations := view.writeCaps[cached.Platform]
+				if operations["playlistRename"] || operations["playlistDelete"] {
+					button := ui.Button(c.Key("playlist-actions-"+cached.Platform+cached.AccountID+cached.ListID), T("Playlist Actions")+" "+cached.ListName).Disabled(view.busy)
+					button.Menu(func(m *ui.Menu) {
+						if operations["playlistRename"] && m.Item(T("Rename")).Chosen() {
+							a.aggregateWriteStartList(src, view, cached, "playlistRename")
+						}
+						if operations["playlistDelete"] && m.Item(T("Delete")).Chosen() {
+							a.aggregateWriteStartList(src, view, cached, "playlistDelete")
+						}
+					})
 				}
 			}
 			// 失败和刷新中不覆盖成功时间；喜欢列表也必须能看见自己的缓存新旧。
@@ -149,6 +175,7 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 							if source.TrackID == "" {
 								return
 							}
+							a.aggregateWriteButton(c, src, view, track, source)
 							selected := len(view.selected) == 1 && sameAggregateSource(view.selected[0], source)
 							if selected {
 								ui.Text(c, T("Selected as first track")).FontSize(11).TextColor(p.accent)
