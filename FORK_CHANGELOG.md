@@ -1,5 +1,12 @@
 # 更新日志
 
+## [0.0.12] - 2026-11-21
+
+- 发布 MyGo Music by XEU 自有版本，使用 Xeubad/oh-mygo-music 作为发行与自动更新仓库。
+- 同步上游快捷键与分享试听改进，保留 XEU 品牌和专用更新签名。
+
+提供 Windows x64、ARM64 以及 macOS Apple 芯片、Intel 安装包。macOS 包未经 Apple 公证，首次打开可能需要在系统设置中确认。
+
 ## [0.0.11] - 2026-11-21
 
 - macOS 全局快捷键支持 Command、Control、Option 和 Shift 组合，录入与保存后可正常恢复。
