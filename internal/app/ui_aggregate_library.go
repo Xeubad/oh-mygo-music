@@ -29,8 +29,12 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 		a.aggregateViews[lib] = view
 	}
 	view.owner, view.page = src, a.route
+	if view.writeLikedHome != lib.home {
+		a.aggregateWriteSyncLiked(view, lib.home)
+	}
 	a.aggregateLibraryPoll(c, lib, src, view)
 	a.aggregateWriteLoadCapabilities(lib, src, view)
+	a.aggregateWriteLoadGenerations(lib, src, view)
 	platforms, lists := aggregateFilterOptions(lib.home)
 	ui.Column(c.Key(view)).OnUnmount(func() {
 		// 页面消失后不再续订；旧请求即使稍后回执，也不能写入重新打开的视图。
@@ -80,6 +84,9 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 		if view.err != "" {
 			ui.Text(c, view.err).FontSize(12).TextColor(p.accent).LineHeight(1.4)
 		}
+		if view.writeGenerationErr != "" {
+			ui.Text(c, view.writeGenerationErr).FontSize(12).TextColor(p.accent).LineHeight(1.4)
+		}
 		if view.loadingLists {
 			ui.Text(c, T("Loading cached lists…")).FontSize(12).TextColor(p.muted)
 		}
@@ -94,7 +101,9 @@ func (a *app) aggregateLibrary(c *ui.Context, lib *library, p palette, _ bool) {
 					a.aggregateLibrarySelectList(lib, src, view, cached, !cached.Selected)
 				}
 				operations := view.writeCaps[cached.Platform]
-				if operations["playlistRename"] || operations["playlistDelete"] {
+				account := aggregateWriteAccount{platform: cached.Platform, accountID: cached.AccountID}
+				if aggregateWriteGenerationKnown(view, account) &&
+					(operations["playlistRename"] || operations["playlistDelete"]) {
 					button := ui.Button(c.Key("playlist-actions-"+cached.Platform+cached.AccountID+cached.ListID), T("Playlist Actions")+" "+cached.ListName).Disabled(view.busy)
 					button.Menu(func(m *ui.Menu) {
 						if operations["playlistRename"] && m.Item(T("Rename")).Chosen() {
@@ -488,6 +497,7 @@ func (a *app) aggregateLibraryReadRefresh(lib *library, src aggregateSource, vie
 			}
 			if loadLists || changed {
 				view.lists, view.listsLoaded = lists, true
+				aggregateWriteResetGenerations(view)
 			}
 			if changed {
 				// 只替换浏览快照；播放器已经冻结的队列、位置与播放状态都不触碰。
@@ -516,6 +526,7 @@ func (a *app) aggregateLibraryLoadLists(lib *library, src aggregateSource, view 
 				return
 			}
 			view.lists, view.listsLoaded = lists, true
+			aggregateWriteResetGenerations(view)
 		})
 	}()
 }
@@ -551,6 +562,7 @@ func (a *app) aggregateLibrarySelectList(lib *library, src aggregateSource, view
 				return
 			}
 			view.lists, view.listsLoaded, lib.home = lists, true, home
+			aggregateWriteResetGenerations(view)
 		})
 	}()
 }
@@ -599,6 +611,7 @@ func (a *app) aggregateLibraryFetch(lib *library, src aggregateSource, cloud boo
 				return
 			}
 			view.lists, view.listsLoaded, lib.home = lists, true, home
+			aggregateWriteResetGenerations(view)
 			if refreshErr != nil {
 				view.err = refreshErr.Error()
 			}

@@ -3,6 +3,8 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"mygo-music/internal/music"
+	"mygo-music/internal/plugin"
 )
 
 // aggregateWriteSource 只实现云端写入契约，让界面测试能观察真正发出的操作。
@@ -19,6 +22,8 @@ type aggregateWriteSource struct {
 	lists      []aggregateList
 	caps       map[string][]string
 	generation int64
+	platform   string
+	accountID  string
 	snapshot   map[string][]map[string]any
 	writes     chan map[string]any
 	writeReply func(map[string]any) (map[string]any, error)
@@ -34,28 +39,39 @@ func (s *aggregateWriteSource) Aggregate(action string, input map[string]any) (j
 		}
 		return json.Marshal(map[string]any{"version": 1, "platforms": platforms})
 	case "snapshotGeneration":
+		// 真实插件按平台和账号读取世代，测试替身也必须拒绝缺失或错配的身份。
+		platform, platformOK := input["platform"].(string)
+		accountID, accountOK := input["accountID"].(string)
+		if !platformOK || !accountOK || platform != s.platform || accountID != s.accountID {
+			return nil, errors.New("snapshotGeneration requires the target platform and account")
+		}
 		return json.Marshal(map[string]any{"generation": s.generation})
 	case "write":
 		s.writes <- input
+		var reply map[string]any
+		var err error
 		if s.writeReply != nil {
-			reply, err := s.writeReply(input)
+			reply, err = s.writeReply(input)
 			if err != nil {
 				return nil, err
 			}
-			return json.Marshal(reply)
+		} else {
+			reply = map[string]any{"version": 1, "ok": true, "code": "done", "message": "done", "platform": input["platform"], "operation": input["operation"]}
+			if listID, ok := input["listID"]; ok {
+				reply["listID"] = listID
+			}
+			if name, ok := input["name"]; ok {
+				reply["name"] = name
+			}
+			if source, ok := input["source"].(map[string]any); ok {
+				reply["trackID"] = source["trackID"]
+			}
+			if input["operation"] == "playlistCreate" {
+				reply["listID"], reply["name"] = "created-1", input["name"]
+			}
 		}
-		reply := map[string]any{"version": 1, "ok": true, "code": "done", "message": "done", "platform": input["platform"], "operation": input["operation"]}
-		if listID, ok := input["listID"]; ok {
-			reply["listID"] = listID
-		}
-		if name, ok := input["name"]; ok {
-			reply["name"] = name
-		}
-		if source, ok := input["source"].(map[string]any); ok {
-			reply["trackID"] = source["trackID"]
-		}
-		if input["operation"] == "playlistCreate" {
-			reply["listID"], reply["name"] = "created-1", input["name"]
+		if input["platform"] != s.platform || input["accountID"] != s.accountID || input["generation"] != s.generation {
+			reply = map[string]any{"version": 1, "ok": false, "code": "accountInvalid", "message": "account context expired"}
 		}
 		return json.Marshal(reply)
 	case "lists":
@@ -77,7 +93,7 @@ func aggregateWriteTrack(name string, source music.AggregateSource) music.Track 
 		AggregateSources: []music.AggregateSource{source}}
 }
 
-func aggregateWriteFixture(t *testing.T, platform string) (*app, *aggregateWriteSource, *ui.Tester, chan func()) {
+func aggregateWriteFixture(t *testing.T, platform string, configure ...func(*app, *aggregateWriteSource)) (*app, *aggregateWriteSource, *ui.Tester, chan func()) {
 	t.Helper()
 	a := newTestApp()
 	post := posts(a)
@@ -86,6 +102,8 @@ func aggregateWriteFixture(t *testing.T, platform string) (*app, *aggregateWrite
 	src := &aggregateWriteSource{
 		fakeSource: fake(a),
 		generation: 7,
+		platform:   platform,
+		accountID:  "acct-1",
 		writes:     make(chan map[string]any, 8),
 		lists: []aggregateList{
 			{Platform: platform, AccountID: "acct-1", ListID: "liked", ListName: "Liked", RefreshedAt: 1},
@@ -121,7 +139,14 @@ func aggregateWriteFixture(t *testing.T, platform string) (*app, *aggregateWrite
 	a.library.started = true
 	a.library.homeAt = time.Now()
 	a.route = route{page: pageHome, src: a.library.id}
+	for _, setup := range configure {
+		setup(a, src)
+	}
 	tt := ui.NewTester(func(c *ui.Context) {
+		if a.route.page != pageHome {
+			ui.Text(c, "Other page")
+			return
+		}
 		a.pal = paletteFor(c.Theme())
 		a.aggregateLibrary(c, a.library, a.pal, false)
 		a.aggregateWriteDialog(c)
@@ -135,7 +160,150 @@ func aggregateWriteReady(t *testing.T, a *app, tt *ui.Tester, post chan func()) 
 	view := a.aggregateViews[a.library]
 	until(t, post, func() bool { return view.listsLoaded && view.writeCapsLoaded && !view.loadingLists })
 	tt.Frame()
+	until(t, post, func() bool { return view.writeGenerationsLoaded && !view.loadingWriteGenerations })
+	tt.Frame()
 	return view
+}
+
+// 进入页面时同一原始曲目的喜欢来源必须覆盖先出现的歌单上下文。
+func TestAggregateCloudLikeStateLoadsFromExistingSources(t *testing.T) {
+	source := music.AggregateSource{Platform: "wy", AccountID: "acct-1", TrackID: "raw-01", ListID: "liked", ListName: "Liked"}
+	a, _, tt, post := aggregateWriteFixture(t, "wy", func(a *app, src *aggregateWriteSource) {
+		page := *a.library.home
+		page.Sections = append([]music.Section(nil), page.Sections...)
+		page.Sections[0].Tracks = append([]music.Track(nil), page.Sections[0].Tracks...)
+		page.Sections[0].Tracks[0].AggregateSources = append(page.Sections[0].Tracks[0].AggregateSources, source)
+		a.library.home, src.page = &page, &page
+	})
+	view := aggregateWriteReady(t, a, tt, post)
+	key := aggregateSourceKey(source)
+	if !view.writeLiked[key] {
+		t.Fatalf("聚合首页已有喜欢来源但视图状态未初始化：%+v", view.writeLiked)
+	}
+
+	if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Unlike"); err != nil {
+		t.Fatalf("已喜欢的歌曲没有提供取消喜欢：%v；菜单=%q", err, tt.Menu())
+	}
+	if a.aggregateWrite.operation != "unlike" {
+		t.Fatalf("现有喜欢状态被误判为未喜欢：%q", a.aggregateWrite.operation)
+	}
+}
+
+// 刷新和重新进入页面时，喜欢状态跟随新的聚合快照。
+func TestAggregateCloudLikeStateRefreshesAndReloadsOnReturn(t *testing.T) {
+	a, src, tt, post := aggregateWriteFixture(t, "wy")
+	view := aggregateWriteReady(t, a, tt, post)
+	oldHome := a.library.home
+	source := music.AggregateSource{Platform: "wy", AccountID: "acct-1", TrackID: "raw-01", ListID: "liked", ListName: "Liked"}
+	newHome := *src.page
+	newHome.Sections = append([]music.Section(nil), newHome.Sections...)
+	newHome.Sections[0].Tracks = append([]music.Track(nil), newHome.Sections[0].Tracks...)
+	newHome.Sections[0].Tracks[0].AggregateSources = append(newHome.Sections[0].Tracks[0].AggregateSources, source)
+	src.page = &newHome
+
+	if err := tt.Click("Reload Cached Data"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, post, func() bool { return !view.busy && a.library.home != oldHome })
+	tt.Frame()
+	key := aggregateSourceKey(source)
+	if !view.writeLiked[key] {
+		t.Fatal("刷新后的喜欢来源没有更新行操作状态")
+	}
+
+	a.route.page = pageSearch
+	tt.Frame()
+	a.route.page = pageHome
+	tt.Frame()
+	reopened := a.aggregateViews[a.library]
+	if reopened == view || !reopened.writeLiked[key] {
+		t.Fatalf("重新进入后没有从当前首页恢复喜欢状态：%+v", reopened)
+	}
+	until(t, post, func() bool { return reopened.listsLoaded && reopened.writeCapsLoaded })
+	tt.Frame()
+	until(t, post, func() bool { return reopened.writeGenerationsLoaded && !reopened.loadingWriteGenerations })
+	tt.Frame()
+	if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Unlike"); err != nil {
+		t.Fatalf("重新进入后仍显示未喜欢状态：%v；菜单=%q", err, tt.Menu())
+	}
+}
+
+// 确认框打开后账号切换、退出或重新登录时，旧确认仍绑定原账号世代。
+func TestAggregateCloudLikeConfirmationExpiresAfterAccountChange(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*aggregateWriteSource)
+	}{
+		{name: "account switched", change: func(src *aggregateWriteSource) { src.accountID = "acct-2" }},
+		{name: "logged out", change: func(src *aggregateWriteSource) { src.accountID = "" }},
+		{name: "logged in again", change: func(src *aggregateWriteSource) { src.generation = 8 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, src, tt, post := aggregateWriteFixture(t, "wy")
+			_ = aggregateWriteReady(t, a, tt, post)
+			if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.ChooseMenuItem("Like"); err != nil {
+				t.Fatal(err)
+			}
+			tt.Frame()
+			tc.change(src)
+
+			if err := tt.Click("Like"); err != nil {
+				t.Fatal(err)
+			}
+			input := wait(t, src.writes, "过期确认写入")
+			if input["platform"] != "wy" || input["accountID"] != "acct-1" || input["generation"] != int64(7) {
+				t.Fatalf("旧确认丢失了原账号身份或世代：%+v", input)
+			}
+			view := a.aggregateViews[a.library]
+			until(t, post, func() bool { return !a.aggregateWrite.busy })
+			tt.Frame()
+			key := aggregateSourceKey(music.AggregateSource{Platform: "wy", AccountID: "acct-1", TrackID: "raw-01"})
+			if view.writeLiked[key] || !a.aggregateWrite.open || !strings.Contains(a.aggregateWrite.err, "signed out") {
+				t.Fatalf("过期确认未回滚并保留错误：liked=%v write=%+v", view.writeLiked[key], a.aggregateWrite)
+			}
+		})
+	}
+}
+
+// 账号在远程写入等待期间退出时，迟到的成功回执必须按插件契约转成失效并回滚。
+func TestAggregateCloudLikeLateReceiptAfterLogoutRollsBack(t *testing.T) {
+	a, src, tt, post := aggregateWriteFixture(t, "wy")
+	view := aggregateWriteReady(t, a, tt, post)
+	started, release := make(chan struct{}), make(chan struct{})
+	src.writeReply = func(map[string]any) (map[string]any, error) {
+		close(started)
+		<-release
+		return map[string]any{"version": 1, "ok": true, "code": "done"}, nil
+	}
+
+	if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Like"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("Like"); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, started, "延迟的喜欢写入")
+	src.generation = 8
+	close(release)
+	until(t, post, func() bool { return !a.aggregateWrite.busy })
+	tt.Frame()
+	key := aggregateSourceKey(music.AggregateSource{Platform: "wy", AccountID: "acct-1", TrackID: "raw-01"})
+	if view.writeLiked[key] || !a.aggregateWrite.open || !strings.Contains(a.aggregateWrite.err, "signed out") {
+		t.Fatalf("迟到回执覆盖了账号失效：liked=%v write=%+v", view.writeLiked[key], a.aggregateWrite)
+	}
 }
 
 // 喜欢先确认平台与账号，确认后才按原始平台曲目 ID 和当前快照世代写入，播放队列保持不变。
@@ -315,6 +483,88 @@ func TestAggregateCloudCreatePlaylist(t *testing.T) {
 	}
 }
 
+// QQ 创建回执缺少歌单身份时提示刷新，且不伪造可继续写入的本地歌单。
+func TestAggregateCloudCreatePlaylistWithoutIdentityRequiresRefresh(t *testing.T) {
+	cases := []struct {
+		name   string
+		listID string
+		reply  map[string]any
+	}{
+		{
+			name:  "missing identity",
+			reply: map[string]any{"version": 1, "ok": true, "code": "done"},
+		},
+		{
+			name:   "plugin requires refresh",
+			listID: "created-2",
+			reply:  map[string]any{"version": 1, "ok": true, "code": "done", "listID": "created-2", "refreshRequired": true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, src, tt, post := aggregateWriteFixture(t, "tx")
+			view := aggregateWriteReady(t, a, tt, post)
+			src.writeReply = func(map[string]any) (map[string]any, error) {
+				return tc.reply, nil
+			}
+
+			if err := tt.Click("Create Playlist"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.ChooseMenuItem("QQ Music · acct-1"); err != nil {
+				t.Fatalf("%v; 菜单显示 %q", err, tt.Menu())
+			}
+			if err := tt.Click("Playlist Name"); err != nil {
+				t.Fatal(err)
+			}
+			tt.Type("Morning")
+			if err := tt.Click("Create"); err != nil {
+				t.Fatal(err)
+			}
+			input := wait(t, src.writes, "QQ 创建歌单")
+			if input["operation"] != "playlistCreate" || input["name"] != "Morning" {
+				t.Fatalf("创建参数不正确：%+v", input)
+			}
+			until(t, post, func() bool { return !a.aggregateWrite.busy })
+			tt.Frame()
+			if aggregateWriteHasList(view.lists, tc.listID, "Morning") ||
+				strings.Contains(a.toast, "Created Morning") ||
+				!strings.Contains(strings.ToLower(a.toast), "refresh") {
+				t.Fatalf("未确认可用的歌单被伪装成完整列表或未提示刷新：lists=%+v toast=%q", view.lists, a.toast)
+			}
+			select {
+			case duplicate := <-src.writes:
+				t.Fatalf("收到创建回执后自动重复创建：%+v", duplicate)
+			default:
+			}
+		})
+	}
+}
+
+// 宿主控制接口与生成的聚合插件产物共同校验 snapshotGeneration 参数契约。
+func TestAggregateWriteGenerationUsesBuiltPluginContract(t *testing.T) {
+	dir := os.Getenv("MM_AGGREGATE_PLUGIN")
+	if dir == "" {
+		dir = "F:/github/mygo-aggregate-plugin"
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.js")); err != nil {
+		t.Skip("聚合插件 index.js 不可用")
+	}
+	src, err := plugin.Load(dir, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(src.Close)
+
+	generation, err := aggregateWriteGeneration(src, "wy", "offline-account")
+	if err != nil || generation != 0 {
+		t.Fatalf("宿主未能读取生成插件的账号世代：generation=%d error=%v", generation, err)
+	}
+	if _, err := src.Aggregate("snapshotGeneration", nil); err == nil {
+		t.Fatal("生成插件接受了缺少平台和账号的世代查询")
+	}
+}
+
 func aggregateWriteHasList(lists []aggregateList, id, name string) bool {
 	for _, list := range lists {
 		if list.ListID == id && list.ListName == name {
@@ -438,6 +688,63 @@ func TestAggregateCloudRemoveTrackFromPlaylist(t *testing.T) {
 	}
 }
 
+// 同一原始曲目在多个歌单出现时，移除和排序都只允许选择实际归属的同账号歌单。
+func TestAggregateCloudPlaylistActionsChooseActualPlaylist(t *testing.T) {
+	a, src, tt, post := aggregateWriteFixture(t, "wy", func(a *app, src *aggregateWriteSource) {
+		track := &a.library.home.Sections[0].Tracks[0]
+		track.AggregateSources = append(track.AggregateSources,
+			music.AggregateSource{Platform: "wy", AccountID: "acct-1", TrackID: "raw-01", ListID: "list-2", ListName: "Focus"},
+			music.AggregateSource{Platform: "wy", AccountID: "acct-2", TrackID: "raw-01", ListID: "other", ListName: "Other Account"},
+		)
+		src.lists = append(src.lists, aggregateList{Platform: "wy", AccountID: "acct-2", ListID: "other", ListName: "Other Account", RefreshedAt: 1})
+		src.snapshot["list-2"] = append(src.snapshot["list-2"], map[string]any{"id": "raw-01", "name": "Cloud Song"})
+	})
+	_ = aggregateWriteReady(t, a, tt, post)
+
+	if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Remove from Playlist", "Focus"); err != nil {
+		t.Fatalf("无法明确选择歌曲所在的第二个歌单：%v；菜单=%q", err, tt.Menu())
+	}
+	menu := strings.Join(tt.Menu(), " ")
+	if strings.Contains(menu, "Other Account") {
+		t.Fatalf("删除菜单泄露了另一账号的歌单：%q", tt.Menu())
+	}
+	tt.Frame()
+	if a.aggregateWrite.listID != "list-2" || a.aggregateWrite.accountID != "acct-1" {
+		t.Fatalf("确认框绑定了错误歌单或账号：%+v", a.aggregateWrite)
+	}
+	if err := tt.Click("Remove"); err != nil {
+		t.Fatal(err)
+	}
+	input := wait(t, src.writes, "从所选歌单移除")
+	if input["listID"] != "list-2" || input["accountID"] != "acct-1" {
+		t.Fatalf("写入目标未保留用户选择：%+v", input)
+	}
+	until(t, post, func() bool { return !a.aggregateWrite.busy })
+	tt.Frame()
+
+	if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Move in Playlist", "Focus"); err != nil {
+		t.Fatalf("无法选择歌曲所在歌单进行排序：%v；菜单=%q", err, tt.Menu())
+	}
+	tt.Frame()
+	if err := tt.Click("Position"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("1")
+	if err := tt.Click("Move"); err != nil {
+		t.Fatal(err)
+	}
+	moved := wait(t, src.writes, "在所选歌单排序")
+	if moved["operation"] != "playlistMoveTrack" || moved["listID"] != "list-2" || moved["accountID"] != "acct-1" {
+		t.Fatalf("排序目标未保留用户选择：%+v", moved)
+	}
+}
+
 // 移动歌曲先选择目标歌单并填写目标位置，写入携带 toIndex，成功后给出反馈。
 func TestAggregateCloudMoveTrackInPlaylist(t *testing.T) {
 	a, src, tt, post := aggregateWriteFixture(t, "wy")
@@ -446,7 +753,7 @@ func TestAggregateCloudMoveTrackInPlaylist(t *testing.T) {
 	if err := tt.Click("Cloud Actions Cloud Song"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tt.ChooseMenuItem("Move in Playlist", "Focus"); err != nil {
+	if err := tt.ChooseMenuItem("Move in Playlist", "Road songs"); err != nil {
 		t.Fatalf("%v; 菜单显示 %q", err, tt.Menu())
 	}
 	tt.Frame()
@@ -465,7 +772,7 @@ func TestAggregateCloudMoveTrackInPlaylist(t *testing.T) {
 	}
 	input := wait(t, src.writes, "移动歌曲写入")
 	// 界面位置从 1 开始，契约 toIndex 从 0 开始。
-	if input["operation"] != "playlistMoveTrack" || input["listID"] != "list-2" || input["toIndex"] != 0 {
+	if input["operation"] != "playlistMoveTrack" || input["listID"] != "list-1" || input["toIndex"] != 0 {
 		t.Fatalf("移动参数不正确：%+v", input)
 	}
 	until(t, post, func() bool { return !a.aggregateWrite.busy })

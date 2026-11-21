@@ -13,21 +13,23 @@ import (
 
 // aggregateWrite 记录一次待确认的云端写入；确认框关闭或成功后才释放。
 type aggregateWrite struct {
-	open, busy bool
-	lib        *library
-	src        aggregateSource
-	view       *aggregateView
-	source     music.AggregateSource
-	platform   string
-	accountID  string
-	trackName  string
-	operation  string
-	listID     string // 歌单写入的目标；喜欢操作留空
-	listName   string
-	name       string // 创建/重命名的草稿，仅当前对话框持有
-	position   string
-	prevLiked  bool // 失败回滚到确认前的本地状态，不假装写入成功
-	err        string
+	open, busy       bool
+	generation       int64
+	generationLoaded bool
+	lib              *library
+	src              aggregateSource
+	view             *aggregateView
+	source           music.AggregateSource
+	platform         string
+	accountID        string
+	trackName        string
+	operation        string
+	listID           string // 歌单写入的目标；喜欢操作留空
+	listName         string
+	name             string // 创建/重命名的草稿，仅当前对话框持有
+	position         string
+	prevLiked        bool // 失败回滚到确认前的本地状态，不假装写入成功
+	err              string
 }
 
 type aggregateWriteCapabilityReply struct {
@@ -40,15 +42,16 @@ type aggregateWriteCapabilityReply struct {
 }
 
 type aggregateWriteReply struct {
-	Version   int    `json:"version"`
-	OK        bool   `json:"ok"`
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Platform  string `json:"platform"`
-	Operation string `json:"operation"`
-	TrackID   string `json:"trackID"`
-	ListID    string `json:"listID"`
-	Name      string `json:"name"`
+	Version         int    `json:"version"`
+	OK              bool   `json:"ok"`
+	Code            string `json:"code"`
+	Message         string `json:"message"`
+	Platform        string `json:"platform"`
+	Operation       string `json:"operation"`
+	TrackID         string `json:"trackID"`
+	ListID          string `json:"listID"`
+	Name            string `json:"name"`
+	RefreshRequired bool   `json:"refreshRequired"`
 }
 
 // 能力只取插件公开接口；旧插件不认识该动作时隐藏入口，不回退到猜测。
@@ -87,9 +90,71 @@ func (a *app) aggregateWriteLoadCapabilities(lib *library, src aggregateSource, 
 	}()
 }
 
+func (a *app) aggregateWriteLoadGenerations(lib *library, src aggregateSource, view *aggregateView) {
+	if !view.listsLoaded || view.writeGenerationsLoaded || view.loadingWriteGenerations {
+		return
+	}
+	view.loadingWriteGenerations = true
+	revision := view.writeGenerationRevision
+	accounts := make([]aggregateWriteAccount, 0, len(view.lists))
+	seen := map[aggregateWriteAccount]bool{}
+	for _, list := range view.lists {
+		account := aggregateWriteAccount{platform: list.Platform, accountID: list.AccountID}
+		if account.platform == "" || account.accountID == "" || seen[account] {
+			continue
+		}
+		seen[account] = true
+		accounts = append(accounts, account)
+	}
+	go func() {
+		generations := make(map[aggregateWriteAccount]int64, len(accounts))
+		var firstErr error
+		for _, account := range accounts {
+			generation, err := aggregateWriteGeneration(src, account.platform, account.accountID)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			generations[account] = generation
+		}
+		a.post(func() {
+			if !a.aggregateLibraryCurrent(lib, view) || view.writeGenerationRevision != revision {
+				return
+			}
+			view.loadingWriteGenerations = false
+			view.writeGenerations = generations
+			view.writeGenerationsLoaded = true
+			view.writeGenerationErr = ""
+			if firstErr != nil {
+				view.writeGenerationErr = T("Unable to verify cloud account state: ") + firstErr.Error()
+			}
+		})
+	}()
+}
+
+func aggregateWriteResetGenerations(view *aggregateView) {
+	view.writeGenerationRevision++
+	view.loadingWriteGenerations = false
+	view.writeGenerationsLoaded = false
+	view.writeGenerations = nil
+	view.writeGenerationErr = ""
+}
+
+func aggregateWriteGenerationKnown(view *aggregateView, account aggregateWriteAccount) bool {
+	if view == nil || !view.writeGenerationsLoaded {
+		return false
+	}
+	_, ok := view.writeGenerations[account]
+	return ok
+}
+
 // 曲目来源行上的入口；菜单项按平台能力过滤，确认前不发出任何写入。
 func (a *app) aggregateWriteButton(c *ui.Context, src aggregateSource, view *aggregateView, track *music.Track, source music.AggregateSource) {
-	if !view.writeCapsLoaded {
+	if !view.writeCapsLoaded || !aggregateWriteGenerationKnown(view, aggregateWriteAccount{
+		platform: source.Platform, accountID: source.AccountID,
+	}) {
 		return
 	}
 	operations := view.writeCaps[source.Platform]
@@ -122,27 +187,58 @@ func (a *app) aggregateWriteButton(c *ui.Context, src aggregateSource, view *agg
 				item.Disabled(view.busy)
 			}
 		}
-		// 喜欢列表不是普通歌单，不能从里面移除曲目。
-		if operations["playlistRemoveTrack"] && source.ListID != "" && source.ListID != "liked" {
+		playlists := aggregateWriteTrackPlaylists(view, track, source)
+		if operations["playlistRemoveTrack"] && len(playlists) == 1 {
+			list := playlists[0]
 			if m.Item(T("Remove from Playlist")).Chosen() {
-				a.aggregateWriteStartRemoveTrack(src, view, source, track.Name)
+				a.aggregateWriteStartRemoveTrack(src, view, source, track.Name, list)
 			}
-		}
-		if operations["playlistMoveTrack"] {
-			playlists := aggregateWriteMovePlaylists(view, source)
-			if len(playlists) > 0 {
-				item := m.Submenu(T("Move in Playlist"), func(sub *ui.Menu) {
-					for _, list := range playlists {
-						list := list
-						if sub.Item(list.ListName).Chosen() {
-							a.aggregateWriteStartMove(src, view, source, track.Name, list)
-						}
+		} else if operations["playlistRemoveTrack"] && len(playlists) > 1 {
+			item := m.Submenu(T("Remove from Playlist"), func(sub *ui.Menu) {
+				for _, list := range playlists {
+					list := list
+					if sub.Item(list.ListName).Chosen() {
+						a.aggregateWriteStartRemoveTrack(src, view, source, track.Name, list)
 					}
-				})
-				item.Disabled(view.busy)
-			}
+				}
+			})
+			item.Disabled(view.busy)
+		}
+		if operations["playlistMoveTrack"] && len(playlists) > 0 {
+			item := m.Submenu(T("Move in Playlist"), func(sub *ui.Menu) {
+				for _, list := range playlists {
+					list := list
+					if sub.Item(list.ListName).Chosen() {
+						a.aggregateWriteStartMove(src, view, source, track.Name, list)
+					}
+				}
+			})
+			item.Disabled(view.busy)
 		}
 	})
+}
+
+// 只允许操作当前曲目来源快照明确列出的同账号普通歌单。
+func aggregateWriteTrackPlaylists(view *aggregateView, track *music.Track, source music.AggregateSource) []aggregateList {
+	memberships := map[string]bool{}
+	for _, member := range track.AggregateSources {
+		if sameAggregateSource(member, source) && member.ListID != "" && member.ListID != "liked" {
+			memberships[member.ListID] = true
+		}
+	}
+	lists := make([]aggregateList, 0, len(memberships))
+	for _, list := range view.lists {
+		if list.Platform == source.Platform && list.AccountID == source.AccountID && memberships[list.ListID] {
+			lists = append(lists, list)
+		}
+	}
+	return lists
+}
+
+// 当前曲目的移除目标直接采用 UI 已选中的完整歌单身份。
+func (a *app) aggregateWriteStartRemoveTrack(src aggregateSource, view *aggregateView, source music.AggregateSource, trackName string, list aggregateList) {
+	a.aggregateWriteStart(src, view, source, trackName, "playlistRemoveTrack")
+	a.aggregateWrite.listID, a.aggregateWrite.listName = list.ListID, list.ListName
 }
 
 // 当前歌单和“喜欢”列表不作为添加目标，重复添加只会得到 unchanged。
@@ -160,29 +256,21 @@ func aggregateWritePlaylists(view *aggregateView, source music.AggregateSource) 
 	return lists
 }
 
-// 移动允许选择当前歌单，因为用户可能只是调整同一歌单内的顺序。
-func aggregateWriteMovePlaylists(view *aggregateView, source music.AggregateSource) []aggregateList {
-	lists := make([]aggregateList, 0, len(view.lists))
-	for _, list := range view.lists {
-		if list.Platform != source.Platform || list.AccountID != source.AccountID || list.ListID == "liked" {
-			continue
-		}
-		lists = append(lists, list)
-	}
-	return lists
-}
-
 func (a *app) aggregateWriteStart(src aggregateSource, view *aggregateView, source music.AggregateSource, trackName, operation string) {
+	account := aggregateWriteAccount{platform: source.Platform, accountID: source.AccountID}
+	generation, generationLoaded := view.writeGenerations[account]
 	a.aggregateWrite = aggregateWrite{
-		open:      true,
-		src:       src,
-		view:      view,
-		source:    source,
-		platform:  source.Platform,
-		accountID: source.AccountID,
-		trackName: trackName,
-		operation: operation,
-		prevLiked: view.writeLiked[aggregateSourceKey(source)],
+		open:             true,
+		generation:       generation,
+		generationLoaded: generationLoaded,
+		src:              src,
+		view:             view,
+		source:           source,
+		platform:         source.Platform,
+		accountID:        source.AccountID,
+		trackName:        trackName,
+		operation:        operation,
+		prevLiked:        view.writeLiked[aggregateSourceKey(source)],
 	}
 }
 
@@ -197,7 +285,7 @@ func aggregateWriteAccounts(view *aggregateView) []aggregateWriteAccount {
 	for _, list := range view.lists {
 		account := aggregateWriteAccount{platform: list.Platform, accountID: list.AccountID}
 		if seen[account] || account.platform == "" || account.accountID == "" ||
-			!view.writeCaps[account.platform]["playlistCreate"] {
+			!view.writeCaps[account.platform]["playlistCreate"] || !aggregateWriteGenerationKnown(view, account) {
 			continue
 		}
 		seen[account] = true
@@ -207,37 +295,39 @@ func aggregateWriteAccounts(view *aggregateView) []aggregateWriteAccount {
 }
 
 func (a *app) aggregateWriteStartCreate(src aggregateSource, view *aggregateView, account aggregateWriteAccount) {
+	generation, generationLoaded := view.writeGenerations[account]
 	a.aggregateWrite = aggregateWrite{
-		open:      true,
-		src:       src,
-		view:      view,
-		platform:  account.platform,
-		accountID: account.accountID,
-		operation: "playlistCreate",
+		open:             true,
+		generation:       generation,
+		generationLoaded: generationLoaded,
+		src:              src,
+		view:             view,
+		platform:         account.platform,
+		accountID:        account.accountID,
+		operation:        "playlistCreate",
 	}
 }
 
 func (a *app) aggregateWriteStartList(src aggregateSource, view *aggregateView, list aggregateList, operation string) {
+	account := aggregateWriteAccount{platform: list.Platform, accountID: list.AccountID}
+	generation, generationLoaded := view.writeGenerations[account]
 	a.aggregateWrite = aggregateWrite{
-		open:      true,
-		src:       src,
-		view:      view,
-		platform:  list.Platform,
-		accountID: list.AccountID,
-		operation: operation,
-		listID:    list.ListID,
-		listName:  list.ListName,
+		open:             true,
+		generation:       generation,
+		generationLoaded: generationLoaded,
+		src:              src,
+		view:             view,
+		platform:         list.Platform,
+		accountID:        list.AccountID,
+		operation:        operation,
+		listID:           list.ListID,
+		listName:         list.ListName,
 	}
 }
 
 func (a *app) aggregateWriteStartPlaylist(src aggregateSource, view *aggregateView, source music.AggregateSource, trackName string, list aggregateList) {
 	a.aggregateWriteStart(src, view, source, trackName, "playlistAddTrack")
 	a.aggregateWrite.listID, a.aggregateWrite.listName = list.ListID, list.ListName
-}
-
-func (a *app) aggregateWriteStartRemoveTrack(src aggregateSource, view *aggregateView, source music.AggregateSource, trackName string) {
-	a.aggregateWriteStart(src, view, source, trackName, "playlistRemoveTrack")
-	a.aggregateWrite.listID, a.aggregateWrite.listName = source.ListID, source.ListName
 }
 
 func (a *app) aggregateWriteStartMove(src aggregateSource, view *aggregateView, source music.AggregateSource, trackName string, list aggregateList) {
@@ -268,15 +358,21 @@ func aggregateWriteActionName(operation string) string {
 	}
 }
 
-// 确认后才读取当前快照世代并写入；成功或失败都只改界面状态，不动播放器。
+// 使用打开确认框时捕获的账号世代；重新登录后旧确认不能复用新会话。
 func (a *app) aggregateWriteConfirm() {
 	w := &a.aggregateWrite
 	if !w.open || w.busy {
 		return
 	}
 	w.busy, w.err = true, ""
+	if !w.generationLoaded {
+		w.busy = false
+		w.err = T("Unable to verify cloud account state. Refresh the cached lists and try again.")
+		return
+	}
 	view, source, operation := w.view, w.source, w.operation
 	platform, accountID := w.platform, w.accountID
+	generation := w.generation
 	listID, listName := w.listID, w.listName
 	name := strings.TrimSpace(w.name)
 	toIndex := 0
@@ -307,7 +403,7 @@ func (a *app) aggregateWriteConfirm() {
 	previous := w.prevLiked
 	src := a.aggregateWriteSource()
 	go func() {
-		generation, err := aggregateWriteGeneration(src)
+		var err error
 		var reply aggregateWriteReply
 		if err == nil {
 			input := map[string]any{
@@ -358,8 +454,12 @@ func (a *app) aggregateWriteConfirm() {
 				case "unlike":
 					aggregateWriteSetLiked(view, key, false)
 				case "playlistCreate":
-					aggregateWriteUpsertList(view, reply.ListID, name, platform, accountID)
-					a.toast = T("Created") + " " + name
+					if reply.ListID == "" || reply.RefreshRequired {
+						a.toast = T("Playlist created; refresh cloud lists before using it.")
+					} else {
+						aggregateWriteUpsertList(view, reply.ListID, name, platform, accountID)
+						a.toast = T("Created") + " " + name
+					}
 				case "playlistRename":
 					aggregateWriteRenameList(view, platform, accountID, listID, name)
 					a.toast = T("Renamed") + " " + name
@@ -396,11 +496,14 @@ func (a *app) aggregateWriteSource() aggregateSource {
 	return nil
 }
 
-func aggregateWriteGeneration(src aggregateSource) (int64, error) {
+func aggregateWriteGeneration(src aggregateSource, platform, accountID string) (int64, error) {
 	if src == nil {
 		return 0, fmt.Errorf("aggregate source unavailable")
 	}
-	raw, err := src.Aggregate("snapshotGeneration", nil)
+	raw, err := src.Aggregate("snapshotGeneration", map[string]any{
+		"platform":  platform,
+		"accountID": accountID,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -426,6 +529,31 @@ func aggregateWriteSetLiked(view *aggregateView, key string, liked bool) {
 		view.writeLiked = map[string]bool{}
 	}
 	view.writeLiked[key] = liked
+}
+
+func (a *app) aggregateWriteSyncLiked(view *aggregateView, home *music.Browse) {
+	liked := map[string]bool{}
+	if home != nil {
+		for _, section := range home.Sections {
+			for _, track := range section.Tracks {
+				for _, source := range track.AggregateSources {
+					key := aggregateSourceKey(source)
+					if source.ListID == "liked" {
+						liked[key] = true
+					} else if _, exists := liked[key]; !exists {
+						liked[key] = false
+					}
+				}
+			}
+		}
+	}
+	if write := &a.aggregateWrite; write.view == view && write.busy && aggregateWriteTouchesLiked(write.operation) {
+		key := aggregateSourceKey(write.source)
+		if current, exists := view.writeLiked[key]; exists {
+			liked[key] = current
+		}
+	}
+	view.writeLikedHome, view.writeLiked = home, liked
 }
 
 // 歌单变更只在远端确认成功后落本地，失败时旧列表保持不变。

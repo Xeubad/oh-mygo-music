@@ -81,10 +81,16 @@ type aggregateView struct {
 	owner                aggregateSource
 	page                 route
 	// 云端写入能力与本地乐观喜欢状态都只属于当前浏览视图。
-	writeCapsLoaded  bool
-	loadingWriteCaps bool
-	writeCaps        map[string]map[string]bool // 平台 → 可执行操作
-	writeLiked       map[string]bool            // 原始平台曲目键 → 本地乐观状态
+	writeCapsLoaded         bool
+	loadingWriteCaps        bool
+	writeCaps               map[string]map[string]bool // 平台 → 可执行操作
+	writeGenerationsLoaded  bool
+	loadingWriteGenerations bool
+	writeGenerationRevision uint64
+	writeGenerationErr      string
+	writeGenerations        map[aggregateWriteAccount]int64
+	writeLikedHome          *music.Browse
+	writeLiked              map[string]bool // 原始平台曲目键 → 本地乐观状态
 }
 
 type aggregateEdit struct {
