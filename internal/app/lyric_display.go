@@ -19,7 +19,6 @@ type lyricDisplayCache struct {
 var lyricScripts = []struct{ id, label string }{
 	{"", N("Follow Interface")},
 	{"simplified", N("Simplified Chinese")},
-	{"original", N("Original Text")},
 }
 
 func (a *app) lyricKey(track *music.Track) string {

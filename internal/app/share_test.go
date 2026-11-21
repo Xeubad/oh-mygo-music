@@ -138,6 +138,57 @@ func TestShareMenuKeepsPlaybackAndCopiesSelection(t *testing.T) {
 	}
 }
 
+// 分享列表里有译文时，即使只选了无译文的行，也应能关闭整张卡片的翻译。
+func TestShareTranslationTogglesWithoutSelectingTranslatedLyrics(t *testing.T) {
+	var copied string
+	previous := copyText
+	copyText = func(text string) error { copied = text; return nil }
+	defer func() { copyText = previous }()
+	a := newTestApp()
+	posted := posts(a)
+	fake(a).lyrics = func(string) (*music.Lyrics, error) {
+		return &music.Lyrics{LRC: "[00:01]First\n[00:05]Second", Translation: "[00:05]Translated second"}, nil
+	}
+	a.openShare(song("shared", "Shared"))
+	tester := ui.NewTester(func(c *ui.Context) {
+		a.pal = paletteFor(c.Theme())
+		a.shareDialog(c)
+	}, 1200, 800)
+	until(t, posted, func() bool { tester.Frame(); return tester.HasText("Translated second") })
+	if !a.sharing.selected[0] || a.sharing.selected[1] {
+		t.Fatal("the translated lyric must not be selected initially")
+	}
+	if err := tester.Click("Show Translation"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.settings.HideCardTranslation || tester.HasText("Translated second") {
+		t.Fatal("could not hide an unselected lyric's translation")
+	}
+	if err := tester.Click("Lyrics Display"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Show Translation"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if a.settings.HideCardTranslation || !tester.HasText("Translated second") {
+		t.Fatal("the display menu did not turn card translation back on")
+	}
+	if err := tester.Click("Select lyric 2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.Click("Show Translation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.Click("Copy Lyrics"); err != nil {
+		t.Fatal(err)
+	}
+	if copied != "First\nSecond" || a.settings.HidePlaybackTranslation {
+		t.Fatalf("the card toggle affected playback choices or copied unexpected lyrics: %q", copied)
+	}
+}
+
 // 取消和保存失败不改变目录，成功保存后才记住新目录并保留草稿。
 func TestShareSaveRemembersOnlySuccessfulDirectory(t *testing.T) {
 	a := newTestApp()

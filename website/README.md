@@ -1,4 +1,4 @@
-# Website
+# MyGo Music by XEU website
 
 The home page of MyGo Music by XEU, written with TanStack Start and Solid. It's prerendered into static files at build time and deployed to Cloudflare (Workers static assets, no Worker script).
 

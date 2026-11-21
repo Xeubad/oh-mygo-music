@@ -4,6 +4,7 @@ import release from "./internal/buildinfo/release.json";
 export default ({ command }: { command: string }) => ({
   name: "MyGo Music by XEU",
   identifier: "dev.egoist.music",
+  // slug 与历史更新文件名保持一致，避免旧版更新器找不到新版本资源。
   slug: "mygo-music",
   version: release.version,
   out: "build",

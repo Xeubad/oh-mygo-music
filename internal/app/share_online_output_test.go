@@ -481,3 +481,78 @@ func TestShareOnlineCardLinkFrame(t *testing.T) {
 		tester.Frame()
 	}
 }
+
+// 片段范围和真实解码试听的播放、暂停状态各保存一张图。
+func TestShareClipTimelineRealFrame(t *testing.T) {
+	directory := os.Getenv("MM_FRAMES")
+	if directory == "" {
+		t.Skip("set MM_FRAMES for visual acceptance")
+	}
+	previousLanguage := i18n.Language()
+	i18n.SetLanguage(i18n.Chinese)
+	defer i18n.SetLanguage(previousLanguage)
+
+	a := newTestApp()
+	audioPath, err := filepath.Abs(filepath.Join("..", "player", "testdata", "seek.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake(a).stream = func(string, string) (*music.Stream, error) {
+		return &music.Stream{URL: music.FileURL(audioPath), Type: "flac", Quality: "high"}, nil
+	}
+	track := music.Track{
+		ID: "share-clip-real", Source: "fake", Name: "把这一刻，唱给你听",
+		Artists: []music.Artist{{Name: "林间电台"}}, Duration: 5000,
+	}
+	draft := &shareDraft{
+		open: true, track: track, onlineMode: "clip", onlineQuality: "high", cardOnline: true,
+		selected: map[int]bool{0: true, 2: true},
+		cover:    coverImage(ui.RGB(30, 52, 96), ui.RGB(206, 74, 106)),
+		lines: []lyrics.Line{
+			{Text: "让这一刻，唱给你听", Translation: "This moment is a song for you", At: 1200 * time.Millisecond, End: 1800 * time.Millisecond, AtSource: true, EndSource: true},
+			{Text: "风越过海面，留下一片星光", Translation: "Across the sea, the wind leaves starlight", At: 2200 * time.Millisecond, End: 2800 * time.Millisecond, AtSource: true, EndSource: true},
+			{Text: "この歌を、あなたに届けたい", Translation: "想把这首歌，唱给你听", At: 3200 * time.Millisecond, End: 3900 * time.Millisecond, AtSource: true, EndSource: true},
+		},
+		clipStart: 500 * time.Millisecond, clipEnd: 4500 * time.Millisecond, clipHead: 2200 * time.Millisecond,
+	}
+	a.sharing = draft
+	posted := posts(a)
+	tester := ui.NewTester(func(c *ui.Context) {
+		a.pal = paletteFor(c.Theme())
+		a.shareDialog(c)
+	}, 1440, 900)
+	tester.SetDark(true)
+	a.requestShareRender()
+	until(t, posted, func() bool {
+		tester.Frame()
+		return draft.preview != nil
+	})
+	settled(tester)
+	saveFrame(t, directory, "share-clip-real-range.png", tester.Image())
+
+	a.previewShareClip(draft)
+	until(t, posted, func() bool {
+		tester.Frame()
+		return draft.clipPreview != nil
+	})
+	tester.Frame()
+	saveFrame(t, directory, "share-clip-real-playing.png", tester.Image())
+	if err := tester.Click("暂停试听"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	saveFrame(t, directory, "share-clip-real-paused.png", tester.Image())
+	if err := tester.Click("播放试听"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	saveFrame(t, directory, "share-clip-real-playing-again.png", tester.Image())
+	a.stopSharePreview(draft)
+
+	// 已发布状态复用同一段时间轴，二维码和状态只在有效快照下出现。
+	draft.onlineURL = "https://music.zxbdwy.online/s/preview-example"
+	draft.onlinePublishedRevision = draft.onlineRevision
+	draft.status = T("Online link ready")
+	tester.Frame()
+	saveFrame(t, directory, "share-clip-real-published.png", tester.Image())
+}

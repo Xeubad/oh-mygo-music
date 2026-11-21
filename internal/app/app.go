@@ -350,7 +350,9 @@ func Run() error {
 	if legacy, ok := legacyLockName(name); ok {
 		mygo.App.SetName(legacy)
 	}
-	// The second instance exits before it changes paths or touches app data.
+	// The second instance exits before it changes paths or touches app data:
+	// opening the app again shows the running one's window, where Linux and
+	// Windows would start another, with a second tray icon.
 	if !mygo.App.RequestSingleInstanceLock() {
 		return nil
 	}
