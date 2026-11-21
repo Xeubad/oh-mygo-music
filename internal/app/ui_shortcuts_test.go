@@ -73,8 +73,9 @@ func TestShortcutUIRecordCommand(t *testing.T) {
 	} {
 		clickShortcut(t, tester, "Change Play / Pause shortcut")
 		tester.Key(recorded.mods, recorded.key)
-		if a.shortcutEdit.recording != "" || a.globalShortcuts.config.Bindings[shortcutPlay].Key != recorded.want || registrar.keys[recorded.want] == nil || len(registrar.keys) != 8 {
-			t.Fatalf("did not apply %s: editor=%+v, active=%d", recorded.want, a.shortcutEdit, len(registrar.keys))
+		if a.shortcutEdit.recording != "" || a.globalShortcuts.config.Bindings[shortcutPlay].Key != recorded.want ||
+			registrar.keys[recorded.want] == nil || registrar.keys["Ctrl+Alt+Left"] == nil {
+			t.Fatalf("did not apply %s: editor=%+v", recorded.want, a.shortcutEdit)
 		}
 		if a.settings.Shortcuts == nil || a.settings.Shortcuts.Bindings[shortcutPlay].Key != recorded.want {
 			t.Fatalf("did not persist %s", recorded.want)

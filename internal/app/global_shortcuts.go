@@ -182,12 +182,22 @@ func shortcutDisplay(text string) string {
 		return text
 	}
 	parts := strings.Split(text, "+")
-	for index, part := range parts {
-		if symbol, ok := shortcutSymbols[part]; ok {
-			parts[index] = symbol
+	key := parts[len(parts)-1]
+	mods := parts[:len(parts)-1]
+	var display []string
+	// 与 macOS 菜单的惯例保持一致，Command 放在最后。
+	for _, modifier := range []string{"Ctrl", "Alt", "Shift", "Super"} {
+		for _, part := range mods {
+			if part == modifier {
+				display = append(display, shortcutSymbols[part])
+				break
+			}
 		}
 	}
-	return strings.Join(parts, "")
+	if symbol, ok := shortcutSymbols[key]; ok {
+		key = symbol
+	}
+	return strings.Join(append(display, key), "")
 }
 
 // shortcutInputKey macOS 按物理位置登记，布局字符可能和 ANSI keycode 对不上。
