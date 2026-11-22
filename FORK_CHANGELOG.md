@@ -1,5 +1,12 @@
 # 更新日志
 
+## [0.0.13] - 2026-11-22
+
+- 未登录或账号状态尚未加载时，账号行保留独立设置入口；登录按钮仍可正常使用。
+- 移除独立的 `Test` workflow；发布流程继续在打包前运行 `go test ./internal/...`。
+
+提供 Windows x64、ARM64 以及 macOS Apple 芯片、Intel 安装包。macOS 包未经 Apple 公证，首次打开可能需要在系统设置中确认。
+
 ## [0.0.12] - 2026-11-21
 
 - 发布 MyGo Music by XEU 自有版本，使用 Xeubad/oh-mygo-music 作为发行与自动更新仓库。
