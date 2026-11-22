@@ -854,8 +854,11 @@ func TestSourceShowsAsItselfAtOnce(t *testing.T) {
 		if _, ok := tt.Find("Daily"); !ok {
 			t.Error("its own page isn't in the sidebar")
 		}
-		if tt.HasText("Sign in to plugin") || tt.HasText("Settings") {
-			t.Error("the account's row says what isn't known yet")
+		if tt.HasText("Sign in to plugin") {
+			t.Error("the account's row offers sign-in before the account state is known")
+		}
+		if !tt.HasText("Settings") {
+			t.Error("the account's row hides Settings while the account state is unknown")
 		}
 	}
 	check()
