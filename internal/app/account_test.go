@@ -12,6 +12,68 @@ import (
 	"mygo-music/internal/music"
 )
 
+// A signed-out source keeps a separate Settings entry so the account row never
+// forces a login when the listener only wants to open Settings.
+func TestSignedOutAccountRowKeepsSettingsEntry(t *testing.T) {
+	for _, unknown := range []bool{true, false} {
+		t.Run(map[bool]string{true: "account unknown", false: "signed out"}[unknown], func(t *testing.T) {
+			a := newTestApp()
+			lib := a.library
+			lib.account = nil
+			lib.accountAsked = !unknown
+			tt := ui.NewTester(a.view, 1000, 700)
+			tt.Frame()
+			if !unknown {
+				if _, ok := tt.Find("Sign in to fake"); !ok {
+					t.Fatal("login entry is missing")
+				}
+			}
+			if _, ok := tt.Find("Settings"); !ok {
+				t.Fatal("separate Settings entry is missing")
+			}
+		})
+	}
+}
+
+// Clicking Settings from a signed-out account row opens Settings without
+// starting login or showing the QR dialog.
+func TestSignedOutAccountRowSettingsDoesNotSignIn(t *testing.T) {
+	a := newTestApp()
+	lib := a.library
+	lib.account, lib.accountAsked = nil, true
+	fake(a).signIn = func() (*music.Account, error) { return nil, music.ErrUnsupported }
+	main := ui.NewTester(a.view, 1000, 700)
+	main.Frame()
+	if err := main.Click("Settings"); err != nil {
+		t.Fatal(err)
+	}
+	main.Frame()
+	if a.signIn.open {
+		t.Fatal("Settings click opened the sign-in dialog")
+	}
+}
+
+// Clicking the login half of the split account row still opens the sign-in
+// dialog, and the Settings half remains available in the same row.
+func TestSignedOutAccountRowLoginEntryStillWorks(t *testing.T) {
+	a := newTestApp()
+	fake(a).signIn = func() (*music.Account, error) { return nil, music.ErrUnsupported }
+	lib := a.library
+	lib.account, lib.accountAsked = nil, true
+	main := ui.NewTester(a.view, 1000, 700)
+	main.Frame()
+	if _, ok := main.Find("Settings"); !ok {
+		t.Fatal("Settings entry disappeared before login")
+	}
+	if err := main.Click("Sign in to fake"); err != nil {
+		t.Fatal(err)
+	}
+	main.Frame()
+	if !a.signIn.open {
+		t.Fatal("login entry did not open the sign-in dialog")
+	}
+}
+
 // Clicking the account row drops its menu, which takes the focus so the
 // arrows walk its items, and Escape or a second click puts it away.
 func TestAccountMenu(t *testing.T) {
