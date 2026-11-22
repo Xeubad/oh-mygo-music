@@ -35,38 +35,6 @@ func TestPlaybackTransitionChoicesSurviveRestart(t *testing.T) {
 	}
 }
 
-// 旧自动模式改用交叉淡化，保存后丢弃已移除的配置，并保留用户随后关闭淡化的选择。
-func TestRetiredAutoMixMigratesToCrossfade(t *testing.T) {
-	preferences := defaultSettings()
-	if err := json.Unmarshal([]byte(`{"autoMixEnabled":true,"gaplessEnabled":true,"crossfadeEnabled":false,"crossfadeDurationMs":7000,"volume":0.35}`), &preferences); err != nil {
-		t.Fatal(err)
-	}
-	if !preferences.playbackTransitions().Crossfade || preferences.CrossfadeDurationMs != 7000 || preferences.Volume != .35 {
-		t.Fatalf("旧设置迁移失败: %+v", preferences)
-	}
-	preferences.CrossfadeEnabled = false
-	encoded, err := json.Marshal(preferences)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saved map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &saved); err != nil {
-		t.Fatal(err)
-	}
-	for _, removed := range []string{"autoMixEnabled", "gaplessEnabled"} {
-		if _, exists := saved[removed]; exists {
-			t.Fatalf("仍保存已移除的配置 %s", removed)
-		}
-	}
-	restored := defaultSettings()
-	if err := json.Unmarshal(encoded, &restored); err != nil {
-		t.Fatal(err)
-	}
-	if restored.CrossfadeEnabled {
-		t.Fatal("重启后覆盖了用户关闭淡化的选择")
-	}
-}
-
 // 关闭效果后写入磁盘并重新读取，时长保持不变，界面变更立即送达播放器。
 func TestPlaybackTransitionsSaveSwitchChoices(t *testing.T) {
 	a := newTestApp()

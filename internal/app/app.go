@@ -101,6 +101,7 @@ type app struct {
 	settingText    map[string]*string           // the settings of sources, as being typed
 	aggregateEdits map[*library]*aggregateEdit  // 来源各自持有联合设置草稿，凭据只在编辑期间暂存
 	aggregateViews map[*library]*aggregateView  // 仅页面筛选，不改变队列和来源快照
+	aggregateWrite aggregateWrite               // 云端写入确认与在途状态，不触碰播放队列
 	settingEdits   map[string]*settingEdit      // pending typed-setting saves, main thread only
 	settingSaves   map[*library]<-chan struct{} // source save order, main thread only
 	settingPending map[string]*settingWrite     // last queued value per source/key
@@ -127,6 +128,10 @@ type app struct {
 	betterLyricsTrackKey  string
 	betterLyricsTrackID   uint64
 	betterLyricsStatus    string
+
+	startupFailed           bool
+	startupBackgroundFailed bool
+	startupTray             bool
 
 	suggestions suggestState // what the search field's query may be after
 
@@ -238,6 +243,12 @@ func (a *app) showMain() {
 		// From the menu bar alone the app may be inactive.
 		mygo.App.Focus()
 	}
+}
+
+// initialWindowHidden keeps a login launch in the tray when the user chose
+// background startup; ordinary launches still open the main window.
+func initialWindowHidden(openedAtLogin, background bool) bool {
+	return openedAtLogin && background
 }
 
 // userDataDir is where the app keeps what's the listener's.
@@ -370,6 +381,11 @@ func Run() error {
 		a.settings = loadSettings()
 		a.settings.applyAppearance()
 		i18n.SetLanguage(i18n.Resolve(a.settings.Language, systemLanguages()))
+		openedAtLogin := false
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			openedAtLogin = mygo.App.WasOpenedAtLogin()
+		}
+		a.startupTray = initialWindowHidden(openedAtLogin, a.settings.LaunchAtLoginBackground)
 		a.npPane = a.lyricsPaneChosen()
 		if a.settings.PlayerStyle != "" {
 			go retroBitmaps() // rendered before Now Playing first shows them
@@ -404,6 +420,7 @@ func Run() error {
 		a.setPlayerVolume(a.volume)
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:         mygo.App.Name(),
+			Hidden:        a.startupTray,
 			Width:         1180,
 			Height:        780,
 			MinWidth:      880,
@@ -439,6 +456,11 @@ func Run() error {
 		// Shown or switched to a while after, it shows what's new.
 		a.win.OnFocus(a.freshenHome)
 		a.applyTray()
+		// 无法创建托盘时显示主窗口，避免后台启动后失去打开入口。
+		if a.startupTray && a.tray == nil {
+			a.startupTray = false
+			a.showMain()
+		}
 		for _, link := range a.links {
 			a.openLink(link)
 		}
