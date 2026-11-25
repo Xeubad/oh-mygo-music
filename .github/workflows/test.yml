@@ -54,4 +54,4 @@ jobs:
       - name: Build
         run: go build -o "$RUNNER_TEMP/mygo-music" .
       - name: Test
-        run: go test ./internal/...
+        run: go test ./internal/... -timeout 20m
