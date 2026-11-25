@@ -59,6 +59,9 @@ func TestFromSourceLines(t *testing.T) {
 	if l.Text != "Hold on" || l.At != 13010*time.Millisecond || l.End != 17790*time.Millisecond || l.Translation != "Never" {
 		t.Errorf("line %+v", l)
 	}
+	if !l.AtSource || !l.EndSource || lines[1].EndSource {
+		t.Errorf("source timing flags %+v", lines)
+	}
 	if len(l.Words) != 2 || l.Words[1].Start != 13670*time.Millisecond {
 		t.Errorf("words %+v", l.Words)
 	}
@@ -72,6 +75,14 @@ func TestFromSourceLRC(t *testing.T) {
 	lines := FromSource(&music.Lyrics{LRC: "[00:01.00]One", Translation: "[00:01.00]Uno"})
 	if len(lines) != 1 || lines[0].Translation != "Uno" {
 		t.Errorf("lines %+v", lines)
+	}
+	if !lines[0].AtSource || lines[0].EndSource {
+		t.Errorf("LRC source timing flags %+v", lines)
+	}
+
+	lines = FromSource(&music.Lyrics{LRC: "[00:01.00]One\n[00:04.00]Two"})
+	if len(lines) != 2 || !lines[0].AtSource || lines[0].EndSource || lines[0].End != 4*time.Second {
+		t.Errorf("LRC next-line boundary %+v", lines)
 	}
 }
 

@@ -13,8 +13,8 @@ import (
 
 func shortcutSettingsTester(t *testing.T) (*app, *fakeShortcutRegistrar, *ui.Tester) {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		t.Skip("the first shortcut settings page is Windows only")
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("global shortcuts are implemented on Windows and macOS")
 	}
 	a := newTestApp()
 	registrar := newFakeShortcutRegistrar()
@@ -56,6 +56,46 @@ func TestShortcutUIRecord(t *testing.T) {
 	}
 }
 
+// Command combinations record, register and save on macOS.
+func TestShortcutUIRecordCommand(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Command is the macOS modifier")
+	}
+	a, registrar, tester := shortcutSettingsTester(t)
+	a.settings.path = t.TempDir() + "/settings.json"
+	for _, recorded := range []struct {
+		mods ui.Modifiers
+		key  ui.Key
+		want string
+	}{
+		{ui.Super, ui.KeyP, "Super+P"},
+		{ui.Super | ui.Ctrl | ui.Alt | ui.Shift, ui.KeyLeft, "Super+Ctrl+Alt+Shift+Left"},
+	} {
+		clickShortcut(t, tester, "Change Play / Pause shortcut")
+		tester.Key(recorded.mods, recorded.key)
+		if a.shortcutEdit.recording != "" || a.globalShortcuts.config.Bindings[shortcutPlay].Key != recorded.want ||
+			registrar.keys[recorded.want] == nil || registrar.keys["Ctrl+Alt+Left"] == nil {
+			t.Fatalf("did not apply %s: editor=%+v", recorded.want, a.shortcutEdit)
+		}
+		if a.settings.Shortcuts == nil || a.settings.Shortcuts.Bindings[shortcutPlay].Key != recorded.want {
+			t.Fatalf("did not persist %s", recorded.want)
+		}
+	}
+}
+
+// A key that only its position names is recorded by position on macOS.
+func TestShortcutUIRecordPhysicalKey(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("positions matter on macOS")
+	}
+	a, registrar, tester := shortcutSettingsTester(t)
+	clickShortcut(t, tester, "Change Play / Pause shortcut")
+	tester.KeyAt(ui.Super, ui.KeyP)
+	if a.globalShortcuts.config.Bindings[shortcutPlay].Key != "Super+P" || registrar.keys["Super+P"] == nil {
+		t.Fatalf("did not record the position: editor=%+v", a.shortcutEdit)
+	}
+}
+
 // Invalid input stays in recording; Escape, focus loss and page navigation all release the pause.
 func TestShortcutUICancelAndFocusLoss(t *testing.T) {
 	for _, ending := range []string{"escape", "blur", "page"} {
@@ -82,12 +122,16 @@ func TestShortcutUICancelAndFocusLoss(t *testing.T) {
 	}
 }
 
-// Recording takes Ctrl+F itself rather than sending it to the settings search field.
+// Recording takes the settings search shortcut itself rather than letting it open the search field.
 func TestShortcutUIShieldsLocalCommands(t *testing.T) {
 	a, _, tester := shortcutSettingsTester(t)
 	clickShortcut(t, tester, "Change Play / Pause shortcut")
-	tester.Key(ui.Ctrl, ui.KeyF)
-	if a.globalShortcuts.config.Bindings[shortcutPlay].Key != "Ctrl+F" || a.settingsQuery != "" {
+	tester.Key(ui.Cmd, ui.KeyF)
+	want := "Ctrl+F"
+	if runtime.GOOS == "darwin" {
+		want = "Super+F"
+	}
+	if a.globalShortcuts.config.Bindings[shortcutPlay].Key != want || a.settingsQuery != "" {
 		t.Fatal("a settings shortcut intercepted recording")
 	}
 }

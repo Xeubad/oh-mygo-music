@@ -1,9 +1,11 @@
 package app
 
 import (
+	"log"
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,8 +81,34 @@ func (a *app) changed() {
 	a.redraw()
 }
 
+func (a *app) coverBackdropSlider(c *ui.Context, key, label string, value *float64, disabled bool) {
+	ui.Row(c.Key(key)).Gap(8).AlignItems(ui.Center).Children(func() {
+		slider := ui.Slider(c.Key("slider"), value, 0, 100).Step(5).Width(112).Label(label).Disabled(disabled)
+		dirty := ui.Local(slider, "pending-save", func() bool { return false })
+		if slider.Changed() {
+			*dirty = true
+			a.redraw()
+		}
+		// 拖动时只刷新预览，松开时再写盘，键盘调整则立即保存。
+		if *dirty && !slider.Pressed() {
+			*dirty = false
+			a.settings.save()
+		}
+		ui.Text(c, strconv.Itoa(int(*value+0.5))+"%").Width(36).FontSize(12).TextAlign(ui.End)
+	})
+}
+
 // systemLanguages are the languages the system prefers; tests replace it.
 var systemLanguages = func() []string { return mygo.App.PreferredLanguages() }
+
+// 自启由系统持有状态，避免本地设置覆盖用户在系统设置里的选择。
+var (
+	openAtLogin = func() bool {
+		// 无头视图没有原生事件循环，应用就绪后才能同步读取系统状态。
+		return mygo.App.IsReady() && mygo.App.OpenAtLogin()
+	}
+	setOpenAtLogin = mygo.App.SetOpenAtLogin
+)
 
 // setLanguage speaks another language from now on: the views say it as they
 // redraw; the menus, and what the sources wrote out in it, are made anew.
@@ -134,6 +162,7 @@ type settingsBlock func(text string, draw func())
 type settingsSection struct {
 	id, title string
 	icon      *ui.SVG
+	group     int
 	build     func(row settingsRow, block settingsBlock)
 }
 
@@ -183,9 +212,21 @@ func (a *app) settingsView(c *ui.Context) {
 		}
 		ui.Column(c).Width(settingsSidebarWidth).Shrink(0).Padding(top, 12, 14, 12).Gap(2).Background(p.sidebar).DragWindow().Children(func() {
 			a.settingsSearch(c, p)
-			for _, sec := range sections {
-				a.settingsNavItem(c, p, sec, query == "" && sec.id == current.id)
-			}
+			ui.Scroll(c.Key("settings-navigation")).Grow(1).MinHeight(0).Gap(2).Children(func() {
+				groups := []string{T("Listening Experience"), T("Sources and Sharing"), T("Application")}
+				previous := -1
+				for _, sec := range sections {
+					if sec.group != previous {
+						spacing := float32(14)
+						if previous < 0 {
+							spacing = 0
+						}
+						ui.Text(c, groups[sec.group]).FontSize(11).FontWeight(600).TextColor(p.muted).Margin(spacing, 9, 6, 9)
+						previous = sec.group
+					}
+					a.settingsNavItem(c, p, sec, query == "" && sec.id == current.id)
+				}
+			})
 		})
 		ui.Box(c).Width(1).Shrink(0).Background(p.hairline)
 		// The page's title is in the header, the strip the window buttons leave. What
@@ -221,8 +262,13 @@ func (a *app) settingsView(c *ui.Context) {
 			// The + keeps clear of the window buttons where they sit at the
 			// right (Linux, Windows).
 			right := max(32, c.TitleBar().Right+12)
-			header := ui.Row(c.Key("header")).Absolute().Top(0).Left(0).Right(0).Height(topBar(c)).Padding(0, right, 0, 32).AlignItems(ui.Center).DragWindow()
+			header := ui.Row(c.Key("header")).Absolute().Top(0).Left(0).Right(0).Height(topBar(c)).Padding(0, right, 0, 32).Gap(8).AlignItems(ui.Center).DragWindow()
 			header.Children(func() {
+				glyph := current.icon
+				if query != "" {
+					glyph = iconSearch
+				}
+				ui.Icon(c, glyph).Size(16, 16).TextColor(p.accent).IgnoreInput(true)
 				ui.Text(c, title).FontSize(15).FontWeight(700).SingleLine().Shrink(1).MinWidth(0)
 				if query == "" && current.id == "plugins" {
 					ui.Box(c).Grow(1)
@@ -301,7 +347,10 @@ func (a *app) settingsFinds(sec settingsSection, query string) bool {
 // under its title if it has one.
 func (a *app) settingsGroup(c *ui.Context, p palette, sec settingsSection, title, query string) {
 	if title != "" {
-		ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(p.muted).Margin(14, 4, 4, 4)
+		ui.Row(c).Gap(7).AlignItems(ui.Center).Margin(14, 4, 4, 4).Children(func() {
+			ui.Icon(c, sec.icon).Size(14, 14).TextColor(p.muted).IgnoreInput(true)
+			ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(p.muted)
+		})
 	}
 	all := query == "" || settingsMatch(query, sec.title)
 	ui.Column(c.Key(sec.id)).Radius(12).Background(p.bg).Border(1, p.hairline).Dividers(1, p.hairline).Children(func() {
@@ -326,15 +375,34 @@ func (a *app) settingsGroup(c *ui.Context, p palette, sec settingsSection, title
 	})
 }
 
+func settingsHeading(c *ui.Context, block settingsBlock, title string, glyph *ui.SVG) {
+	block(title, func() {
+		theme := *c.Theme()
+		colors := paletteFor(&theme)
+		ui.Row(c).Padding(10, 16).Gap(8).AlignItems(ui.Center).Background(colors.hover).Children(func() {
+			ui.Icon(c, glyph).Size(16, 16).TextColor(colors.muted).IgnoreInput(true)
+			ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(colors.muted)
+		})
+	})
+}
+
 // settingsSections are the pages of the settings, those that apply here.
 func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	s := &a.settings
 	var sections []settingsSection
 	add := func(id, title string, icon *ui.SVG, build func(row settingsRow, block settingsBlock)) {
-		sections = append(sections, settingsSection{id, title, icon, build})
+		group := 0
+		switch id {
+		case "plugins", "shares", "podcasts":
+			group = 1
+		case "cache", "experiments", "updates":
+			group = 2
+		}
+		sections = append(sections, settingsSection{id: id, title: title, icon: icon, group: group, build: build})
 	}
 
 	add("general", T("General"), iconSettings, func(row settingsRow, block settingsBlock) {
+		settingsHeading(c, block, T("Language and Appearance"), iconSettings)
 		row(T("Language"), "", func() {
 			follow := T("Follow System")
 			names := []string{follow}
@@ -368,6 +436,58 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
+		row(T("Cover Backdrop"), T("Add a cover glow to browsing and show the full cover behind Now Playing"), func() {
+			if ui.Switch(c.Key("cover-backdrop"), &s.CoverBackdrop).Label(T("Cover Backdrop")).Changed() {
+				a.changed()
+			}
+		})
+		coverStyleDisabled := !s.CoverBackdrop || s.Fog
+		presetHint := T("For Now Playing")
+		if s.Fog && s.CoverBackdrop {
+			presetHint = T("Turn off Fog Backdrop to adjust the cover")
+		}
+		row(T("Backdrop Presets"), presetHint, func() {
+			ui.Row(c.Key("backdrop-presets")).Gap(5).AlignItems(ui.Center).Children(func() {
+				for _, preset := range []struct {
+					key, label string
+					style      coverBackdropStyle
+				}{
+					{"crisp", T("Crisp"), coverBackdropStyle{Blur: 10, Shade: 30}},
+					{"soft", T("Soft"), coverBackdropStyle{Blur: 85, Shade: 50}},
+					{"dark", T("Dark"), coverBackdropStyle{Blur: 70, Shade: 80}},
+					{"reset", T("Reset"), defaultCoverBackdropStyle()},
+				} {
+					button := ui.Button(c.Key(preset.key), preset.label).Height(28).PaddingX(8).Disabled(coverStyleDisabled)
+					if preset.key != "reset" && s.CoverBackdropStyle == preset.style {
+						button.Background(p.press)
+					}
+					if button.Clicked() {
+						s.CoverBackdropStyle = preset.style
+						a.changed()
+					}
+				}
+			})
+		})
+		row(T("Backdrop Blur"), "", func() {
+			a.coverBackdropSlider(c, "backdrop-blur", T("Backdrop Blur"), &s.CoverBackdropStyle.Blur, coverStyleDisabled)
+		})
+		row(T("Backdrop Shade"), "", func() {
+			a.coverBackdropSlider(c, "backdrop-shade", T("Backdrop Shade"), &s.CoverBackdropStyle.Shade, coverStyleDisabled)
+		})
+		settingsHeading(c, block, T("Playback Display"), iconLyrics)
+		row(T("Chinese Lyrics"), T("Use the same text in lyrics, visualizers and share cards"), func() {
+			labels, selected := make([]string, len(lyricScripts)), 0
+			for index, option := range lyricScripts {
+				labels[index] = option.label
+				if s.LyricsScript == option.id {
+					selected = index
+				}
+			}
+			if index, changed := choice(c, "lyrics-script", T("Chinese Lyrics"), labels, selected); changed {
+				s.LyricsScript = lyricScripts[index].id
+				a.saveLyricChoices()
+			}
+		})
 		row(T("Now Playing Style"), T("Show the song playing as its cover, or as a record or a cassette turning as it plays"), func() {
 			labels := make([]string, len(playerStyles))
 			at := 0
@@ -383,6 +503,50 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				go retroBitmaps() // rendered before Now Playing shows them
 			}
 		})
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			settingsHeading(c, block, T("Desktop"), iconLaptop)
+			label := T("Launch at login")
+			startupEnabled := openAtLogin()
+			row(label, "", func() {
+				enabled := startupEnabled
+				ui.Switch(c.Key("open-at-login"), &enabled).Label(label).OnClick(func() {
+					err := setOpenAtLogin(enabled)
+					a.startupFailed = err != nil
+					if err != nil {
+						log.Printf("launch at login: %v", err)
+					}
+					a.redraw()
+				})
+			})
+			if a.startupFailed {
+				// 搜索结果按开关名称保留提示，且不会依赖系统错误的语言。
+				block(label, func() {
+					message := T("Could not change launch at login. Check Settings > Apps > Startup.")
+					if runtime.GOOS == "darwin" {
+						message = T("Could not change launch at login. Check System Settings > General > Login Items.")
+					}
+					ui.Text(c.Key("startup-error"), message).Role(ui.RoleAlert).FontSize(12).TextColor(ui.RGB(184, 54, 54)).Margin(8, 16, 8, 16)
+				})
+			}
+			row(T("Start in background at login"), T("Do not open the main window when the app starts at login"), func() {
+				ui.Switch(c.Key("open-at-login-background"), &s.LaunchAtLoginBackground).
+					Label(T("Start in background at login")).Disabled(!startupEnabled).OnClick(func() {
+					err := s.save()
+					a.startupBackgroundFailed = err != nil
+					if err != nil {
+						s.LaunchAtLoginBackground = !s.LaunchAtLoginBackground
+						log.Printf("save background startup setting: %v", err)
+					}
+					a.redraw()
+				})
+			})
+			if a.startupBackgroundFailed {
+				block(T("Start in background at login"), func() {
+					ui.Text(c.Key("startup-background-error"), T("Could not save background startup setting. Try again.")).
+						Role(ui.RoleAlert).FontSize(12).TextColor(ui.RGB(184, 54, 54)).Margin(8, 16, 8, 16)
+				})
+			}
+		}
 		// Only on macOS: elsewhere the icon is always in the notification
 		// area.
 		if runtime.GOOS == "darwin" {
@@ -405,12 +569,15 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	})
 
 	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) { a.sourceSettings(c, row, block, p) })
-	if runtime.GOOS == "windows" && a.globalShortcuts != nil {
-		add("shortcuts", T("Shortcuts"), iconLaptop, func(row settingsRow, block settingsBlock) {
+	if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && a.globalShortcuts != nil {
+		add("shortcuts", T("Shortcuts"), iconKeyboard, func(row settingsRow, block settingsBlock) {
 			a.shortcutSettings(c, p, row, block)
 		})
 	}
 
+	add("shares", T("Online Sharing"), iconLink, func(row settingsRow, block settingsBlock) {
+		a.onlineShareSettings(c, p, row, block)
+	})
 	// Only on macOS, the one with a notch player.
 	if a.notch != nil {
 		add("notch", T("Notch Player"), iconLaptop, func(row settingsRow, block settingsBlock) {
@@ -433,6 +600,7 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	}
 
 	add("playback", T("Playback"), iconVolume, func(row settingsRow, block settingsBlock) {
+		settingsHeading(c, block, T("Sound and Quality"), iconVolume)
 		row(T("Quality"), T("What's asked of plugins that have a choice, from the next song on"), func() {
 			labels := make([]string, len(qualityLevels))
 			at := 1
@@ -447,19 +615,100 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
+		row(T("Download Quality"), T("Default quality requested from plugins when downloading songs"), func() {
+			labels := make([]string, len(downloadQualityLevels))
+			at := 0
+			for i, q := range downloadQualityLevels {
+				labels[i] = q.label
+				if q.level == s.DownloadQuality {
+					at = i
+				}
+			}
+			if i, ok := choice(c, "download-quality", T("Download Quality"), labels, at); ok {
+				s.DownloadQuality = downloadQualityLevels[i].level
+				a.changed()
+			}
+		})
+		folderDesc := strings.TrimSpace(s.DownloadDirectory)
+		if folderDesc == "" {
+			if sysDir := defaultSystemDownloadDir(); sysDir != "" {
+				folderDesc = Tf("Default: %s", sysDir)
+			} else {
+				folderDesc = T("System downloads folder")
+			}
+		}
+		row(T("Download Folder"), folderDesc, func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				if s.DownloadDirectory != "" && ui.Button(c.Key("reset-download-folder"), T("Reset")).Clicked() {
+					s.DownloadDirectory = ""
+					a.changed()
+				}
+				if ui.Button(c.Key("choose-download-folder"), T("Browse…")).Clicked() {
+					go func() {
+						picked := pickDownloadFolder(a)
+						if picked == "" {
+							return
+						}
+						dir, err := downloadDir(picked)
+						a.post(func() {
+							if a.quitting {
+								return
+							}
+							if err != nil {
+								a.toast = T("Check the download location")
+								return
+							}
+							s.DownloadDirectory = dir
+							a.changed()
+						})
+					}()
+				}
+			})
+		})
+		row(T("Ask Before Downloading"), T("Choose folder and quality before each download; turn off to start immediately using defaults"), func() {
+			if ui.Switch(c.Key("prompt-download"), &s.PromptDownload).Label(T("Ask Before Downloading")).Changed() {
+				a.changed()
+			}
+		})
+		row(T("Even Out Loudness"), T("Adjust each song's volume by what its plugin measured of it, for them to sound as loud as each other"), func() {
+			if ui.Switch(c.Key("normalize"), &s.Normalize).Label(T("Even Out Loudness")).Changed() {
+				a.setPlayerVolume(a.volume)
+				a.changed()
+			}
+		})
+		a.playbackTransitionSettings(c, row, block)
+		betterLyricsDescription := T("Share the current track, position and source lyrics on this computer")
+		if a.betterLyricsStatus != "" {
+			betterLyricsDescription = a.betterLyricsStatus
+		}
+		row(T("Share with BetterLyrics"), betterLyricsDescription, func() {
+			if ui.Switch(c.Key("betterlyrics"), &s.BetterLyricsIntegration).Label(T("Share with BetterLyrics")).Changed() {
+				a.changed()
+				a.setBetterLyricsIntegration()
+			}
+		})
+		row(T("Allow BetterLyrics to Change Lyrics"), T("Save manually selected lyrics on this computer"), func() {
+			if ui.Switch(c.Key("betterlyrics-write"), &s.BetterLyricsLyricsWrite).
+				Label(T("Allow BetterLyrics to Change Lyrics")).Disabled(!s.BetterLyricsIntegration).Changed() {
+				a.changed()
+				a.setBetterLyricsIntegration()
+			}
+		})
+		row(T("Restore Current Song Lyrics"), T("Clear the manual choice and use the original source"), func() {
+			hasOverride := a.betterLyricsOverrides != nil && a.pl != nil && a.pl.Current() != nil &&
+				a.betterLyricsOverrides.Has(a.betterLyricsSongKey(*a.pl.Current()))
+			if ui.Button(c.Key("betterlyrics-clear"), T("Restore Current Song Lyrics")).Disabled(!hasOverride).Clicked() {
+				a.clearBetterLyricsOverride()
+			}
+		})
 		if a.anyCan("comments") {
+			settingsHeading(c, block, T("Playback Content"), iconComment)
 			row(T("Top Comments in Quiet Parts"), T("In intros, breaks and outros, a song's top comments show in place of the lyrics"), func() {
 				if ui.Switch(c.Key("hot-comments"), &s.HotComments).Label(T("Top Comments in Quiet Parts")).Changed() {
 					a.changed()
 				}
 			})
 		}
-		row(T("Even Out Loudness"), T("Adjust each song's volume by what its plugin measured of it, for them to sound as loud as each other"), func() {
-			if ui.Switch(c.Key("normalize"), &s.Normalize).Label(T("Even Out Loudness")).Changed() {
-				a.pl.SetVolume(a.volume)
-				a.changed()
-			}
-		})
 	})
 
 	add("cache", T("Cache"), iconDatabase, func(row settingsRow, block settingsBlock) {
@@ -532,6 +781,8 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 			})
 		})
 	}
+	// 分类只重排导航，页面和控件的稳定键保持不变，搜索结果也沿用同一顺序。
+	slices.SortStableFunc(sections, func(first, second settingsSection) int { return first.group - second.group })
 	return sections
 }
 
@@ -646,6 +897,7 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 				if enabled && lib.needsSetup {
 					ui.Text(c, setupNotice(lib, info)).FontSize(12).TextColor(p.accent).LineHeight(1.4)
 				}
+				a.sourceStatusSummary(c, lib, enabled, p)
 				a.pluginUpdateError(c, lib, p)
 			})
 			a.pluginUpdateButton(c, lib)
@@ -666,12 +918,29 @@ func (a *app) pluginSettings(c *ui.Context, lib *library, p palette) {
 			}
 			a.pluginMenu(c, lib, p)
 			a.pluginSwitch(c, lib)
+			if a.capabilitiesOpen == nil {
+				a.capabilitiesOpen = map[string]bool{}
+			}
+			if ui.Button(c.Key("capabilities"), T("Source capabilities")).Clicked() {
+				a.capabilitiesOpen[lib.id] = !a.capabilitiesOpen[lib.id]
+			}
 		})
-		if !enabled {
-			return
+		if a.capabilitiesOpen[lib.id] {
+			// 能力来自插件编译时导出，停用时也可安全展示，不需要启动插件探测。
+			ui.Column(c.Key("capability-list")).Gap(6).Padding(8, 10).Radius(8).Background(p.hover).Children(func() {
+				ui.Text(c, sourcePlaybackModeText(lib, info)).FontSize(12).FontWeight(500).TextColor(p.text)
+				ui.Row(c).Wrap().Gap(6).Children(func() {
+					for _, label := range sourceCapabilityLabels(lib) {
+						ui.Text(c, label).FontSize(11.5).TextColor(p.muted).Padding(2, 7).Radius(4).Background(p.bg)
+					}
+				})
+			})
 		}
 		if g, ok := lib.src.(guarded); ok {
 			a.pluginPermissions(c.Key("permissions"), lib, g, p)
+		}
+		if !enabled {
+			return
 		}
 		for _, st := range info.Settings {
 			a.sourceSetting(c.Key(st.Key), lib, st, p)
@@ -722,13 +991,14 @@ type guarded interface {
 // programs, which can do anything the listener can. It may not until they say.
 func (a *app) pluginPermissions(c *ui.Context, lib *library, g guarded, p palette) {
 	perms := g.Permissions()
+	reach := T("Asks for no network")
 	if len(perms.Network) > 0 {
-		reach := Tf("Can reach %s", strings.Join(perms.Network, ", "))
+		reach = Tf("Can reach %s", strings.Join(perms.Network, ", "))
 		if slices.Contains(perms.Network, "*") {
 			reach = T("Can reach any website")
 		}
-		ui.Text(c, reach).FontSize(12).TextColor(p.muted).LineHeight(1.4)
 	}
+	ui.Text(c, reach).FontSize(12).TextColor(p.muted).LineHeight(1.4)
 	if len(perms.Process) == 0 {
 		return
 	}
@@ -744,6 +1014,96 @@ func (a *app) pluginPermissions(c *ui.Context, lib *library, g guarded, p palett
 			a.grantPrograms(lib, g, !granted)
 		}
 	})
+}
+
+func (a *app) sourceStatusSummary(c *ui.Context, lib *library, enabled bool, p palette) {
+	ui.Row(c).Wrap().Gap(8).AlignItems(ui.Center).Children(func() {
+		if !enabled {
+			ui.Text(c, T("Disabled")).FontSize(11.5).TextColor(p.muted)
+			if lib.accountUnknown() {
+				ui.Text(c, T("Account status not checked")).FontSize(11.5).TextColor(p.muted)
+			}
+			return
+		}
+		if g, ok := lib.src.(guarded); ok && len(g.Permissions().Process) > 0 {
+			if g.Granted() {
+				ui.Text(c, T("Programs allowed")).FontSize(11.5).TextColor(p.muted)
+			} else {
+				ui.Text(c, T("Program permission needed")).FontSize(11.5).TextColor(p.accent)
+			}
+		}
+		switch {
+		case lib.needsSetup:
+			// 具体配置原因已在上方提示。
+		case lib.needsSignIn || lib.signedOut():
+			ui.Text(c, T("Sign in required")).FontSize(11.5).TextColor(p.accent)
+		case lib.accountUnknown():
+			ui.Text(c, T("Account status not checked")).FontSize(11.5).TextColor(p.muted)
+		case lib.homeErr != "":
+			ui.Text(c, T("Last load failed")).FontSize(11.5).TextColor(p.accent)
+		default:
+			ui.Text(c, T("Ready")).FontSize(11.5).TextColor(p.muted)
+		}
+	})
+}
+
+func sourcePlaybackModeText(lib *library, info music.Info) string {
+	if info.Playback == music.PlaybackRemote {
+		return T("Plays in external app · Download unavailable")
+	}
+	if lib.can("stream") {
+		return T("Plays in app · Supports single-track download")
+	}
+	return T("Browse only · Streaming unavailable")
+}
+
+func sourceCapabilityLabels(lib *library) []string {
+	var out []string
+	add := func(label string) {
+		if !slices.Contains(out, label) {
+			out = append(out, label)
+		}
+	}
+	if lib.can("search") {
+		add(T("Search"))
+	}
+	if lib.can("home") || lib.can("browse") {
+		add(T("Home"))
+	}
+	if lib.can("playlists") || lib.can("playlist") {
+		add(T("Playlists"))
+	}
+	if lib.can("createPlaylist") || lib.can("addToPlaylist") || lib.can("savePlaylist") {
+		add(T("Manage Playlists"))
+	}
+	if lib.can("album") || lib.can("artist") {
+		add(T("Albums & Artists"))
+	}
+	if lib.can("liked") || lib.can("like") {
+		add(T("Liked Songs"))
+	}
+	if lib.can("recent") {
+		add(T("Recently Played"))
+	}
+	if lib.can("shows") || lib.can("show") {
+		add(T("Podcasts"))
+	}
+	if lib.can("stations") || lib.can("stationNext") {
+		add(T("Radio"))
+	}
+	if lib.can("lyrics") {
+		add(T("Lyrics"))
+	}
+	if lib.can("comments") {
+		add(T("Comments"))
+	}
+	if lib.can("account") || lib.can("signIn") {
+		add(T("Account"))
+	}
+	if lib.can("stream") {
+		add(T("In-app Audio"))
+	}
+	return out
 }
 
 // programsWarning says which programs a plugin wants to start, before the
@@ -767,7 +1127,15 @@ func (a *app) grantPrograms(lib *library, g guarded, on bool) {
 			}
 			// Starting programs may be what it needed setting up for.
 			lib.needsSetup, lib.askedSetup, lib.setupReason = false, false, ""
-			a.libraryChanged(lib)
+			if a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
+			a.invalidateDownloads(lib.id)
+			if a.pluginEnabled(lib) {
+				a.libraryChanged(lib)
+			} else {
+				a.redraw()
+			}
 		})
 	}()
 }
@@ -857,7 +1225,11 @@ func (a *app) saveSetting(lib *library, key, value string, done func(error)) {
 				a.toast = Tf("Couldn't keep the setting: %s", err.Error())
 				return
 			}
+			wasNeedsSetup := lib.needsSetup
 			lib.needsSetup, lib.askedSetup, lib.setupReason = false, false, ""
+			if wasNeedsSetup && a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
 			a.libraryChanged(lib)
 			a.loadAccount(lib)
 		})

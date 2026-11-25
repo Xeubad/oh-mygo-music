@@ -40,9 +40,13 @@ func (a *app) loadBrowse(lib *library, page string, again bool) {
 		return
 	}
 	d.loading, d.err = true, ""
+	epoch := lib.pageEpoch
 	go func() {
 		b, err := answered(lib.src.Browse(page))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) || lib.browses[page] != d {
+				return
+			}
 			d.loading = false
 			if err != nil {
 				d.err = a.problem(lib, err, T("Couldn't load this page"))
@@ -127,6 +131,11 @@ type browseRow struct {
 	from, to int
 }
 
+type browseTrackKey struct {
+	section int
+	track   trackRowKey
+}
+
 type rowKind int
 
 const (
@@ -186,6 +195,22 @@ func (a *app) browseRows(c *ui.Context, page *music.Browse, pageID string, heade
 	top, bottom := a.insets(c)
 	a.underTop, a.underBottom = true, true
 	rows := len(layout) + 1
+	keys := make([]any, rows)
+	keys[0] = "header"
+	counts := make(map[browseTrackKey]int)
+	for index, row := range layout {
+		keys[index+1] = row
+		if row.kind == rowTrack {
+			track := page.Sections[row.section].Tracks[row.from]
+			key := browseTrackKey{row.section, trackRowKey{source: track.Source, id: track.ID}}
+			occurrence := counts[key]
+			counts[key]++
+			key.track.occurrence = occurrence
+			keys[index+1] = key
+		}
+	}
+	a.trackList.Key = func(index int) any { return keys[index] }
+	a.rowKeys = trackRowKeys{}
 	now := c.Now()
 	ui.List(c.Key(a.route), &a.trackList, rows, func(i int) {
 		if i == 0 {
@@ -312,7 +337,7 @@ func (a *app) sectionPage(c *ui.Context) {
 				ui.Text(c, i18n.Today(now)).FontSize(12).FontWeight(600).LetterSpacing(0.3).TextColor(p.muted).MaxLines(1)
 				ui.Text(c, title).FontSize(30).FontWeight(800).LetterSpacing(-0.6).MaxLines(2).LineHeight(1.2)
 				ui.Text(c, about).FontSize(13).TextColor(p.muted).MaxLines(2)
-				ui.Row(c).Gap(10).Margin(8, 0, 0, 0).Children(func() { a.playButtons(c, sec.Tracks) })
+				ui.Row(c).Wrap().Gap(10).Margin(8, 0, 0, 0).Children(func() { a.playButtons(c, sec.Tracks) })
 			})
 		})
 	})

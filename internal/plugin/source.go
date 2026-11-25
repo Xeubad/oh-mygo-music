@@ -47,6 +47,28 @@ func (p *Plugin) Account() (*music.Account, error) {
 	return a, nil
 }
 
+// SignInPlatform 固定本次登录目标，不临时修改全局账号或搜索平台。
+func (p *Plugin) SignInPlatform(platform string) (*music.Account, error) {
+	var a music.Account
+	if err := p.callWithin(signInTimeout, "signIn", map[string]string{"platform": platform}, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (p *Plugin) SignOutPlatform(platform string) error {
+	return p.call("signOut", map[string]string{"platform": platform}, nil)
+}
+
+// AccountPlatform 只查询明确平台；旧插件和通用 Source 接口仍保留原来的账号行为。
+func (p *Plugin) AccountPlatform(platform string) (*music.Account, error) {
+	var a *music.Account
+	if err := p.call("account", map[string]string{"platform": platform}, &a); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
 func (p *Plugin) Search(query string, kind music.SearchKind, offset int) (*music.SearchResult, error) {
 	var r music.SearchResult
 	err := p.call("search", map[string]any{"query": query, "kind": kind, "offset": offset}, &r)

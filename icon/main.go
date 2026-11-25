@@ -32,13 +32,10 @@ const ictool = "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/
 // icons are the documents drawn, with the PNG rendered from each and the
 // colors of its tonearm: the gradient and the cap on its pivot.
 var icons = []struct {
-	document, output   string
-	top, bottom, pivot string
+	document, output string
 }{
-	// Red, with a white tonearm.
-	{"icon/AppIcon.icon", "resources/icon.png", "#FFFFFF", "#E6E3E5", "#D9D5D8"},
-	// Cream, with a red one to match the label.
-	{"icon/AppIcon-dev.icon", "resources/icon-dev.png", "#FF5B5B", "#E3122C", "#FFE1DE"},
+	{"icon/AppIcon.icon", "resources/icon.png"},
+	{"icon/AppIcon-dev.icon", "resources/icon-dev.png"},
 }
 
 // A record on Icon Composer's 1024-point full-bleed canvas, seen close up:
@@ -53,9 +50,9 @@ var (
 func main() {
 	for _, ic := range icons {
 		layers := map[string]string{
-			"arm.svg":    armSVG(ic.top, ic.bottom, ic.pivot),
-			"record.svg": recordSVG(),
-			"label.svg":  labelSVG(),
+			"arm.svg":    waveTopSVG(),
+			"record.svg": waveBottomSVG(),
+			"label.svg":  waveAccentSVG(),
 		}
 		for name, s := range layers {
 			if err := os.WriteFile(filepath.Join(ic.document, "Assets", name), []byte(s), 0o644); err != nil {
@@ -66,6 +63,40 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+}
+
+func waveTopSVG() string {
+	return svg(`<defs>
+<linearGradient id="wave-top" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#164BFF"/>
+<stop offset="0.55" stop-color="#00BFFF"/>
+<stop offset="1" stop-color="#00E0BF"/>
+</linearGradient>
+</defs>
+<path d="M206 690C108 478 205 233 428 164C630 101 835 196 902 391" fill="none" stroke="url(#wave-top)" stroke-linecap="round" stroke-width="112"/>
+<path d="M232 656C172 488 258 307 447 248C609 197 760 258 816 390" fill="none" stroke="#0A2C9A" stroke-opacity=".52" stroke-linecap="round" stroke-width="28"/>`)
+}
+
+func waveBottomSVG() string {
+	return svg(`<defs>
+<linearGradient id="wave-bottom" x1="1" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#00DCC0"/>
+<stop offset="0.48" stop-color="#08A9E8"/>
+<stop offset="1" stop-color="#1747FF"/>
+</linearGradient>
+</defs>
+<path d="M818 340C951 468 933 680 796 817C647 966 394 958 257 814C161 713 143 580 187 470" fill="none" stroke="url(#wave-bottom)" stroke-linecap="round" stroke-width="112"/>
+<path d="M770 382C855 495 835 642 736 739C624 849 438 855 335 755" fill="none" stroke="#052B9B" stroke-opacity=".46" stroke-linecap="round" stroke-width="28"/>`)
+}
+
+func waveAccentSVG() string {
+	return svg(`<defs>
+<linearGradient id="wave-accent" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#FFD24A"/>
+<stop offset="1" stop-color="#FF8A26"/>
+</linearGradient>
+</defs>
+<path d="M777 588C817 516 861 444 902 392C929 432 942 478 942 531C942 587 922 642 886 686L825 636C844 610 858 583 870 554C838 565 809 577 777 588Z" fill="url(#wave-accent)"/>`)
 }
 
 func svg(body string) string {

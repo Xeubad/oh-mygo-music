@@ -69,6 +69,7 @@ func (a *app) syncDock() {
 // changeAppIcon shows the app's icon where the settings now say, as the
 // listener chose another place for it.
 func (a *app) changeAppIcon() {
+	a.startupTray = false
 	a.syncDock()
 	a.applyTray()
 }
@@ -76,19 +77,28 @@ func (a *app) changeAppIcon() {
 // applyTray adds or removes the icon in the menu bar or notification area,
 // as the settings say.
 func (a *app) applyTray() {
-	switch show := showsTray(a.settings); {
+	switch show := a.startupTray || showsTray(a.settings); {
 	case show && a.tray == nil:
 		icon, template := trayColor, false
+		menu := a.trayMenu()
 		if runtime.GOOS == "darwin" {
 			icon, template = trayTemplate, true
+			// macOS 绑定菜单后会拦截左键，菜单改由右键临时显示。
+			menu = nil
 		}
-		t, err := mygo.NewTray(mygo.TrayOptions{ID: "mygo-music", Icon: icon, IconIsTemplate: template, ToolTip: mygo.App.Name(), Menu: a.trayMenu()})
+		t, err := mygo.NewTray(mygo.TrayOptions{ID: "mygo-music", Icon: icon, IconIsTemplate: template, ToolTip: mygo.App.Name(), Menu: menu})
 		if err != nil {
 			log.Println("tray:", err)
 			return
 		}
-		// Windows' left click, where the right one opens the menu.
 		t.OnClick(a.showMain)
+		if runtime.GOOS == "darwin" {
+			t.OnRightClick(func() {
+				t.SetMenu(a.trayMenu())
+				t.PopUpMenu()
+				t.SetMenu(nil)
+			})
+		}
 		a.tray = t
 	case !show && a.tray != nil:
 		a.tray.Destroy()
@@ -98,7 +108,7 @@ func (a *app) applyTray() {
 
 // refreshTray gives the icon its menu anew, as in another language.
 func (a *app) refreshTray() {
-	if a.tray != nil {
+	if a.tray != nil && runtime.GOOS != "darwin" {
 		a.tray.SetMenu(a.trayMenu())
 	}
 }

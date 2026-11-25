@@ -45,13 +45,14 @@ func (a *app) search(q string) {
 // searchFor opens the page of a search, remembering its query. Searched
 // for again, it loads anew.
 func (a *app) searchFor(r route) {
+	if r.src == "" {
+		r.src = a.route.src
+	}
 	a.rememberSearch(r.query)
 	a.dismissSuggestions()
-	if r == a.route {
-		a.nowPlaying = false
-		a.loadSearch(r, true)
-		return
-	}
+	a.resetPagePosition(r)
+	// 显式搜索与历史返回不同：先换数据，再 open，避免缓存命中或重复发出首屏请求。
+	a.loadSearch(r, true)
 	a.open(r)
 }
 
@@ -74,9 +75,13 @@ func (a *app) moreResults(lib *library, r route, d *searchData) {
 	}
 	d.page.loading, d.page.err = true, ""
 	offset := d.res.Len()
+	epoch := lib.pageEpoch
 	go func() {
 		res, err := answered(lib.src.Search(r.query, r.kind, offset))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) || lib.searches[r] != d {
+				return
+			}
 			d.page.loading = false
 			if err != nil {
 				d.page.err = a.problem(lib, err, T("The search failed"))
@@ -193,15 +198,20 @@ func (a *app) searchHeader(c *ui.Context, d *searchData) {
 			labels = append(labels, T(k.label))
 		}
 	}
-	if len(kinds) < 2 {
-		return
+	if len(kinds) >= 2 {
+		ui.Row(c).Margin(0, 0, 18, 0).Children(func() {
+			if segmented(c.Key("kind"), &at, labels...) {
+				r.kind = kinds[at]
+				a.resetPagePosition(r)
+				a.show(r)
+			}
+		})
 	}
-	ui.Row(c).Margin(0, 0, 18, 0).Children(func() {
-		if segmented(c.Key("kind"), &at, labels...) {
-			r.kind = kinds[at]
-			a.show(r)
-		}
-	})
+	if r.kind == music.SearchTracks && a.countDownloadable(d.res.Tracks) > 0 {
+		ui.Row(c).Wrap().Gap(10).Margin(0, 0, 14, 0).Children(func() {
+			a.batchDownloadButtons(c, d.res.Tracks)
+		})
+	}
 }
 
 // artistCard is an artist's round photo over their name, opening their page.

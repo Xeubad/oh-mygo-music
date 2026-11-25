@@ -16,10 +16,10 @@ export const builtPlugins = __PLUGINS__
 export const mygo = 'https://mygo.egoist.dev'
 
 export const site = {
-  name: 'MyGo Music',
+  name: 'Oh MyGo Music',
   title: {
-    en: 'MyGo Music — a native music player for your files, and more',
-    zh: 'MyGo Music — 原生的桌面音乐播放器',
+    en: 'Oh MyGo Music — a native music player for your files, and more',
+    zh: 'Oh MyGo Music — 原生的桌面音乐播放器',
   } satisfies Record<Lang, string>,
   description: {
     en: 'A desktop music player written in Go with MyGo, no WebView. It plays your local files out of the box, with tags, covers and lyrics, and everything else comes from plugins.',

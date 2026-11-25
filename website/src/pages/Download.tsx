@@ -19,7 +19,7 @@ const platforms: { os: OS; name: string; note: [string, string]; builds: Build[]
   {
     os: 'mac',
     name: 'macOS',
-    note: ['macOS 13 or later, signed and notarized by Apple', 'macOS 13 或更新，已签名并经过 Apple 公证'],
+    note: ['macOS 13 or later. Not notarized by Apple.', 'macOS 13 或更新。安装包未经 Apple 公证。'],
     builds: [
       { label: ['Apple Silicon', 'Apple 芯片'], kind: ['.dmg', '.dmg'], match: has('arm64', '.dmg'), primary: true },
       { label: ['Intel', 'Intel'], kind: ['.dmg', '.dmg'], match: has('amd64', '.dmg') },

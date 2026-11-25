@@ -26,6 +26,17 @@ func (a *app) songMenu(c *ui.Context, tr *music.Track, size float32, color ui.Co
 func (a *app) songItems(tr *music.Track, pid string) func(m *ui.Menu) {
 	return func(m *ui.Menu) {
 		lib := a.trackLib(tr)
+		if m.Item(T("Play Next")).Disabled(tr.Unavailable || lib == nil).Chosen() {
+			next := *tr
+			if next.Source == "" {
+				next.Source = lib.id
+			}
+			a.pl.PlayNext(next)
+			return
+		}
+		if tr.ShowID == "" && m.Item(T("Share Card…")).Chosen() {
+			a.openShare(*tr)
+		}
 		if m.Item(T("Copy Title")).Chosen() {
 			copyText(tr.Name)
 		}

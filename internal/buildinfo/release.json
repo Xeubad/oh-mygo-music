@@ -1,7 +1,7 @@
 {
-  "version": "0.0.1",
+  "version": "0.0.14",
   "upstreamVersion": "0.1.25",
   "upstreamCommit": "298c88a03407844ac1c4eb76e3590edfe4577121",
-  "repository": "zxbdzh/mygo-music",
+  "repository": "zxbdzh/oh-mygo-music",
   "updatePublicKey": "7xX4NjZWCAWp6Z0tUrjcuXkc6HGmd3k62Hz/A2OLkUQ="
 }

@@ -48,14 +48,20 @@ const signInSettle = 250 * time.Millisecond
 
 // loadAccount asks a source who is signed in.
 func (a *app) loadAccount(lib *library) {
-	if !lib.can("account") || lib.accountBusy {
+	if !lib.can("account") || lib.accountBusy || a.libOf(lib.id) != lib {
 		return
 	}
 	lib.accountBusy = true
+	epoch := lib.pageEpoch
 	go func() {
 		acc, err := lib.src.Account()
 		a.post(func() {
 			lib.accountBusy = false
+			// 设置变更会换代个人缓存；旧查询只结束等待，再为当前平台重新确认身份。
+			if epoch != lib.pageEpoch {
+				a.loadAccount(lib)
+				return
+			}
 			first := !lib.accountAsked
 			lib.accountAsked = true
 			if err != nil {
@@ -70,7 +76,8 @@ func (a *app) loadAccount(lib *library) {
 				// loading it again could only move it. But hearts asked about
 				// before they were known are dropped as someone else's.
 				lib.liked = nil
-			case (was == nil) != (acc == nil):
+			case (was == nil) != (acc == nil), was != nil && acc != nil && was.ID != acc.ID:
+				// 同一插件可能切换两个均已登录的平台，不能继续显示上一账号的个人列表。
 				a.afterAccount(lib)
 			}
 		})
@@ -79,8 +86,14 @@ func (a *app) loadAccount(lib *library) {
 
 // afterAccount loads anew what's personal to who listens to a source.
 func (a *app) afterAccount(lib *library) {
+	if a.pl != nil {
+		a.pl.InvalidateSource(lib.id)
+	}
+	a.invalidateDownloads(lib.id)
+	a.discardPagePositions(lib)
 	lib.accountAsked = true
 	lib.forget()
+	lib.mine, lib.saved, lib.home, lib.recent = nil, nil, nil, nil
 	lib.needsSignIn, lib.askedSignIn = false, false
 	a.loadMine(lib)
 	a.loadHome(lib)
@@ -136,7 +149,9 @@ func (a *app) startSignIn() {
 		})
 	}
 	go func() {
-		acc, err := lib.src.SignIn()
+		var acc *music.Account
+		var err error
+		acc, err = lib.src.SignIn()
 		a.post(func() {
 			current := a.signIn.gen == gen
 			if current {

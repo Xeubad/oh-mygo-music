@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
 
 	"mygo-music/internal/i18n"
+	"mygo-music/internal/player"
 )
 
 // settings are the listener's choices, kept in settings.json in the user
@@ -44,8 +46,17 @@ type settings struct {
 	// Quality is what's asked of sources: standard, high or lossless. A source
 	// may ignore it.
 	Quality string `json:"quality"`
+	// 空值表示沿用播放音质（Quality），显式设置时作为下载的默认请求音质。
+	DownloadQuality string `json:"downloadQuality,omitempty"`
+	// DownloadDirectory 为默认下载文件夹；空值表示使用系统默认下载目录。
+	DownloadDirectory string `json:"downloadDirectory,omitempty"`
+	// PromptDownload 控制下载前是否弹出确认窗口；正值不省略以兼容缺省配置默认开启。
+	PromptDownload bool `json:"promptDownload"`
 	// Appearance is light, dark, or system to follow the system.
 	Appearance string `json:"appearance"`
+	// 保存显式关闭的值，旧配置缺少此项时仍采用默认开启。
+	CoverBackdrop      bool               `json:"coverBackdrop"`
+	CoverBackdropStyle coverBackdropStyle `json:"coverBackdropStyle"`
 	// GrowFromCover opens Now Playing out of the player bar's cover, and
 	// closes it back into it: an experiment the listener turns on. Off, it
 	// slides up from the bottom of the window.
@@ -56,9 +67,22 @@ type settings struct {
 	// LyricsStage shows lyrics on the stage, Folia's style, in Now
 	// Playing, rather than scrolling.
 	LyricsStage bool `json:"lyricsStage"`
+	// 反向字段让旧配置缺失时保持显示译文，用户明确关闭后可跨重启保留。
+	HidePlaybackTranslation bool            `json:"hidePlaybackTranslation,omitempty"`
+	HideCardTranslation     bool            `json:"hideCardTranslation,omitempty"`
+	LyricsScript            string          `json:"lyricsScript,omitempty"`
+	ChineseLyrics           map[string]bool `json:"chineseLyrics,omitempty"`
+	CardTemplate            string          `json:"cardTemplate,omitempty"`
+	CardSquare              bool            `json:"cardSquare,omitempty"`
+	CardDirectory           string          `json:"cardDirectory,omitempty"`
+	// ShareServerURL is the user's own HTTPS service; its token is stored in the OS credential store.
+	ShareServerURL string `json:"shareServerUrl,omitempty"`
 	// StageStyle is how the stage sets its lyrics (stageStyles): empty for
 	// Folia's classic, or the id of another of its visualizers.
-	StageStyle string `json:"stageStyle,omitempty"`
+	StageStyle     string `json:"stageStyle,omitempty"`
+	StageIntensity string `json:"stageIntensity,omitempty"`
+	// 律动独立选择原文、译文或双语；空值保留原有双语呈现。
+	StageLanguage string `json:"stageLanguage,omitempty"`
 	// PlayerStyle is how Now Playing shows the song playing
 	// (playerStyles): empty for its cover, or a retro player's id.
 	PlayerStyle string `json:"playerStyle,omitempty"`
@@ -72,11 +96,21 @@ type settings struct {
 	Shortcuts *shortcutConfig `json:"globalShortcuts,omitempty"`
 	// Normalize evens out the loudness of tracks, by what their source
 	// measured of each.
-	Normalize bool `json:"normalize"`
+	Normalize           bool `json:"normalize"`
+	CrossfadeEnabled    bool `json:"crossfadeEnabled"`
+	CrossfadeDurationMs int  `json:"crossfadeDurationMs"`
+	// 开启默认项不能省略 false，否则重启会丢失用户关闭的选择。
+	PlaybackFadeEnabled bool `json:"playbackFadeEnabled"`
+	PauseFadeOutMs      int  `json:"pauseFadeOutMs"`
+	PlayFadeInMs        int  `json:"playFadeInMs"`
 	// HotComments shows a song's top comments in its quiet parts, in place of
 	// the lyrics (quietComment), for a source with comments: the listener
 	// turns it on.
 	HotComments bool `json:"hotComments"`
+	// BetterLyricsIntegration shares playback and source lyrics over loopback when enabled.
+	BetterLyricsIntegration bool `json:"betterLyricsIntegration"`
+	// 独立授权默认关闭，旧版本只读联动不能在升级后自动获得写权限。
+	BetterLyricsLyricsWrite bool `json:"betterLyricsLyricsWrite"`
 	// Fog fills Now Playing's backdrop with fog of the cover's color,
 	// rising and swelling with the bass: an experiment the listener turns
 	// on.
@@ -84,6 +118,9 @@ type settings struct {
 	// AppIcon is where the app's icon shows on macOS (appIcons); elsewhere
 	// it is always in the notification area.
 	AppIcon string `json:"appIcon"`
+	// LaunchAtLoginBackground keeps login launches in the tray until the
+	// listener asks to see the main window.
+	LaunchAtLoginBackground bool `json:"launchAtLoginBackground"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`
@@ -94,7 +131,35 @@ type settings struct {
 }
 
 func defaultSettings() settings {
-	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048}
+	return settings{Language: i18n.System, NotchActivity: true, Quality: "high", PromptDownload: true, Appearance: "system", CoverBackdrop: true, CoverBackdropStyle: defaultCoverBackdropStyle(), Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, StageIntensity: "standard", CrossfadeEnabled: true, CrossfadeDurationMs: 5000, PlaybackFadeEnabled: true, PauseFadeOutMs: 180, PlayFadeInMs: 260}
+}
+
+type coverBackdropStyle struct {
+	Blur  float64 `json:"blur"`
+	Shade float64 `json:"shade"`
+}
+
+func defaultCoverBackdropStyle() coverBackdropStyle {
+	return coverBackdropStyle{Blur: 70, Shade: 50}
+}
+
+// 遮罩最低档仍留一点暗色护底，避免封面高光冲掉白字。
+func (s coverBackdropStyle) shadeScale() float32 {
+	return 0.45 + 1.1*clamp01(float32(s.Shade/100))
+}
+
+func (s settings) playbackTransitions() player.TransitionSettings {
+	crossfade, pause, play := s.CrossfadeDurationMs, s.PauseFadeOutMs, s.PlayFadeInMs
+	if crossfade < 1000 || crossfade > 12000 {
+		crossfade = 5000
+	}
+	if pause < 50 || pause > 1000 {
+		pause = 180
+	}
+	if play < 50 || play > 1000 {
+		play = 260
+	}
+	return player.TransitionSettings{Crossfade: s.CrossfadeEnabled, CrossfadeDuration: time.Duration(crossfade) * time.Millisecond, PlaybackFade: s.PlaybackFadeEnabled, PauseFadeOut: time.Duration(pause) * time.Millisecond, PlayFadeIn: time.Duration(play) * time.Millisecond}
 }
 
 func settingsPath() (string, error) {
@@ -111,6 +176,8 @@ func loadSettings() settings {
 	if path, err := settingsPath(); err == nil {
 		if b, err := os.ReadFile(path); err == nil {
 			json.Unmarshal(b, &s)
+			s.CoverBackdropStyle.Blur = min(100, max(0, s.CoverBackdropStyle.Blur))
+			s.CoverBackdropStyle.Shade = min(100, max(0, s.CoverBackdropStyle.Shade))
 		}
 		s.path = path
 	}
@@ -171,6 +238,58 @@ var qualityLevels = []struct{ level, label string }{
 	{"standard", N("Standard")},
 	{"high", N("High")},
 	{"lossless", N("Lossless")},
+}
+
+// downloadQualityLevels 为默认下载音质的可选项；空值表示沿用当前播放音质。
+var downloadQualityLevels = []struct{ level, label string }{
+	{"", N("Follow Playback")},
+	{"standard", N("Standard")},
+	{"high", N("High")},
+	{"lossless", N("Lossless")},
+}
+
+// defaultSystemDownloadDir 返回系统默认下载目录，测试可替换。
+var defaultSystemDownloadDir = func() string {
+	dir, _ := mygo.App.Path(mygo.PathDownloads)
+	return dir
+}
+
+// downloadFolder 返回当前默认下载文件夹，未自定义时沿用系统下载目录。
+func (a *app) downloadFolder() string {
+	if dir := strings.TrimSpace(a.settings.DownloadDirectory); dir != "" {
+		return dir
+	}
+	return defaultSystemDownloadDir()
+}
+
+// downloadQualitySelection 返回配置中有效的下载音质档位（空字符串表示跟随播放音质）。
+func (a *app) downloadQualitySelection() string {
+	for _, q := range qualityLevels {
+		if q.level == a.settings.DownloadQuality {
+			return q.level
+		}
+	}
+	return ""
+}
+
+// resolveDownloadQuality 把配置或弹窗中的音质选择解析为真正请求音源的音质标识。
+func (a *app) resolveDownloadQuality(selection string) string {
+	for _, q := range qualityLevels {
+		if q.level == selection {
+			return q.level
+		}
+	}
+	for _, q := range qualityLevels {
+		if q.level == a.settings.Quality {
+			return q.level
+		}
+	}
+	return "high"
+}
+
+// downloadQuality 返回有效的默认下载音质，未指定或配置非法时回退到有效播放音质。
+func (a *app) downloadQuality() string {
+	return a.resolveDownloadQuality(a.settings.DownloadQuality)
 }
 
 // cacheLimits are the sizes the song cache may take, in megabytes.

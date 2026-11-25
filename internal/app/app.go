@@ -8,10 +8,12 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"mygo-music/internal/betterlyrics"
 	"mygo-music/internal/i18n"
 	"mygo-music/internal/local"
 	"mygo-music/internal/music"
@@ -34,6 +36,7 @@ const (
 	pageSavedAlbums
 	pageBrowse
 	pageSection
+	pageDownloads
 )
 
 type route struct {
@@ -101,42 +104,80 @@ type app struct {
 	settingSaves   map[*library]<-chan struct{} // source save order, main thread only
 	settingPending map[string]*settingWrite     // last queued value per source/key
 
-	trackList ui.ListState
+	trackList        ui.ListState
+	rowKeys          trackRowKeys
+	pageFocus        trackRowFocus
+	pageFocusHandle  ui.Handle
+	artistTab        int
+	restoreArtistTab bool
 	// Where the page and the sidebar are scrolled, kept while Now Playing
 	// covers them, unbuilt.
 	pageScroll ui.ScrollState
 	navScroll  ui.ScrollState
-	scrolled   route // the page trackList and pageScroll are of
+	scrolled   pageIdentity // the page trackList and pageScroll are of
+	positions  []pagePosition
 
 	mineCollapsed, savedCollapsed bool
 
 	query     string
 	searchBox ui.Handle
 
-	settingsPage      string // the settings' page that shows
-	settingsQuery     string // what's searched for in the settings
-	settingsSearchBox ui.Handle
-	settingsUnderTop  bool // the settings' page has scrolled under its top edge
+	settingsPage          string // the settings' page that shows
+	settingsQuery         string // what's searched for in the settings
+	settingsSearchBox     ui.Handle
+	settingsUnderTop      bool // the settings' page has scrolled under its top edge
+	playbackSettingsError string
+	betterLyricsServer    *betterlyrics.Server
+	betterLyricsOverrides *betterlyrics.OverrideStore
+	betterLyricsTimer     *time.Timer
+	betterLyricsTrackKey  string
+	betterLyricsTrackID   uint64
+	betterLyricsStatus    string
+
+	startupFailed           bool
+	startupBackgroundFailed bool
+	startupTray             bool
 
 	suggestions suggestState // what the search field's query may be after
 
-	nowPlaying  bool
-	npOpen      bool    // Now Playing as it last showed: open or not
-	npT         float32 // how far open Now Playing last showed, 0 to 1
-	npShift     float32 // how far down it last showed, pulled
-	npPull      float32 // how far the pointer has pulled it down
-	npHeld      bool    // whether the pointer presses on it, to pull it
-	npStill     bool    // whether it comes and goes in place, sliding or fading, rather than out of the bar's cover
-	npFrom      ui.Rect // the player bar's cover, which it grows out of
-	npPane      int     // paneLyrics, paneQueue, paneStage, paneComments or paneShow
-	lyricScroll ui.ScrollState
-	lyricGlide  lyricGlide
-	lyricAt     int
-	lyricTrack  string
-	queueList   ui.ListState
-	queueAt     int // the row of the queue pane last scrolled to, -1 while it is hidden
-	comments    commentState
-	tabCount    rollState // the count on the comments' tab, as it rolls
+	nowPlaying    bool
+	npOpen        bool    // Now Playing as it last showed: open or not
+	npT           float32 // how far open Now Playing last showed, 0 to 1
+	npShift       float32 // how far down it last showed, pulled
+	npPull        float32 // how far the pointer has pulled it down
+	npHeld        bool    // whether the pointer presses on it, to pull it
+	npStill       bool    // whether it comes and goes in place, sliding or fading, rather than out of the bar's cover
+	npFrom        ui.Rect // the player bar's cover, which it grows out of
+	npPane        int     // paneLyrics, paneQueue, paneStage, paneComments or paneShow
+	npPrevPane    int     // 上一帧的窗格，用于歌词与律动舞台之间的切换动画
+	lyricScroll   ui.ScrollState
+	lyricGlide    lyricGlide
+	lyricAt       int
+	lyricTrack    string
+	lyricDisplay  lyricDisplayCache
+	stageDisplay  stageLyricCache
+	sharing       *shareDraft
+	queueOpen     bool
+	queueButton   ui.Handle
+	queueDrawer   queueViewState
+	queuePaneView queueViewState
+	queueAt       int // the row of the queue pane last scrolled to, -1 while it is hidden
+	comments      commentState
+	tabCount      rollState // the count on the comments' tab, as it rolls
+
+	backgroundTasks     []*backgroundTask
+	nextBackgroundTask  uint64
+	backgroundTasksOpen bool
+	downloads           downloadCenter
+	downloadPrompt      downloadPromptState
+	trackSelect         trackSelectState
+	// capabilitiesOpen 记录设置页中展开的来源，避免停用来源点击后状态随重绘丢失。
+	capabilitiesOpen       map[string]bool
+	playbackDetailsOpen    bool
+	playbackDetailsAnchor  string
+	playbackDetailsTrackID string
+	playbackDetailsSource  string
+	playbackDetailsFailure string
 
 	radioStarting string // the radio asked for its first songs, or ""
 	stationAt     int    // which of a few stations their switch has chosen
@@ -144,6 +185,8 @@ type app struct {
 	volume              float64
 	volumeOpen          bool // the volume popover of the player bar shows
 	mutedFrom           float64
+	sleep               sleepTimerState
+	now                 func() time.Time
 	globalShortcuts     *shortcutManager
 	shortcutEdit        shortcutEditor
 	shortcutLikePending *shortcutLikeRequest
@@ -154,18 +197,27 @@ type app struct {
 	underTop, underBottom bool
 	barScrub              scrubState
 	npScrub               scrubState
-	backdropCache         backdropCache // the backdrop of Now Playing, as last painted
-	npArt                 *artwork      // the cover whose colors Now Playing shows
-	npCoverState          coverState    // the cover of Now Playing, as it is tilted and flicked
-	wallState             wallState     // the wall of the queue's covers, as it is dragged
-	quiet                 quietState    // the quiet parts of the song playing, for its top comments
+	backdropCache         backdropCache       // 正在播放页独立背景缓存
+	browseBackdrop        browseBackdropCache // 浏览页轻封面氛围独立缓存，与播放页互不踩踏
+	npArt                 *artwork            // the cover whose colors Now Playing shows
+	npCoverState          coverState          // the cover of Now Playing, as it is tilted and flicked
+	wallState             wallState           // the wall of the queue's covers, as it is dragged
+	quiet                 quietState          // the quiet parts of the song playing, for its top comments
 	sig                   playerSig
 	quitting              bool
 
-	settings    settings
-	settingsWin *mygo.Window
-	cacheUsed   int64 // the bytes the song cache takes, -1 until measured
-	updates     bool  // the update plugin is used (useUpdater)
+	settings            settings
+	settingsWin         *mygo.Window
+	cacheUsed           int64 // the bytes the song cache takes, -1 until measured
+	updates             bool  // the update plugin is used (useUpdater)
+	shareTokenDraft     string
+	shareTokenTemp      string
+	shareTokenTempKey   string
+	shareSettingsStatus string
+	shareTokenSaving    bool
+	shareList           []shareListItem
+	shareListLoading    bool
+	shareListError      string
 
 	restored     bool   // playback picked up where it was left
 	savedSession string // the session as last kept
@@ -219,6 +271,12 @@ func (a *app) showMain() {
 	}
 }
 
+// initialWindowHidden keeps a login launch in the tray when the user chose
+// background startup; ordinary launches still open the main window.
+func initialWindowHidden(openedAtLogin, background bool) bool {
+	return openedAtLogin && background
+}
+
 // userDataDir is where the app keeps what's the listener's.
 func userDataDir(sub string) string {
 	dir, err := mygo.App.Path(mygo.PathUserData)
@@ -259,6 +317,7 @@ func (a *app) makeSources() {
 // enabledChanged lists the plugins that are on. There's always one: with all of
 // them off in the settings, as by hand, it's the built-in one.
 func (a *app) enabledChanged() {
+	previous := a.libs
 	a.libs = nil
 	for _, lib := range a.allLibs {
 		if !slices.Contains(a.settings.DisabledPlugins, lib.id) {
@@ -267,6 +326,17 @@ func (a *app) enabledChanged() {
 	}
 	if len(a.libs) == 0 && len(a.allLibs) > 0 {
 		a.libs = a.allLibs[:1]
+	}
+	for _, lib := range previous {
+		if a.libOf(lib.id) != lib {
+			if a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
+			a.invalidateDownloads(lib.id)
+			a.discardPagePositions(lib)
+			lib.forgetPages()
+			lib.started = false
+		}
 	}
 	if a.headers != nil {
 		var on []*plugin.Plugin
@@ -323,6 +393,7 @@ func (a *app) closeSources() {
 
 // Run runs the app until it quits.
 func Run() error {
+	preserveLegacyAppData()
 	// Opening the app again shows the running one's window: Linux and
 	// Windows would start another, with a second tray icon. Asked before
 	// anything else, so the second one touches no data on its way out.
@@ -341,25 +412,48 @@ func Run() error {
 		a.settings = loadSettings()
 		a.settings.applyAppearance()
 		i18n.SetLanguage(i18n.Resolve(a.settings.Language, systemLanguages()))
+		openedAtLogin := false
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			openedAtLogin = mygo.App.WasOpenedAtLogin()
+		}
+		a.startupTray = initialWindowHidden(openedAtLogin, a.settings.LaunchAtLoginBackground)
 		a.npPane = a.lyricsPaneChosen()
 		if a.settings.PlayerStyle != "" {
 			go retroBitmaps() // rendered before Now Playing first shows them
 		}
 		a.makeSources()
+		if overrides, err := betterlyrics.NewOverrideStore(userDataDir("betterlyrics-lyrics.json")); err != nil {
+			log.Printf("loading BetterLyrics lyric overrides: %v", err)
+		} else {
+			a.betterLyricsOverrides = overrides
+		}
 		// Before the window: on Windows it lays out its content as it is
 		// made, and the view asks the player what plays.
 		a.art = newArtCache(a.post)
 		a.pl = player.New(a.post)
+		a.pl.LyricsOverride = func(track music.Track) *music.Lyrics {
+			return a.betterLyricsOverrides.Get(a.betterLyricsSongKey(track))
+		}
 		a.pl.Quiet = func(fn func()) { mygo.RunOnMain(fn) }
 		a.pl.Source = a.sourceByID
 		a.pl.Failed = a.sourceFailed
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
+		a.pl.Transitions = func() player.TransitionSettings { return a.settings.playbackTransitions() }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
+		a.pl.SleepEnded = func() { a.clearSleepTimer() }
+		a.restoreDownloads()
 		a.pl.Changed = func() {
+			if draft := a.sharing; draft != nil && draft.clipPreviewActive && a.pl.Playing() {
+				a.stopSharePreview(draft)
+			}
+			a.syncSleepTimerPlayback()
 			a.keepSession()
 			a.syncCaptions()
+			a.publishBetterLyrics()
+			a.scheduleBetterLyricsSync()
 		}
+		a.setBetterLyricsIntegration()
 		a.volume = a.settings.Volume
 		a.mutedFrom = a.settings.MutedFrom
 		if a.volume < 0 || a.volume > 1 {
@@ -368,6 +462,7 @@ func Run() error {
 		a.setPlayerVolume(a.volume)
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:         mygo.App.Name(),
+			Hidden:        a.startupTray,
 			Width:         1180,
 			Height:        780,
 			MinWidth:      880,
@@ -394,15 +489,26 @@ func Run() error {
 		// From the menu bar alone, the Dock icon shows while the window
 		// does.
 		a.syncDock()
-		a.win.OnShow(a.syncDock)
+		a.win.OnShow(func() {
+			a.syncDock()
+			a.checkSleepTimer()
+		})
 		a.win.OnHide(a.syncDock)
 		// Hidden, it draws nothing for a while: what the heap took for
 		// the pages it showed goes back to the system, which Go would
 		// keep for minutes.
 		a.win.OnHide(func() { go debug.FreeOSMemory() })
 		// Shown or switched to a while after, it shows what's new.
-		a.win.OnFocus(a.freshenHome)
+		a.win.OnFocus(func() {
+			a.freshenHome()
+			a.checkSleepTimer()
+		})
 		a.applyTray()
+		// 无法创建托盘时显示主窗口，避免后台启动后失去打开入口。
+		if a.startupTray && a.tray == nil {
+			a.startupTray = false
+			a.showMain()
+		}
 		for _, link := range a.links {
 			a.openLink(link)
 		}
@@ -427,6 +533,11 @@ func Run() error {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
+		a.cancelSleepTimer()
+		a.stopBackgroundTasks()
+		if a.sharing != nil {
+			a.stopSharePreview(a.sharing)
+		}
 		a.endShortcutRecording()
 		if a.globalShortcuts != nil {
 			a.globalShortcuts.stop()
@@ -439,6 +550,7 @@ func Run() error {
 	// Windows leaves an icon in the notification area after its app until
 	// the pointer passes over it.
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.stopBetterLyricsIntegration()
 		if a.tray != nil {
 			a.tray.Destroy()
 		}
@@ -462,4 +574,22 @@ func Run() error {
 		a.openLink(link)
 	})
 	return mygo.App.Run()
+}
+
+// preserveLegacyAppData keeps the user's library and settings in the old
+// directory when the display name changes, so renaming the app does not look
+// like a fresh install.
+func preserveLegacyAppData() {
+	if root, err := mygo.App.Path(mygo.PathAppData); err == nil {
+		legacy := filepath.Join(root, "MyGo Music")
+		if _, err := os.Stat(legacy); err == nil {
+			mygo.App.SetPath(mygo.PathUserData, legacy)
+		}
+	}
+	if root, err := os.UserCacheDir(); err == nil {
+		legacy := filepath.Join(root, "MyGo Music")
+		if _, err := os.Stat(legacy); err == nil {
+			mygo.App.SetPath(mygo.PathCache, legacy)
+		}
+	}
 }

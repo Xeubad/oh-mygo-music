@@ -99,6 +99,36 @@ func TestSeekWithoutClick(t *testing.T) {
 	}
 }
 
+func TestChangedReportsPauseAndSeek(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	var states []struct {
+		playing  bool
+		position time.Duration
+	}
+	p.Changed = func() {
+		states = append(states, struct {
+			playing  bool
+			position time.Duration
+		}{playing: p.Playing(), position: p.Position()})
+	}
+	p.Seek(95 * time.Second)
+	p.TogglePlay()
+	if len(states) < 2 {
+		t.Fatalf("got %d playback updates", len(states))
+	}
+	if !states[0].playing || states[0].position != 95*time.Second {
+		t.Fatalf("seek update: %+v", states[0])
+	}
+	last := states[len(states)-1]
+	if last.playing || last.position != 95*time.Second {
+		t.Fatalf("pause update: %+v", last)
+	}
+	for len(ch) > 0 {
+		next(t, ch)
+	}
+}
+
 // Seeks one after the other, as the progress bar asks when let go, play
 // on from the last.
 func TestSeekTwicePlaysOn(t *testing.T) {

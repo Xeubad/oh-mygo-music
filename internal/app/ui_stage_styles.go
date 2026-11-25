@@ -21,6 +21,26 @@ var stageStyles = []struct{ id, label string }{
 	{"", N("Flow")},
 	{"partita", N("Steps")},
 	{"tilt", N("Tilt")},
+	{"spotlight", N("Spotlight")},
+	{"wave", N("Sound Wave")},
+}
+
+var stageIntensities = []struct{ id, label string }{
+	{"gentle", N("Gentle")}, {"standard", N("Balanced")}, {"lively", N("Lively")},
+}
+
+func (a *app) stageMotion(c *ui.Context) float32 {
+	if c.Preferences().ReduceMotion {
+		return 0
+	}
+	switch a.settings.StageIntensity {
+	case "gentle":
+		return 0.45
+	case "lively":
+		return 1.25
+	default:
+		return 1
+	}
 }
 
 // stageStyleButton names the stage's style, and opens the menu of the
@@ -32,22 +52,37 @@ func (a *app) stageStyleButton(c *ui.Context) {
 			label = s.label
 		}
 	}
-	b := ui.ButtonBase(c.Key("stage-style")).Padding(6, 10, 6, 14).Radius(999).Gap(4).AlignItems(ui.Center).
-		FocusRing(false).Label(T("Stage Style")).Tooltip(T("Stage Style"))
-	bg, fg := ui.Transparent, white.Alpha(0.55)
+	b := npGlassControl(ui.ButtonBase(c.Key("stage-style")).Padding(6, 12).Gap(4).AlignItems(ui.Center).
+		FocusRing(false).Label(T("Stage Style")).Tooltip(T("Stage Style")))
+	fg := white.Alpha(0.82)
 	if b.Hovered() {
-		bg, fg = white.Alpha(0.06), white.Alpha(0.8)
+		fg = white
 	}
-	b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
 	b.Children(func() {
-		ui.Text(c, T(label)).FontSize(13).FontWeight(600).TextColor(fg)
-		ui.Icon(c, iconDown).Size(12, 12).TextColor(fg)
+		ui.Text(c, T(label)).FontSize(13).FontWeight(600).TextColor(b.AnimateColor("fg", fg, ui.Animation{Duration: 120 * time.Millisecond}))
+		ui.Icon(c, iconDown).Size(12, 12).TextColor(b.AnimateColor("fg", fg, ui.Animation{Duration: 120 * time.Millisecond}))
 	})
 	b.Menu(func(m *ui.Menu) {
 		for _, s := range stageStyles {
 			if m.Item(T(s.label)).Checked(a.settings.StageStyle == s.id).Chosen() && a.settings.StageStyle != s.id {
 				a.settings.StageStyle = s.id
-				a.settings.save()
+				if err := a.settings.save(); err != nil {
+					a.toast = T("Could not save display preferences")
+				}
+			}
+		}
+		m.Separator()
+		intensity := a.settings.StageIntensity
+		if intensity == "" {
+			intensity = "standard"
+		}
+		m.Item(T("Motion Intensity")).Disabled(true)
+		for _, option := range stageIntensities {
+			if m.Item(T(option.label)).Radio(intensity == option.id).Chosen() {
+				a.settings.StageIntensity = option.id
+				if err := a.settings.save(); err != nil {
+					a.toast = T("Could not save display preferences")
+				}
 			}
 		}
 		m.Separator()
@@ -193,12 +228,13 @@ func partitaRows(l *lyrics.Line, h float32) []partitaRow {
 // opacity fade, swelling a little as it goes.
 func (a *app) partitaLine(c *ui.Context, l *lyrics.Line, pos time.Duration, f, h, fade float32, accent ui.Color) {
 	const lookahead = 80 * time.Millisecond
+	motion := a.stageMotion(c)
 	rows := partitaRows(l, h)
 	if wordsLength(l.Words) > 40 {
 		f *= 0.8
 	}
 	f *= 0.8
-	grow := 1 + 0.05*(1-fade)
+	grow := 1 + 0.05*(1-fade)*motion
 	ui.Column(c.Key(l.At)).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().
 		Opacity(fade).Scale(grow, grow).PassThrough().Children(func() {
 		for ri, row := range rows {
@@ -244,7 +280,7 @@ func (a *app) partitaLine(c *ui.Context, l *lyrics.Line, pos time.Duration, f, h
 
 			pad := f * (row.scale*1.4 - 1) / 2
 			ui.Row(c.Key(ri)).AlignItems(ui.Center).Padding(3, 8).Margin(max(0, pad), 0, max(0, pad)+10, 0).
-				Translate(x, row.y).Scale(scale, scale).Opacity(opacity).
+				Translate(x*motion, row.y*motion).Scale(1+(scale-1)*motion, 1+(scale-1)*motion).Opacity(opacity).
 				Draw(func(p *ui.Painter, r ui.Rect) {
 					if guide <= 0 {
 						return
@@ -357,7 +393,7 @@ func splitParts(words []lyrics.Word, units [][2]int, n int) []tiltPart {
 // the accent, its characters up and down by turns. The whole line is at
 // opacity fade, rising a little as it goes; with sparks, each word throws
 // them as it is sung.
-func tiltLine(c *ui.Context, l *lyrics.Line, pos time.Duration, w, fade float32, accent ui.Color, sparks bool) {
+func tiltLine(c *ui.Context, l *lyrics.Line, pos time.Duration, w, fade float32, accent ui.Color, sparks bool, motion float32) {
 	size := min(w*0.06875, 90)
 	avail := w * 0.85
 	style := func(p tiltPart) (weight int, spacing float32) {
@@ -389,16 +425,16 @@ func tiltLine(c *ui.Context, l *lyrics.Line, pos time.Duration, w, fade float32,
 	}
 
 	ui.Column(c.Key(l.At)).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Gap(14).
-		Translate(0, -12*(1-fade)).Opacity(fade).PassThrough().Children(func() {
+		Translate(0, -12*(1-fade)*motion).Opacity(fade).PassThrough().Children(func() {
 		for pi, part := range parts {
-			tiltPartView(c.Key(pi), l.Words[part.from:part.to], part, pos, size, accent, sparks, pi == len(parts)-1)
+			tiltPartView(c.Key(pi), l.Words[part.from:part.to], part, pos, size, accent, sparks, pi == len(parts)-1, motion)
 		}
 	})
 }
 
 // tiltPartView shows a part of a line on 倾诉, its words, as they are at
 // pos, last when the part ends the line.
-func tiltPartView(c *ui.Context, words []lyrics.Word, part tiltPart, pos time.Duration, size float32, accent ui.Color, sparks, last bool) {
+func tiltPartView(c *ui.Context, words []lyrics.Word, part tiltPart, pos time.Duration, size float32, accent ui.Color, sparks, last bool, motion float32) {
 	ease := func(t float32) float32 { t = clamp01(t); return 1 - (1-t)*(1-t) }
 	since := float32((pos - (words[0].Start - tiltLead)).Seconds())
 	weight, spacing, gap, color, pulse := 400, float32(0.08), float32(0.25), white, float32(0.15)
@@ -411,7 +447,7 @@ func tiltPartView(c *ui.Context, words []lyrics.Word, part tiltPart, pos time.Du
 	} else if part.tail {
 		size *= 1.18
 	}
-	row := ui.Row(c).AlignItems(ui.Center).Translate(0, rise).Scale(scale, scale).Opacity(in)
+	row := ui.Row(c).AlignItems(ui.Center).Translate(0, rise*motion).Scale(1+(scale-1)*motion, 1+(scale-1)*motion).Opacity(in)
 	row.Children(func() {
 		k := 0 // characters so far, not counting spaces
 		for wi, word := range words {
@@ -438,7 +474,7 @@ func tiltPartView(c *ui.Context, words []lyrics.Word, part tiltPart, pos time.Du
 				default:
 					swell = 0.25 * clamp01((t-d)/(d*1.2))
 				}
-				s := 1 + swell*pulse
+				s := 1 + swell*pulse*motion
 				shown := ease((since - float32(k)*stagger) / 0.5)
 				ch := ui.Text(c.Key([2]int{wi, i}), string(r)).FontSize(size).FontWeight(weight).NoWrap().
 					TextColor(color).MarginEnd(size*spacing).Opacity(shown).Scale(s, s)
@@ -448,7 +484,7 @@ func tiltPartView(c *ui.Context, words []lyrics.Word, part tiltPart, pos time.Du
 					if k%2 == 0 {
 						y = -y
 					}
-					ch.Italic().LineHeight(1.25).Translate(0, y)
+					ch.Italic().LineHeight(1.25).Translate(0, y*motion)
 				} else {
 					ch.LineHeight(1.35)
 				}

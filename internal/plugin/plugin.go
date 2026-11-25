@@ -21,6 +21,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,8 +48,7 @@ const (
 	callTimeout = 30 * time.Second
 	// Signing in waits for the listener, in their browser.
 	signInTimeout = 5 * time.Minute
-	// A runtime that doesn't take on a task in this long is stuck in the
-	// plugin's code, rather than waiting on something.
+	// 旧接口超时后探测事件循环；仍能处理任务的异步等待不应丢失运行时状态。
 	stuckAfter = time.Second
 	// memoryLimit is what a plugin may keep. Passing it restarts the plugin.
 	memoryLimit = 256 << 20
@@ -148,7 +148,7 @@ type NeedsNewerApp struct {
 }
 
 func (e *NeedsNewerApp) Error() string {
-	return fmt.Sprintf("%s needs MyGo Music %s or later", e.Plugin, e.Version)
+	return fmt.Sprintf("%s needs Oh MyGo Music %s or later", e.Plugin, e.Version)
 }
 
 // Plugin is a music.Source in JavaScript. It starts on first use, and again on
@@ -166,12 +166,14 @@ type Plugin struct {
 	// level runs as it starts, and the host functions it calls take mu.
 	starting sync.Mutex
 
-	mu       sync.Mutex // guards what follows
-	settings map[string]string
-	storage  map[string]json.RawMessage
-	granted  bool // the listener let it start programs
-	vm       *vm
-	prompt   func(music.SignInPrompt)
+	diagnostics diagnosticRedactor
+
+	mu               sync.Mutex // guards what follows
+	settings         map[string]string
+	storage          map[string]json.RawMessage
+	granted          bool          // the listener let it start programs
+	vm               *vm
+	prompt           func(music.SignInPrompt)
 }
 
 // OnSignInPrompt says what to do with what the plugin wants shown as it signs in.
@@ -371,10 +373,11 @@ func (p *Plugin) Close() {
 
 // vm is a running plugin: only its loop's goroutine touches the runtime.
 type vm struct {
-	rt     *moejs.Runtime
-	loop   *eventloop.Loop
-	api    *webapi.API
-	helper moejs.Value // calls an export and reports how it went
+	rt          *moejs.Runtime
+	loop        *eventloop.Loop
+	api         *webapi.API
+	helper      moejs.Value // calls an export and reports how it went
+	diagnostics *diagnosticRedactor
 
 	inFlight int // on the loop: calls not answered yet
 
@@ -400,11 +403,14 @@ const fail = (e) => {
   const isObject = e !== null && typeof e === "object";
   bad(String((isObject && e.code) || ""), isObject ? String(e.message || "") : String(e));
 };
+const controller = new AbortController();
+if (arg !== null && typeof arg === "object") arg.signal = controller.signal;
 try {
   Promise.resolve(fn(arg)).then((r) => ok(r === undefined ? null : r), fail);
 } catch (e) {
   fail(e);
-}`
+}
+return () => controller.abort();`
 
 var helperScript = func() *moejs.Script {
 	s, err := moejs.CompileFunction("host-call", "fn, arg, ok, bad", helperBody, moejs.FunctionOptions{})
@@ -427,7 +433,7 @@ func (p *Plugin) running() (*vm, error) {
 	// Not under mu: the top level may read its storage or settings.
 	v, err := p.start()
 	if err != nil {
-		return nil, fmt.Errorf("starting plugin %s: %w", p.manifest.ID, err)
+		return nil, fmt.Errorf("starting plugin %s: %w", p.manifest.ID, diagnosticError{err: err, redactor: &p.diagnostics})
 	}
 	p.mu.Lock()
 	p.vm = v
@@ -450,7 +456,7 @@ func (p *Plugin) start() (*vm, error) {
 	}
 	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: memoryLimit})
 	loop, err := eventloop.New(rt, eventloop.Options{
-		OnError: func(err error) { log.Printf("plugin %s: %v", p.manifest.ID, err) },
+		OnError: func(err error) { log.Printf("plugin %s: %s", p.manifest.ID, p.diagnostics.redact(err.Error())) },
 	})
 	if err != nil {
 		return nil, err
@@ -462,7 +468,7 @@ func (p *Plugin) start() (*vm, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &vm{rt: rt, loop: loop, api: api, programs: map[*program]bool{}}
+	v := &vm{rt: rt, loop: loop, api: api, programs: map[*program]bool{}, diagnostics: &p.diagnostics}
 	if err := p.installHost(v); err != nil {
 		api.Close()
 		return nil, err
@@ -531,19 +537,19 @@ func asError(code, message string) error {
 }
 
 // ask calls an export on the loop; the answer comes through got, once.
-func (v *vm) ask(method string, params []byte, got func(answer)) {
+func (v *vm) ask(method string, params []byte, got func(answer)) moejs.Value {
 	rt := v.rt
 	fn, ok := rt.Export(method)
 	if !ok {
 		got(answer{err: music.ErrUnsupported})
-		return
+		return moejs.Undefined()
 	}
 	arg := moejs.Undefined()
 	if params != nil {
 		var err error
 		if arg, err = rt.ParseJSON(params); err != nil {
 			got(answer{err: err})
-			return
+			return moejs.Undefined()
 		}
 	}
 	// The call's data goes once nothing is using it. It can't go any sooner, as
@@ -564,13 +570,15 @@ func (v *vm) ask(method string, params []byte, got func(answer)) {
 		return moejs.Undefined(), nil
 	})
 	badFn := rt.Function("bad", 2, func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-		done(answer{err: asError(moejs.Arg(args, 0).String(), moejs.Arg(args, 1).String())})
+		done(answer{err: asError(moejs.Arg(args, 0).String(), v.diagnostics.redact(moejs.Arg(args, 1).String()))})
 		return moejs.Undefined(), nil
 	})
-	if _, err := rt.CallFunction(v.helper, moejs.Undefined(), fn, arg, okFn, badFn); err != nil {
+	abort, err := rt.CallFunction(v.helper, moejs.Undefined(), fn, arg, okFn, badFn)
+	if err != nil {
 		// Only an interrupt gets here: the helper catches what the plugin throws.
 		done(answer{err: err})
 	}
+	return abort
 }
 
 // call asks the plugin and decodes its answer into out, unless out is nil.
@@ -579,6 +587,19 @@ func (p *Plugin) call(method string, params, out any) error {
 }
 
 func (p *Plugin) callWithin(timeout time.Duration, method string, params, out any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return p.callWithContext(ctx, method, params, out, true)
+}
+
+func (p *Plugin) callContext(ctx context.Context, method string, params, out any) error {
+	return p.callWithContext(ctx, method, params, out, false)
+}
+
+func (p *Plugin) callWithContext(ctx context.Context, method string, params, out any, recoverLegacyTimeout bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !p.exports[method] {
 		return music.ErrUnsupported
 	}
@@ -593,14 +614,18 @@ func (p *Plugin) callWithin(timeout time.Duration, method string, params, out an
 		}
 	}
 	ch := make(chan answer, 1)
+	var abort moejs.Value
+	finished := false // 只在运行时线程访问，取消不能碰已经释放的调用数据。
 	if !v.loop.RunOnLoop(func(*moejs.Runtime) {
-		v.ask(method, encoded, func(a answer) { ch <- a })
+		if ctx.Err() != nil {
+			finished = true
+			return
+		}
+		abort = v.ask(method, encoded, func(a answer) { finished = true; ch <- a })
 	}) {
 		p.drop(v)
 		return fmt.Errorf("the plugin stopped; try again")
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case a := <-ch:
 		if a.err != nil {
@@ -610,21 +635,36 @@ func (p *Plugin) callWithin(timeout time.Duration, method string, params, out an
 			return nil
 		}
 		return json.Unmarshal(a.json, out)
-	case <-timer.C:
-		p.dropIfStuck(v)
-		return fmt.Errorf("the plugin didn't answer %s in time", method)
+	case <-ctx.Done():
+		// AbortSignal 贯通到 fetch；迟到回包仍被上层轮次世代隔离。
+		v.loop.RunOnLoop(func(rt *moejs.Runtime) {
+			if !finished {
+				rt.CallFunction(abort, moejs.Undefined())
+			}
+		})
+		if recoverLegacyTimeout {
+			// 未完成的 Promise 也可能只是等待 I/O；只重启无法响应事件循环探测的运行时。
+			p.dropIfStuck(v)
+			return fmt.Errorf("the plugin didn't answer %s in time", method)
+		}
+		// 协作导出收到 AbortSignal 并应中止其 HTTP/媒体请求；不能等待旧 VM
+		// 的恢复检测，否则恢复耗时会越过单候选和整轮截止。
+		return ctx.Err()
 	}
 }
 
-// dropIfStuck ends a runtime that takes on no more tasks, which code that never
-// returns, or passing the memory limit, leaves it as. A plugin only waiting on
-// something, and slow about it, goes on.
+// dropIfStuck 仅用于旧接口的超时恢复；协作候选必须在原截止立即返回，不等待探测。
 func (p *Plugin) dropIfStuck(v *vm) {
 	alive := make(chan struct{})
-	v.loop.RunOnLoop(func(*moejs.Runtime) { close(alive) })
+	if !v.loop.RunOnLoop(func(*moejs.Runtime) { close(alive) }) {
+		p.drop(v)
+		return
+	}
+	timer := time.NewTimer(stuckAfter)
+	defer timer.Stop()
 	select {
 	case <-alive:
-	case <-time.After(stuckAfter):
+	case <-timer.C:
 		log.Printf("plugin %s: stuck; restarting it", p.manifest.ID)
 		p.drop(v)
 	}

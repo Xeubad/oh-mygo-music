@@ -1,214 +1,140 @@
-# MyGo Music
+<div align="center">
 
-A native desktop music player written in Go with [MyGo](https://github.com/egoist/mygo), no WebView. It plays your local files out of the box, and everything else comes from plugins.
+<img src=".github/assets/readme/banner.png" width="100%" alt="Oh MyGo Music：让音乐，回到主角。" />
 
-## Features
+# Oh MyGo Music
 
-- Local files (MP3, FLAC, Ogg Vorbis, WAV, and ALAC, FLAC or AAC in .m4a and .aac) with tags, covers and `.lrc` lyrics
-- Playlists, liked songs, search, albums and artists
-- Now Playing with lyric stage styles, cover wall, queue, shuffle and repeat
-- Notch player on macOS, tray, media keys
-- Audio cache, fades on pause and seek, loudness normalization
-- Session restore
-- Podcast captions, written down on the device as episodes play
-- English and Simplified Chinese
-- Plugins can add accounts, catalogs, podcasts, stations, comments and pages of their own
+**让音乐，回到主角。**
 
-## Build
+为日常听歌持续打磨的原生桌面音乐播放器。<br />
+从熟悉的音乐收藏出发，让每一次播放都有更多可能。
 
-```bash
-go tool mygo dev     # run in development
-go tool mygo build   # package into build/
-go test ./internal/...
-```
+**简体中文** · [English](README.en.md)
 
-## Podcast captions
+[下载最新版本](https://github.com/zxbdzh/oh-mygo-music/releases/latest) · [当前体验](#当前体验) · [快速开始](#快速开始) · [更新记录](FORK_CHANGELOG.md) · [反馈问题](https://github.com/zxbdzh/oh-mygo-music/issues)
 
-Episodes are written down on the device as they play, with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) and Qwen3-ASR, which the app downloads when the listener asks for them. The libraries come from this repository's `sherpa-onnx-<version>` prerelease, which only changes with that version:
+[![Release](https://img.shields.io/github/v/release/zxbdzh/oh-mygo-music?style=flat-square&color=ef4452&label=release)](https://github.com/zxbdzh/oh-mygo-music/releases/latest)
+[![Windows](https://img.shields.io/badge/Windows-x64%20%7C%20ARM64-242428?style=flat-square)](#下载)
+[![Go](https://img.shields.io/badge/Go-native%20UI-242428?style=flat-square&logo=go&logoColor=white)](https://github.com/egoist/mygo)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-242428?style=flat-square)](LICENSE)
 
-```bash
-go run ./scripts/sherpa -sign "Developer ID Application: …"
-gh release create sherpa-onnx-2.0.1 --prerelease --latest=false build/sherpa/*
-```
+</div>
 
-## Plugins
+> 项目源自 [egoist / MyGo Music](https://github.com/egoist/mygo-music)，在原生桌面体验的基础上持续改进与扩展。感谢原项目与贡献者。
 
-A plugin is a folder in the app's `plugins` directory (Settings > Plugins > + > Show Plugins Folder) with a `plugin.json` and one JavaScript or TypeScript file. Install one with the + in Settings > Plugins from GitHub, by its repository or its address, or from its folder or a zip of it on this computer, or drop the folder in by hand. Remove one from its ⋯ menu there. There's nothing to build, and the same plugin runs on every platform. [`examples/demo-plugin`](examples/demo-plugin) does everything a plugin can with made-up data: copy it to start.
+<img src=".github/assets/readme/now-playing.png" width="100%" alt="正在播放界面：左侧专辑封面和播放控制，右侧同步高亮歌词。" />
 
-```json
-{
-  "id": "example",
-  "name": "Example",
-  "version": "1.0.0",
-  "minAppVersion": "0.1.8",
-  "main": "index.js",
-  "playback": "stream",
-  "permissions": { "network": ["api.example.com"] },
-  "settings": [{ "key": "apiKey", "label": "API Key", "help": "From your account page", "link": "https://example.com/keys" }],
-  "navigation": [
-    { "builtin": "home" },
-    { "title": "Charts", "page": "charts", "icon": "chart" },
-    { "title": "Stations", "builtin": "stations" }
-  ]
-}
-```
+<p align="center"><sub>界面示例；歌曲、歌手与封面均为演示数据。</sub></p>
 
-```js
-export async function search({ query, kind, offset }) {
-  const res = await fetch(`https://api.example.com/search?q=${encodeURIComponent(query)}&type=${kind}&offset=${offset}`, {
-    headers: { authorization: `Bearer ${host.setting("apiKey")}` },
-  });
-  return { tracks: (await res.json()).items.map(toTrack), more: false };
-}
+## 当前体验
 
-export function stream({ id, quality }) {
-  return { url: `https://api.example.com/audio/${id}.mp3`, type: "mp3" };
-}
-```
+这里展示当前版本的一部分体验，更多变化见[更新记录](FORK_CHANGELOG.md)和[发行说明](https://github.com/zxbdzh/oh-mygo-music/releases)。欢迎在 [Issues](https://github.com/zxbdzh/oh-mygo-music/issues) 分享你的使用感受与新想法。
 
-Export a function for each thing the plugin does. Each takes one object of parameters and returns a value or a promise. What it doesn't export, the app leaves out of its pages.
+- **把听歌变成一种享受。** 同步歌词、歌词舞台、封面墙，以及封面、黑胶与磁带三种播放器样式。
+- **做其他事，也能随手控歌。** Windows 全局快捷键支持播放／暂停、前后切歌、音量、静音、收藏和窗口显隐，可录制、自定义，并提示冲突。
+- **把熟悉的音乐收藏留在手边。** 播放本地音频，读取标签、封面与 `.lrc` 歌词，按歌曲、专辑、歌手浏览，也能管理歌单和收藏。
+- **按你的需要扩展。** 通过插件接入更多音乐来源、播客、电台与页面；支持从 GitHub、本地目录或 ZIP 安装。
+- **照顾每一次播放。** 音频缓存、暂停与跳转时的淡化、响度归一化，以及播放状态恢复。
+- **保留原生桌面体验。** 主界面由 Go 与 [MyGo](https://github.com/egoist/mygo) 渲染，提供托盘与中英文界面。
 
-| Export | Parameters | Returns |
-| --- | --- | --- |
-| `signIn`, `signOut`, `account` | | `{id, name, imageUrl, page}`; `account` returns `null` when signed out. `page` is a `browse` page of the listener's own, which the account menu opens as My Page |
-| `setSetting` | `{key, value}` | |
-| `home` | | `Browse` |
-| `browse` | `{page}` | `Browse` |
-| `search` | `{query, kind, offset}`, where `kind` is `tracks`, `albums`, `artists`, `playlists` or `shows` | `{tracks or albums or ..., more}` |
-| `suggest` | `{query}` | `[string]` |
-| `recent` | | `[Track]` |
-| `played` | `{id}` | |
-| `liked` | `{offset}` | `{tracks, more}` |
-| `isLiked` | `{ids}` | `{id: bool}` |
-| `like`, `likeEpisode` | `{id, on}` | `like` likes a song, and `likeEpisode` an episode: without it, episodes show no heart |
-| `album` | `{id}` | `{album, tracks}` |
-| `artist` | `{id}` | `{artist, tracks, albums}` |
-| `saveAlbum`, `followArtist`, `savePlaylist`, `subscribeShow` | `{id, on}` | |
-| `savedAlbums` | `{offset}` | `{albums, more}` |
-| `playlists` | | `[Playlist]` |
-| `playlist` | `{id}` | `Playlist` with `tracks` |
-| `createPlaylist` | `{name}` | `Playlist` |
-| `renamePlaylist` | `{id, name}` | |
-| `deletePlaylist` | `{id}` | |
-| `addToPlaylist`, `removeFromPlaylist` | `{id, trackIds}` | |
-| `movePlaylistTrack` | `{id, from, to}` | |
-| `shows` | | `[Show]` |
-| `show` | `{id, offset}` | `{show, episodes, more}` |
-| `stations` | | `[Station]` |
-| `stationNext` | `{id}` | `[Track]` |
-| `comments` | `{trackId, offset}` | `{comments, total, more}` |
-| `likeComment` | `{trackId, commentId, on}` | |
-| `postComment` | `{trackId, text}` | `Comment` |
-| `lyrics` | `{id}` | `{lrc, translation}`, or `{lines}` with timed `words` |
-| `stream` | `{id, quality}` | `{url, type, headers, size, gain, peak}`, where `type` is `mp3`, `flac`, `ogg`, `wav`, `m4a` (ALAC, FLAC or AAC-LC, whole or in fragments as a DASH stream serves it) or `aac` (AAC-LC in ADTS) |
-| `remotePlay` | `{ids, start, position}` | |
-| `remotePause`, `remoteResume` | | |
-| `remoteSeek` | `{position}` | |
-| `remoteVolume` | `{percent}` | |
-| `remoteState` | | `{playing, trackId, position, duration, volume, device}` or `null` |
-| `remoteDevices` | | `[{id, name, active}]` |
-| `remoteUse` | `{deviceId}` | |
+## 下载
 
-The shapes are in [`internal/music/music.go`](internal/music/music.go) by their JSON names. Times are in milliseconds. A `Browse` is `{title, subtitle, imageUrl, description, sections}`: with an `imageUrl`, such as a listener's avatar, it's headed round, as an artist's page is, and `description` goes under the title a line to each line. A section can hold `tracks`, `albums`, `artists`, `playlists`, `shows`, `stations`, `links` (`{title, subtitle, imageUrl, page}`), a `morePage`, and `empty`, what it says while it holds nothing. A source's first section of `tracks` leads its Home as a card of the day's songs, which opens a page of all of them, headed by the section's `pageTitle` if it has one, else its `title`, and its `subtitle` after the count of songs. A show's `publisherPage` is a `browse` page of who publishes it, which their name on the show's page opens.
+**[前往 GitHub Releases 下载最新版本 →](https://github.com/zxbdzh/oh-mygo-music/releases/latest)**
 
-An `imageUrl` can say where its size goes, with `{size}`, for an image server that makes pictures the size asked: `https://img.example.com/cover.jpg?param={size}y{size}` or `https://img.example.com/{size}/cover.jpg`. The app fills in how many pixels across it shows the picture at, 40 in a row and 600 in Now Playing, or 600 where nothing asks for a size. `%7Bsize%7D`, as JavaScript's `URL` writes it in a query, counts too. An app older than 0.1.20 fetches `{size}` as it is, so a plugin that gives it wants a `minAppVersion` of 0.1.20. Without it, give pictures at about 800 pixels if the service can, rather than as large as they were made: the app fetches and decodes the whole of each, a few megabytes for one thousands of pixels across, to show it in a row.
+目前提供 **macOS Apple 芯片与 Intel `.dmg`**，以及 **Windows x64 与 ARM64** 安装包。macOS 包未经 Apple 公证，首次打开可能需要在系统设置中确认。平台、架构和版本以最新发行页为准。
 
-Of the `playlists`, those with `mine` are the listener's own, listed under My Playlists, and the rest are ones they saved. One that is `mine` and also `fixed`, such as the songs they liked, is kept by the source itself: the app doesn't offer to rename it, delete it, add songs to it, take them out or move them.
-
-`navigation` is the plugin's sidebar, in its order. An entry opens a `browse` page of its own by `page`, or one of the app's by `builtin`: `home`, `liked`, `savedAlbums`, `stations` or `shows`, which can be given a `title`. Without `navigation`, the sidebar has an entry for each of the app's pages the plugin can do. Up to four stations show as a switch over one card, and more as a grid.
-
-`minAppVersion` is the oldest version of MyGo Music the plugin works with. An older one won't install it, and says to update first. Versions before 0.1.8 don't read it.
-
-### Setting controls
-
-Settings can declare an optional `type` to use a native control. Existing settings with only `key`, `label`, `help` and `link` keep their text fields and save on Enter or when focus leaves the field.
-
-```json
-{
-  "settings": [
-    { "key": "password", "label": "Password", "type": "password" },
-    { "key": "history", "label": "Save listening history", "type": "boolean" },
-    {
-      "key": "authMode", "label": "Sign-in method", "type": "select",
-      "options": [
-        { "value": "", "label": "Automatic (token)" },
-        { "value": "token", "label": "Token" },
-        { "value": "legacy", "label": "Legacy password" }
-      ]
-    }
-  ]
-}
-```
-
-- Missing `type`, `text`, unknown types and invalid select options use the existing text editor.
-- `password` masks the input and its accessibility value. It requires **Save changes**; Enter or blur does not save partial credentials. Storage remains plaintext JSON.
-- `boolean` uses a switch and saves the strings `"true"` or `"false"`. An unset value appears off without writing a default. Other existing string values retain a text editor.
-- `select` displays option labels but saves only their string values. Blank values are allowed. Unlisted saved values stay visible and unchanged until a declared choice is selected. Empty labels, duplicate labels or duplicate values fall back to text.
-- Switch/select changes save automatically; pending writes disable the control. Failed saves offer retry or restoration of the previous value. UI saves for each source run in initiation order.
-
-`host.setting(key)` and `setSetting({key, value})` still use strings; opening settings does not migrate or write values. Older hosts ignore `type` and `options` and render all fields as text, so plugin help must still explain text entry.
-
-### Translating a plugin
-
-Put the translations in `locales/<language>.json` next to `plugin.json`: `locales/zh-CN.json` for Simplified Chinese, the language the app speaks besides English. Each one maps the English text to the translation:
-
-```json
-{ "Example": "示例", "API Key": "API 密钥", "From your account page": "在你的账号页面获取", "Charts": "排行榜" }
-```
-
-The app translates the plugin's `name`, its settings' `label` and `help`, select option labels and its `navigation` titles with them. Option values are never translated. For what the plugin says itself, such as a page's titles or an error's message, `host.t(text)` answers the translation, or `text` when there's none, and `host.language()` the listener's language, `en` or `zh-CN`. Both follow the listener as they change it, and the page they're on loads again.
-
-With `"playback": "stream"`, the app plays what `stream` answers. With `"playback": "remote"`, the plugin makes the sound itself, or has another program do so, and the app calls the `remote` functions and polls `remoteState`.
-
-Throw an error with a `code` to say what's wrong: `signIn` prompts the listener to sign in, `setup` sends them to the plugin's settings, `unavailable` means this can't be played, and `unsupported` means the plugin doesn't do this. Any other error shows its message.
-
-### Publishing a plugin
-
-Put it in a public GitHub repository, with `plugin.json` at the top. The app takes the latest release: a `.zip` asset named for the platform, such as `plugin-darwin-arm64.zip`, or one named for none, or else the source. Without a release it takes the latest commit of the default branch. A new tag or commit is a new version, which shows as an update in the settings. An update asking for more permissions asks the listener again.
-
-Add the topic `mygo-music-plugin` to the repository to have it listed on the [plugins page](https://mygo-music.egoist.dev/plugins).
-
-Link to `mygo-music://install-plugin?repo=owner/repo` for an install button: it opens the app, which downloads the plugin and asks the listener before installing it. The development app (`mygo dev`) answers `mygo-music-dev://` instead.
-
-### What a plugin can reach
-
-A plugin has the JavaScript standard library, timers, `fetch` and its relatives, `URL`, `console` and `host`:
-
-| | |
+| 你的设备 | 在发行页中选择 |
 | --- | --- |
-| `host.platform`, `host.arch` | such as `darwin`, `arm64` |
-| `host.dir`, `host.dataDir` | the plugin's folder, and one for its data |
-| `host.storage.get(key)`, `.set(key, value)`, `.remove(key)` | JSON values that outlive the app |
-| `host.setting(key)` | what the listener filled in |
-| `host.t(text)`, `host.language()` | the text in the listener's language, from the plugin's `locales`, and that language: `en` or `zh-CN` |
-| `host.removeDataDir(name)` | removes a folder inside `host.dataDir` |
-| `host.crypto.md5(text)` | its hash, in hex |
-| `host.crypto.aesEcbEncrypt(key, text)` | AES-ECB with PKCS#7 padding, in hex, for services whose requests are made that way |
-| `host.openURL(url)` | opens a web page in the listener's browser |
-| `host.signInPrompt({qr, text})` | what the sign-in window shows while `signIn` goes on: a QR code to scan, and what to do |
-| `host.waitForRedirect({port, path, timeout, page})` | the end of a browser sign-in: listens on `127.0.0.1` and answers the query it's redirected back with. Needs the network permission |
-| `host.webSignIn({url, cookiesOf, until, userAgent})` | a sign-in on the service's own page, for one that has no other way in: the app shows `url` in a window of its own, apart from every other page and forgotten after, and once the cookies named in `until` are all there, closes it and answers `{cookie}`, the Cookie header a request to `cookiesOf` would send. `cookiesOf` has to be a host the network permission reaches. `userAgent` is what the page is told it's shown in |
-| `host.spawn(command, args)` | starts a program, by a path from the plugin's folder or absolute, or a name on `PATH`. Needs the process permission to name it. Returns `{pid, write(text), closeStdin(), readLine(), wait(), kill(), errorOutput()}` |
+| Apple 芯片 Mac | 名称含 `arm64` 的 `.dmg` |
+| Intel Mac | 名称含 `amd64` 的 `.dmg` |
+| 大多数 Intel / AMD Windows 电脑 | 名称含 `amd64` 的 `.exe` 安装包，或对应的 `.tar.gz` 压缩包 |
+| Windows ARM 设备 | 名称含 `arm64` 的 `.exe` 安装包，或对应的 `.tar.gz` 压缩包 |
 
-Everything else takes a permission in `plugin.json`:
+首次从原项目切换，请手动安装 Oh MyGo Music；后续更新从本仓库获取。
 
-- `"network": ["api.example.com", "*.example.com"]` lists the hosts `fetch` can reach, or `["*"]` for any. Without it, `fetch` reaches nothing.
-- `"requestHeaders"` are headers the app sends with what it fetches itself for the plugin, its pictures (`image`) and its songs' audio (`audio`), for a service that keeps those behind its session as well as its API:
+## 快速开始
 
-  ```json
-  "requestHeaders": [
-    { "hosts": ["{setting:server}"], "kinds": ["image", "audio"], "headers": { "cookie": "music-token={storage:token}" } },
-    { "hosts": ["img.example.com"], "kinds": ["image"], "headers": { "referer": "https://example.com/" } }
-  ]
-  ```
+1. **装好播放器。** 从上方选择对应设备的安装包。
+2. **添加音乐。** 在「设置 → 插件 → 本地文件」点击「添加文件夹…」，选中存放音乐的目录，扫描后回到主界面选歌播放。使用其他音乐来源时，先在「设置 → 插件」安装并启用对应插件，按提示完成登录或配置，再回到主界面切换到对应来源。
+3. **让它更顺手。** 在「设置 → 快捷键」开启全局快捷键，再按自己的习惯修改键位。
 
-  `hosts` are hosts or `*.domain`, which the network permission has to reach, or `{setting:key}`, the host of the server a setting names, such as `https://nas.local:5666`, while the network permission reaches it. `*` isn't one. Without `kinds`, they go with both. In `headers`, `{setting:key}` is what the listener filled in and `{storage:key}` what the plugin keeps with `host.storage`, as each is when the request goes out: a token the plugin stores anew goes with the next one, and none is kept in a URL. A header whose value isn't there yet, as before signing in, is left out. The headers a `stream` answers come first. Neither goes on to another host a request is redirected to.
-- `"process": ["bin/helper-*", "ffmpeg"]` lists the programs `host.spawn` can start, for what JavaScript can't do: a path from the plugin's folder or absolute, or a name looked up on `PATH`. A path only matches a path and a name only a name, and `*` matches within one folder, as in a glob. `["*"]`, or `true`, asks for any program, which the listener is warned about. The listener has to allow it in Settings first, as a program can do anything they can. Programs end when the plugin does, and once allowed, `fetch` can reach this machine too, to talk to them. Ship one binary per platform and pick it with `host.platform` and `host.arch`.
+全局快捷键默认关闭，开启后在播放器运行期间生效；窗口隐藏时仍可控歌，退出程序后失效。
 
-## Credits
+<details>
+<summary><strong>查看默认快捷键</strong></summary>
 
-- [folia-major](https://github.com/chthollyphile/folia-major): the lyric stage animations
+| 操作 | 默认快捷键 |
+| --- | --- |
+| 播放 / 暂停 | `Ctrl + Alt + P` |
+| 上一首 / 下一首 | `Ctrl + Alt + ←` / `Ctrl + Alt + →` |
+| 增大 / 减小音量 | `Ctrl + Alt + ↑` / `Ctrl + Alt + ↓` |
+| 静音 / 恢复音量 | `Ctrl + Alt + M` |
+| 收藏 / 取消收藏 | `Ctrl + Alt + L` |
+| 显示 / 隐藏主窗口 | `Ctrl + Alt + H` |
 
-## License
+每项都可以单独停用；也可以录制新键位或恢复默认设置。
 
-AGPL-3.0. See [LICENSE](LICENSE).
+</details>
+
+## 换一种方式，听同一首歌
+
+<img src=".github/assets/readme/player-styles.png" width="100%" alt="播放器样式对比：封面、黑胶唱机与磁带。" />
+
+从沉浸歌词到复古播放器，让熟悉的歌多一点现场感。
+
+<details>
+<summary><strong>看看歌单界面</strong></summary>
+
+<img src=".github/assets/readme/playlist.png" width="100%" alt="浅色歌单界面：侧边导航、歌单封面、歌曲列表与底部播放栏。" />
+
+</details>
+
+<a id="plugins"></a>
+
+## 插件
+
+打开「设置 → 插件」，点击 **+**，可以从 GitHub 仓库、本地目录或 ZIP 安装插件。插件可以提供账号、搜索、歌单、歌词、播客、电台等能力，具体以插件实现为准。
+
+可从[原项目的插件目录](https://mygo-music.egoist.dev/plugins)找起，该目录由原项目维护。安装前请核对插件要求，具体兼容性以当前版本的[发行说明](https://github.com/zxbdzh/oh-mygo-music/releases/latest)为准。
+
+想开发插件？从[示例插件](examples/demo-plugin)开始，完整的接口、设置控件、国际化、权限和发布说明见[插件开发文档](PLUGIN_DEVELOPMENT.md)。
+
+<details>
+<summary><strong>支持的音频格式</strong></summary>
+
+MP3、FLAC、Ogg Vorbis、WAV，以及 `.m4a` / `.aac` 中受支持的 ALAC、FLAC 或 AAC 音频。支持读取本地标签、专辑封面和 `.lrc` 歌词。
+
+</details>
+
+<a id="build"></a>
+
+<details>
+<summary><strong>从源码构建</strong></summary>
+
+项目的 Go 版本要求见 [go.mod](go.mod)。
+
+```bash
+git clone https://github.com/zxbdzh/oh-mygo-music.git
+cd oh-mygo-music
+go tool mygo dev       # 开发运行
+go tool mygo build     # 构建发行包
+go test ./internal/... # 运行测试
+```
+
+更多构建与播客转写运行库维护说明见[开发文档](DEVELOPMENT.md)。
+
+</details>
+
+## 一起把它做得更好
+
+欢迎提交[问题反馈与功能建议](https://github.com/zxbdzh/oh-mygo-music/issues)，或通过 [Pull Request](https://github.com/zxbdzh/oh-mygo-music/pulls) 参与改进。反馈问题时请附上版本、系统与架构，以及复现步骤。
+
+如果它让你的日常听歌更舒服，欢迎点个 **Star**，也分享给同样喜欢音乐的朋友。
+
+## 致谢与许可
+
+- [egoist / MyGo Music](https://github.com/egoist/mygo-music) — 上游播放器、界面与插件生态。
+- [MyGo](https://github.com/egoist/mygo) — 原生桌面界面框架。
+- [folia-major](https://github.com/chthollyphile/folia-major) — 歌词舞台动画的参考来源。
+
+本项目基于 **AGPL-3.0** 开源，详见 [LICENSE](LICENSE)。

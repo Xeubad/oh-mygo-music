@@ -1,4 +1,4 @@
-# 推送版本标签或手动运行后，构建 Windows 安装包及签名更新，上传到草稿。
+# 推送版本标签或手动运行后，构建 Windows、macOS 安装包及签名更新，上传到草稿。
 # 核对安装包和发布说明后再发布；官方代码同步仍由用户主动发起。
 name: Release
 
@@ -16,6 +16,7 @@ concurrency:
 
 env:
   CGO_ENABLED: "0"
+  GOMAXPROCS: "4"
 
 jobs:
   draft-release:
@@ -73,9 +74,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # MyGo 上传时会读取并合并共享的 SHA256SUMS，串行避免互相覆盖。
+      max-parallel: 1
       matrix:
         include:
           - { name: Windows, os: windows-latest, platform: "windows/amd64,windows/arm64" }
+          - { name: macOS, os: macos-latest, platform: "darwin/arm64,darwin/amd64" }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -86,11 +90,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # setup-go's own cache is keyed on the runner and go.sum alone, so the
-      # Windows and Linux jobs, both on Ubuntu, race for one key and only
-      # one of them keeps its build cache, and any change to go.sum, like
-      # bumping mygo, starts every job cold. This one is per job, and falls
-      # back to the job's last cache when go.mod or go.sum changes.
+      # 各平台独立缓存；依赖变更后仍可用上一轮缓存预热。
       - name: Find Go's caches
         id: go-env
         run: |

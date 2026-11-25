@@ -89,6 +89,69 @@ func TestSongMenuOnRightClick(t *testing.T) {
 	}
 }
 
+// 右键下一首播放只插入队列，不能替换原列表或打断当前播放、暂停与进度。
+func TestSongMenuQueuesNextWithoutInterruptingPlayback(t *testing.T) {
+	for _, playing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "paused", true: "playing"}[playing], func(t *testing.T) {
+			a := newTestApp()
+			current := song("current", "Current song", "Artist")
+			current.Source = "fake"
+			later := song("later", "Later song", "Artist")
+			later.Source = "fake"
+			picked := song("picked", "Picked song", "Artist")
+			a.pl.Cue([]music.Track{current, later})
+			if playing {
+				a.pl.Hold(42 * time.Second)
+			}
+			position := a.pl.Position()
+			a.playlists["42"] = &music.Playlist{ID: "42", Name: "Choices", Tracks: []music.Track{picked}}
+			a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+			tester := ui.NewTester(a.view, 1200, 800)
+			tester.Frame()
+			if err := tester.RightClick("Picked song"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tester.ChooseMenuItem("Play Next"); err != nil {
+				t.Fatal(err)
+			}
+			tester.Frame()
+			if a.pl.Current().ID != "current" || a.pl.Playing() != playing || a.pl.Position() != position {
+				t.Fatalf("insertion changed current playback: %+v, playing %v, position %s", a.pl.Current(), a.pl.Playing(), a.pl.Position())
+			}
+			order, at := a.pl.PlayOrder()
+			queue := a.pl.Queue()
+			if len(order) != 3 || at != 0 || queue[order[1]].ID != "picked" || queue[order[1]].Source != "fake" || queue[order[2]].ID != "later" {
+				t.Fatalf("wrong next track or lost source: queue %+v, order %v at %d", queue, order, at)
+			}
+			if a.playlists["42"].Tracks[0].Source != "" {
+				t.Fatal("queue insertion mutated the source list")
+			}
+		})
+	}
+}
+
+// 来源明确标记不可播放的曲目不能通过右键下一首播放绕过限制或改变当前队列。
+func TestSongMenuCannotQueueUnavailableTrack(t *testing.T) {
+	a := newTestApp()
+	a.pl.Cue([]music.Track{{ID: "current", Source: "fake", Name: "Current song"}})
+	picked := song("missing", "Unavailable song", "Artist")
+	picked.Unavailable = true
+	a.playlists["42"] = &music.Playlist{ID: "42", Name: "Choices", Tracks: []music.Track{picked}}
+	a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+	tester := ui.NewTester(a.view, 1200, 800)
+	tester.Frame()
+	if err := tester.RightClick("Unavailable song"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Play Next"); err == nil {
+		t.Fatal("unavailable song could be queued")
+	}
+	tester.CloseMenu()
+	if len(a.pl.Queue()) != 1 || a.pl.Current().ID != "current" {
+		t.Fatal("disabled action changed the queue")
+	}
+}
+
 // A song's menu goes to its artist's and album's pages, as far as its source
 // has them.
 func TestSongMenuGoesToPages(t *testing.T) {
@@ -131,13 +194,9 @@ func TestSongMenuDownloads(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	suggested := make(chan string, 1)
-	real := saveSongAs
-	saveSongAs = func(a *app, name string) string {
-		suggested <- name
-		return filepath.Join(dir, "picked.mp3")
-	}
-	defer func() { saveSongAs = real }()
+	realPick := pickDownloadFolder
+	pickDownloadFolder = func(a *app) string { return dir }
+	defer func() { pickDownloadFolder = realPick }()
 
 	a := newTestApp()
 	ch := posts(a)
@@ -155,9 +214,14 @@ func TestSongMenuDownloads(t *testing.T) {
 	if err := tt.ChooseMenuItem("Download…"); err != nil {
 		t.Fatalf("%v; the menu shows %q", err, tt.Menu())
 	}
-	if name := wait(t, suggested, "where to save it"); name != "AC_DC - Back in Black.mp3" {
-		t.Errorf("suggested %q", name)
+	tt.Frame()
+	if !a.downloadPrompt.open || a.downloadPrompt.fileName != "AC_DC - Back in Black" {
+		t.Fatalf("unexpected download prompt state: open=%v fileName=%q", a.downloadPrompt.open, a.downloadPrompt.fileName)
 	}
+	clickDownloadUI(t, tt, "Browse…")
+	until(t, ch, func() bool { return a.downloadPrompt.folder == dir })
+	a.downloadPrompt.fileName = "picked"
+	clickDownloadUI(t, tt, "Download")
 	until(t, ch, func() bool { return strings.HasPrefix(a.toast, "Downloaded") })
 	if b, _ := os.ReadFile(filepath.Join(dir, "picked.mp3")); string(b) != "the song" {
 		t.Errorf("saved %q", b)

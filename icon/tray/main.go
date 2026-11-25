@@ -1,7 +1,6 @@
 // Command tray draws internal/app/tray/tray-template.png, the app's icon in
-// the macOS menu bar: the record and tonearm of the app's icon, black on
-// transparent for macOS to tint, the tonearm knocked out of the record
-// around it. It draws from signed distances, supersampled, at 2× of the
+// the macOS menu bar: the sound-wave O, black on transparent for macOS to
+// tint. It draws from signed distances, supersampled, at 2× of the
 // menu bar's 18 points.
 //
 // Run it from the repository root:
@@ -32,53 +31,21 @@ func along(a, u pt, d float64) pt { return pt{a.x + u.x*d, a.y + u.y*d} }
 
 // The glyph, in points, before it is fit to the square.
 var (
-	// The record, its label's edge cut as a ring, and the spindle's hole.
-	center    = pt{7.6, 10.6}
-	radius    = 7.0
-	labelEdge = 2.35
-	labelCut  = 0.8
-	spindle   = 0.85
-
-	// The tonearm: the stylus rests on the grooves, at tip, and the arm
-	// rises steeply from it to the pivot, past the record's edge.
-	tip       = along(center, pt{math.Cos(0.5), -math.Sin(0.5)}, 4.15)
-	toPivot   = pt{math.Cos(1.15), -math.Sin(1.15)}
-	pivot     = along(tip, toPivot, 7.2)
-	pivotR    = 1.45
-	armWidth  = 1.05
-	headLen   = 2.0
-	headWidth = 1.9
-	headR     = 0.45
-	// Knocked out of the record around the tonearm.
-	gap = 0.75
+	center = pt{9, 9}
+	radius = 7.1
+	inner  = 4.15
+	gap    = 0.72
 
 	// The glyph's longer side, centred in the 18-point square.
 	fit = 15.6
 )
 
-// segDist is the distance from p to the segment ab.
-func segDist(p, a, b pt) float64 {
-	pa, ba := sub(p, a), sub(b, a)
-	h := math.Max(0, math.Min(1, dot(pa, ba)/dot(ba, ba)))
-	return length(sub(pa, pt{ba.x * h, ba.y * h}))
-}
-
-// headDist is the signed distance from p to the headshell, a rounded box
-// from the tip back along the arm.
-func headDist(p pt) float64 {
-	v := pt{-toPivot.y, toPivot.x}
-	d := sub(p, tip)
-	q := pt{math.Abs(dot(d, toPivot)-headLen/2) - (headLen/2 - headR), math.Abs(dot(d, v)) - (headWidth/2 - headR)}
-	return length(pt{math.Max(q.x, 0), math.Max(q.y, 0)}) + math.Min(math.Max(q.x, q.y), 0) - headR
-}
-
 func inside(p pt) bool {
-	d := length(sub(p, center))
-	record := d < radius && math.Abs(d-labelEdge) > labelCut/2 && d > spindle
-	head := along(tip, toPivot, headLen/2)
-	arm, shell, hub := segDist(p, pivot, head), headDist(p), length(sub(p, pivot))
-	knocked := arm < armWidth/2+gap || shell < gap || hub < pivotR+gap
-	return record && !knocked || arm < armWidth/2 || shell < 0 || hub < pivotR
+	d := sub(p, center)
+	ring := length(d) < radius && length(d) > inner
+	angle := math.Atan2(d.y, d.x)
+	open := angle > -0.9 && angle < -0.15
+	return ring && !open
 }
 
 // frame is the scale and offset from the square to the glyph, which fit

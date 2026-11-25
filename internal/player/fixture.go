@@ -15,6 +15,7 @@ import (
 // Cue makes tracks the queue, in order, with the first current.
 func (p *Player) Cue(tracks []music.Track) {
 	p.queue = tracks
+	p.resetQueueIDs()
 	p.order = make([]int, len(tracks))
 	for i := range p.order {
 		p.order[i] = i
@@ -25,7 +26,7 @@ func (p *Player) Cue(tracks []music.Track) {
 
 // SetLyrics gives the current track lines, as loaded.
 func (p *Player) SetLyrics(lines []lyrics.Line) {
-	p.lyrics, p.lyricsLoaded = lines, true
+	p.lyrics, p.lyricsSource, p.lyricsLoaded = lines, nil, true
 }
 
 // Hold makes the player play at pos with nothing to play: its position

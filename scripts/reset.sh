@@ -11,7 +11,8 @@
 # quit first.
 set -euo pipefail
 
-name="MyGo Music"
+name="Oh MyGo Music"
+legacy_name="MyGo Music"
 id="dev.egoist.mygomusic"
 release=0 songs=0
 for arg in "$@"; do
@@ -39,6 +40,10 @@ if [[ $(uname) != Darwin ]]; then
 fi
 data="$HOME/Library/Application Support/$name"
 cache="$HOME/Library/Caches/$name"
+if [[ -d "$HOME/Library/Application Support/$legacy_name" ]]; then
+	data="$HOME/Library/Application Support/$legacy_name"
+	cache="$HOME/Library/Caches/$legacy_name"
+fi
 
 if pgrep -f "/$name.app/Contents/MacOS/" >/dev/null; then
 	echo "quitting $name…"
