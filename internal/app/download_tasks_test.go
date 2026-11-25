@@ -392,7 +392,7 @@ func TestDownloadTaskOpensSavedFile(t *testing.T) {
 	chooseDownload(t, tt, "First song")
 	until(t, ch, func() bool { return a.toast == "Downloaded First song" })
 	clickDownloadUI(t, tt, "Show in Folder")
-	if opened != path {
+	if !sameDownloadPath(opened, path) {
 		t.Fatalf("opened %q, want %q", opened, path)
 	}
 	if err := os.Remove(path); err != nil {
@@ -1646,7 +1646,7 @@ func TestDownloadPromptSingleAndBatchDefaultsAndCustomize(t *testing.T) {
 	if !a.downloadPrompt.open || a.downloadPrompt.batch {
 		t.Fatalf("expected single download prompt, got open=%v batch=%v", a.downloadPrompt.open, a.downloadPrompt.batch)
 	}
-	if a.downloadPrompt.folder != dir1 || a.downloadPrompt.quality != "lossless" || a.downloadPrompt.fileName != "Artist - My_Song" {
+	if !sameDownloadPath(a.downloadPrompt.folder, dir1) || a.downloadPrompt.quality != "lossless" || a.downloadPrompt.fileName != "Artist - My_Song" {
 		t.Fatalf("unexpected prompt defaults: %+v", a.downloadPrompt)
 	}
 
@@ -1658,7 +1658,7 @@ func TestDownloadPromptSingleAndBatchDefaultsAndCustomize(t *testing.T) {
 
 	// 临时改目录、改音质、改文件名（含非法路径字符），不勾默认选项。
 	clickDownloadUI(t, tt, "Browse…")
-	until(t, ch, func() bool { return a.downloadPrompt.folder == dir2 })
+	until(t, ch, func() bool { return sameDownloadPath(a.downloadPrompt.folder, dir2) })
 	clickSettingRole(t, tt, ui.RolePopUpButton, "Download Quality")
 	clickDownloadUI(t, tt, "Standard")
 	a.downloadPrompt.fileName = "custom/name"
@@ -1674,7 +1674,7 @@ func TestDownloadPromptSingleAndBatchDefaultsAndCustomize(t *testing.T) {
 		t.Fatalf("missing customized single file: %q, %v", data, err)
 	}
 	// 未勾选“设为默认”与“不再弹窗”时，设置保持原样。
-	if a.settings.DownloadDirectory != dir1 || a.settings.DownloadQuality != "lossless" || !a.settings.PromptDownload {
+	if !sameDownloadPath(a.settings.DownloadDirectory, dir1) || a.settings.DownloadQuality != "lossless" || !a.settings.PromptDownload {
 		t.Fatalf("temporary prompt overrides mutated settings: %+v", a.settings)
 	}
 
@@ -1704,7 +1704,7 @@ func TestDownloadPromptSingleAndBatchDefaultsAndCustomize(t *testing.T) {
 		t.Fatal("batch prompt missing ready/skipped summary")
 	}
 	clickDownloadUI(t, tt, "Browse…")
-	until(t, ch, func() bool { return a.downloadPrompt.folder == dir2 })
+	until(t, ch, func() bool { return sameDownloadPath(a.downloadPrompt.folder, dir2) })
 	clickSettingRole(t, tt, ui.RolePopUpButton, "Download Quality")
 	clickDownloadUI(t, tt, "Standard")
 	clickDownloadUI(t, tt, "Save folder and quality as default")
@@ -1728,7 +1728,7 @@ func TestDownloadPromptSingleAndBatchDefaultsAndCustomize(t *testing.T) {
 	if err := json.Unmarshal(raw, &reloaded); err != nil {
 		t.Fatalf("unmarshal settings: %v", err)
 	}
-	if reloaded.DownloadDirectory != dir2 || reloaded.DownloadQuality != "standard" || reloaded.PromptDownload {
+	if !sameDownloadPath(reloaded.DownloadDirectory, dir2) || reloaded.DownloadQuality != "standard" || reloaded.PromptDownload {
 		t.Fatalf("persisted defaults mismatch: dir=%q quality=%q prompt=%v", reloaded.DownloadDirectory, reloaded.DownloadQuality, reloaded.PromptDownload)
 	}
 
@@ -1789,7 +1789,7 @@ func TestSettingsDownloadFolderAndPromptToggle(t *testing.T) {
 	if err := settingsTT.Click("Browse…"); err != nil {
 		t.Fatal(err)
 	}
-	until(t, ch, func() bool { return a.settings.DownloadDirectory == customDir })
+	until(t, ch, func() bool { return sameDownloadPath(a.settings.DownloadDirectory, customDir) })
 	settled(settingsTT)
 
 	// 关闭“下载前询问”开关，并验证磁盘读取时不会回退为 true。
@@ -1807,7 +1807,7 @@ func TestSettingsDownloadFolderAndPromptToggle(t *testing.T) {
 	if err := json.Unmarshal(raw, &loaded); err != nil {
 		t.Fatalf("unmarshal settings.json: %v", err)
 	}
-	if loaded.DownloadDirectory != customDir || loaded.PromptDownload {
+	if !sameDownloadPath(loaded.DownloadDirectory, customDir) || loaded.PromptDownload {
 		t.Fatalf("reloaded settings mismatch: dir=%q prompt=%v", loaded.DownloadDirectory, loaded.PromptDownload)
 	}
 

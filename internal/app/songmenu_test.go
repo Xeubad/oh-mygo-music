@@ -219,7 +219,7 @@ func TestSongMenuDownloads(t *testing.T) {
 		t.Fatalf("unexpected download prompt state: open=%v fileName=%q", a.downloadPrompt.open, a.downloadPrompt.fileName)
 	}
 	clickDownloadUI(t, tt, "Browse…")
-	until(t, ch, func() bool { return a.downloadPrompt.folder == dir })
+	until(t, ch, func() bool { return sameDownloadPath(a.downloadPrompt.folder, dir) })
 	a.downloadPrompt.fileName = "picked"
 	clickDownloadUI(t, tt, "Download")
 	until(t, ch, func() bool { return strings.HasPrefix(a.toast, "Downloaded") })
