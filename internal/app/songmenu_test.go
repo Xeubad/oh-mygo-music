@@ -306,13 +306,9 @@ func TestSongMenuDownloads(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	suggested := make(chan string, 1)
-	real := saveSongAs
-	saveSongAs = func(a *app, name string) string {
-		suggested <- name
-		return filepath.Join(dir, "picked.mp3")
-	}
-	defer func() { saveSongAs = real }()
+	realPick := pickDownloadFolder
+	pickDownloadFolder = func(a *app) string { return dir }
+	defer func() { pickDownloadFolder = realPick }()
 
 	a := newTestApp()
 	ch := posts(a)
@@ -330,9 +326,14 @@ func TestSongMenuDownloads(t *testing.T) {
 	if err := tt.ChooseMenuItem("Download…"); err != nil {
 		t.Fatalf("%v; the menu shows %q", err, tt.Menu())
 	}
-	if name := wait(t, suggested, "where to save it"); name != "AC_DC - Back in Black.mp3" {
-		t.Errorf("suggested %q", name)
+	tt.Frame()
+	if !a.downloadPrompt.open || a.downloadPrompt.fileName != "AC_DC - Back in Black" {
+		t.Fatalf("unexpected download prompt state: open=%v fileName=%q", a.downloadPrompt.open, a.downloadPrompt.fileName)
 	}
+	clickDownloadUI(t, tt, "Browse…")
+	until(t, ch, func() bool { return sameDownloadPath(a.downloadPrompt.folder, dir) })
+	a.downloadPrompt.fileName = "picked"
+	clickDownloadUI(t, tt, "Download")
 	until(t, ch, func() bool { return strings.HasPrefix(a.toast, "Downloaded") })
 	if b, _ := os.ReadFile(filepath.Join(dir, "picked.mp3")); string(b) != "the song" {
 		t.Errorf("saved %q", b)

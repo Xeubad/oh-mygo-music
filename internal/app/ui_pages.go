@@ -60,10 +60,10 @@ func (a *app) homePage(c *ui.Context) {
 		a.browseRows(c, lib.home, "", func(c *ui.Context) { a.homeHello(c, now) })
 		return
 	}
-	loading := lib.homeLoading || !lib.started || lib.accountUnknown()
-	// A source that makes up its own Home shows none of this one until it said
-	// it has none: its playlists, loaded first, would show here, then make way.
-	nothing := len(lib.recent) == 0 && len(lib.mine) == 0 && len(lib.saved) == 0 || lib.can("home") && loading
+	cached := len(lib.recent) > 0 || len(lib.mine) > 0 || len(lib.saved) > 0
+	loading := lib.homeLoading || !lib.started || (lib.accountUnknown() && !cached)
+	// 账号查询只影响个人操作；已有缓存先展示，空白首屏仍等待账号结果再决定空状态。
+	nothing := !cached || lib.can("home") && loading
 	if nothing && !loading {
 		if lib.homeErr != "" {
 			a.centered(c, lib.homeErr, func() { a.loadHome(lib) })
@@ -297,7 +297,7 @@ func (a *app) playlistHeader(c *ui.Context, pl *music.Playlist) {
 			if d := strings.TrimSpace(pl.Description); d != "" {
 				ui.Text(c, strings.ReplaceAll(d, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
 			}
-			ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
+			ui.Row(c).Wrap().Gap(10).Margin(10, 0, 0, 0).Children(func() {
 				a.playButtons(c, pl.Tracks)
 				if a.savable(pl) {
 					icon, label := iconPlus, TC("Save", "library")
@@ -330,6 +330,51 @@ func (a *app) playButtons(c *ui.Context, tracks []music.Track) {
 	if pillButton(c.Key("shuffle"), iconShuffle, T("Shuffle"), p.hover.Over(p.bg), p.text).Clicked() {
 		a.pl.PlayShuffled(tracks)
 	}
+	a.batchDownloadButtons(c, tracks)
+}
+
+func (a *app) batchDownloadButtons(c *ui.Context, tracks []music.Track) {
+	if a.countDownloadable(tracks) == 0 {
+		return
+	}
+	p := a.pal
+	if pillButton(c.Key("batch-download"), iconDownload, T("Batch Download"), p.hover.Over(p.bg), p.text).Clicked() {
+		a.downloadBatch(tracks)
+	}
+	label, icon := T("Select"), iconCheck
+	if a.trackSelectActive() {
+		label, icon = T("Done"), iconX
+	}
+	if pillButton(c.Key("select-tracks"), icon, label, p.hover.Over(p.bg), p.text).Clicked() {
+		if a.trackSelectActive() {
+			a.exitTrackSelect()
+		} else {
+			a.enterTrackSelect()
+		}
+	}
+}
+
+func (a *app) trackSelectionBar(c *ui.Context, tracks []music.Track) {
+	p := a.pal
+	selected := a.selectedDownloadableTracks(tracks)
+	totalDownloadable := a.countDownloadable(tracks)
+	ui.Row(c.Key("track-selection-bar")).Wrap().Gap(8).AlignItems(ui.Center).
+		Padding(10, 12).Margin(0, 12, 10, 12).Radius(10).Background(p.hover).Children(func() {
+		ui.Text(c, Tf("%d selected", len(selected))).FontSize(12.5).FontWeight(600).TextColor(p.text)
+		ui.Spacer(c)
+		if len(selected) < totalDownloadable {
+			ui.Button(c.Key("select-all"), T("Select All")).FontSize(12).Padding(5, 10).OnClick(func() {
+				a.selectAllDownloadable(tracks)
+			})
+		} else if len(selected) > 0 {
+			ui.Button(c.Key("clear-selection"), T("Clear Selection")).FontSize(12).Padding(5, 10).OnClick(a.clearTrackSelection)
+		}
+		ui.PrimaryButton(c.Key("download-selected"), T("Download Selected")).
+			FontSize(12).Padding(5, 12).Disabled(len(selected) == 0).OnClick(func() {
+			a.downloadBatch(selected)
+		})
+		ui.Button(c.Key("cancel-selection"), T("Cancel Selection")).FontSize(12).Padding(5, 10).OnClick(a.exitTrackSelect)
+	})
 }
 
 // likedPage lists the songs the listener likes, loaded a page at a time.
@@ -348,7 +393,7 @@ func (a *app) likedPage(c *ui.Context) {
 					ui.Text(c, i18n.Songs(len(lib.likedList))).FontSize(13).TextColor(p.muted)
 				}
 				if len(lib.likedList) > 0 {
-					ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() { a.playButtons(c, lib.likedList) })
+					ui.Row(c).Wrap().Gap(10).Margin(10, 0, 0, 0).Children(func() { a.playButtons(c, lib.likedList) })
 				}
 			})
 		})
@@ -379,9 +424,13 @@ func (a *app) loadLikedPage(lib *library) {
 	if offset == 0 {
 		lib.likedAt = time.Now()
 	}
+	epoch := lib.pageEpoch
 	go func() {
 		page, err := answered(lib.src.Liked(offset))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			lib.likedPaged.loading = false
 			if err != nil {
 				lib.likedPaged.err = a.problem(lib, err, T("Couldn't load your liked songs"))
@@ -409,9 +458,13 @@ func (a *app) freshenLiked(lib *library) {
 	lib.likedFresh, lib.likedAt = true, time.Now()
 	was := lib.likedList
 	who := lib.listener()
+	epoch := lib.pageEpoch
 	go func() {
 		page, err := answered(lib.src.Liked(0))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			lib.likedFresh = false
 			// Liked or not in the app meanwhile, or more of it loaded, or
 			// forgotten: what's there is newer than what was asked for.
@@ -450,11 +503,42 @@ func (a *app) trackRows(c *ui.Context, tracks []music.Track, covers bool, header
 	// scrolled away from its start or end has content under the bars.
 	a.underTop, a.underBottom = true, true
 	rows := len(tracks) + 1 + len(footer)
+	a.rowKeys.update(tracks)
+	keys := a.rowKeys.keys
+	a.trackList.Key = func(row int) any {
+		if row == 0 {
+			return "header"
+		}
+		if row > 0 && row <= len(keys) {
+			return keys[row-1]
+		}
+		return row - len(keys) // 页头与页尾不与歌曲键共用身份。
+	}
 	ui.List(c.Key(a.route), &a.trackList, rows, func(i int) {
 		if i == 0 {
 			ui.Column(c).Children(func() {
 				a.startMark(c)
 				header(c)
+				if a.trackSelectActive() {
+					a.trackSelectionBar(c, tracks)
+				}
+				w, _ := c.Size()
+				if len(tracks) > 0 && w-sidebarWidth > 820 && a.route.page != pageAlbum {
+					ui.Column(c).Gap(6).PaddingX(12).Margin(0, 0, 6, 0).Children(func() {
+						// 表头复用歌曲行的列宽与间距，使专辑作为元数据自然对齐。
+						ui.Row(c).Height(28).Gap(14).AlignItems(ui.Center).TextColor(a.pal.muted).FontSize(12).Children(func() {
+							ui.Text(c, "#").Width(26).TextAlign(ui.Center)
+							if covers {
+								ui.Box(c).Width(38)
+							}
+							ui.Text(c, T("Songs")).Grow(3).Basis(0).MinWidth(0)
+							ui.Text(c, T("Album")).Grow(2).Basis(0).MinWidth(0)
+							ui.Box(c).Width(32)
+							ui.Text(c, T("Duration")).Width(52).TextAlign(ui.End).SingleLine()
+						})
+						ui.Box(c).Height(0.5).Background(a.pal.hairline)
+					})
+				}
 			})
 			return
 		}
@@ -488,24 +572,38 @@ func (a *app) trackRowPlay(c *ui.Context, tracks []music.Track, i int, covers bo
 	// An album's page has no column of the album its songs are on.
 	wide := w-sidebarWidth > 820 && a.route.page != pageAlbum
 	playing := sameTrack(a.pl.Current(), tr)
-	row := ui.ButtonBase(c.Key(tr.ID)).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
+	selecting := a.trackSelectActive()
+	canSelect := a.canDownload(tr)
+	selected := selecting && a.isTrackSelected(tr)
+	// 歌曲行内有独立入口，以组合控件暴露子项，避免专辑和收藏被父按钮折叠。
+	row := ui.ButtonBase(c.Key(tr.ID)).Role(ui.RoleGroup).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
 		ContextMenu(a.songItems(tr, pid))
+	a.trackFocus(c, row, tracks, i)
 	hovered := row.Hovered()
-	bg := ui.Transparent
-	switch {
-	case playing:
-		bg = p.accent.Alpha(0.09)
-	case hovered:
-		bg = p.hover
-	}
-	row.Background(row.AnimateColor("bg", bg, ui.Animation{Duration: 100 * time.Millisecond}))
-	if tr.Unavailable {
+	// 行底色用三层常驻叠层：选中、播放中、悬停各一层，按状态淡入淡出。
+	// 它们只在绘制帧里变化，不像 AnimateColor 那样每帧重建整份视图。
+	// 选中优先于播放中，播放中优先于悬停：叠层只开一层，避免颜色叠加变深。
+	selectedLayer := selected
+	playingLayer := playing && !selected
+	hoverLayer := (hovered || row.Focused()) && !selected && !playing
+	if tr.Unavailable || (selecting && !canSelect) {
 		row.Opacity(0.42)
 	}
 	a.wantLike(tr)
 	row.Children(func() {
+		fadeLayer(c, p.accent.Alpha(0.12), selectedLayer, 10)
+		fadeLayer(c, p.accent.Alpha(0.09), playingLayer, 10)
+		fadeLayer(c, p.hover, hoverLayer, 10)
 		ui.Box(c).Width(26).Center().Children(func() {
 			switch {
+			case selecting && selected:
+				ui.Box(c).Size(18, 18).Radius(5).Background(p.accent).Center().Children(func() {
+					ui.Icon(c, iconCheck).Size(12, 12).TextColor(p.onAccent)
+				})
+			case selecting && canSelect:
+				ui.Box(c).Size(18, 18).Radius(5).Border(1.5, p.muted)
+			case selecting:
+				ui.Textf(c, "%d", i+1).FontSize(13).FontFeatures("tnum").TextColor(p.faint)
 			case playing:
 				a.nowPlayingBars(c)
 			case hovered && !tr.Unavailable:
@@ -522,18 +620,27 @@ func (a *app) trackRowPlay(c *ui.Context, tracks []music.Track, i int, covers bo
 			if playing {
 				name = p.accent
 			}
-			ui.Text(c, tr.Name).FontSize(14).FontWeight(500).TextColor(name).SingleLine()
+			title := ui.Text(c, tr.Name).FontSize(14).FontWeight(500).SingleLine()
+			title.TextColor(title.AnimateColor("name", name, ui.Animation{Duration: 120 * time.Millisecond}))
 			a.artistLinks(c, tr, p.muted, p.text).FontSize(12.5).SingleLine().Shrink(1).MinWidth(0)
 		})
 		if wide {
-			album := ui.RichText(c).Grow(2).Basis(0).MinWidth(0).FontSize(12.5).TextColor(p.muted).SingleLine()
-			album.Children(func() {
-				if tr.Album.ID == "" || !a.trackLib(tr).can("album") {
-					ui.Text(c, tr.Album.Name)
-				} else {
-					a.link(c.Key("album"), tr.Album.Name, p.muted, p.text, route{page: pageAlbum, src: tr.Source, id: tr.Album.ID})
+			if tr.Album.ID == "" || !a.trackLib(tr).can("album") {
+				ui.Text(c, tr.Album.Name).Grow(2).Basis(0).MinWidth(0).FontSize(12.5).TextColor(p.muted).SingleLine()
+			} else {
+				album := ui.ButtonBase(c.Key("album")).Grow(2).Basis(0).MinWidth(0).Height(32).Radius(4).
+					Label(tr.Album.Name).Tooltip(Tf("Go to Album: %s", tr.Album.Name))
+				color := p.muted
+				if album.Hovered() || album.Focused() {
+					color = p.text
 				}
-			})
+				album.Children(func() {
+					ui.Text(c, tr.Album.Name).Grow(1).MinWidth(0).FontSize(12.5).TextColor(color).SingleLine()
+				})
+				album.OnClick(func() {
+					a.openPage(route{page: pageAlbum, src: tr.Source, id: tr.Album.ID})
+				})
+			}
 		}
 		// A liked song's heart shows; the others' as the pointer is on them.
 		ui.Box(c).Size(32, 32).Center().Children(func() {
@@ -541,7 +648,7 @@ func (a *app) trackRowPlay(c *ui.Context, tracks []music.Track, i int, covers bo
 				a.likeButton(c.Key("like"), tr, 15, p.muted)
 			}
 		})
-		ui.Text(c, clock(tr.Length())).FontSize(12.5).FontFeatures("tnum").TextColor(p.faint).Width(44).TextAlign(ui.End)
+		ui.Text(c, clock(tr.Length())).FontSize(12.5).FontFeatures("tnum").TextColor(p.faint).Width(52).TextAlign(ui.End)
 	})
 	if row.Clicked() && !tr.Unavailable {
 		play()

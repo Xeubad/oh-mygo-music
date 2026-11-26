@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,20 +55,17 @@ func (a *app) openSettings() {
 		a.endShortcutRecording()
 		a.shortcutEdit.confirm = false
 		a.settingsWin = nil
-		// Its sign-in dialog goes with it; a sign-in on its way still counts.
-		if a.signIn.here {
-			a.signIn.open = false
-		}
 		a.syncDock()
 	})
 	a.settingsWin.OnBlur(a.endShortcutRecording)
 	a.syncDock()
 }
 
-// openSourceSettings shows the page of the settings where plugins are set up.
-func (a *app) openSourceSettings() {
-	a.settingsPage, a.settingsQuery = "plugins", ""
-	a.openSettings()
+// openPlugins shows the Plugins page in the main window, on its Installed tab,
+// where plugins are set up.
+func (a *app) openPlugins() {
+	a.showMain()
+	a.open(route{page: pagePlugins})
 }
 
 // changed applies the settings everywhere and keeps them.
@@ -78,6 +76,23 @@ func (a *app) changed() {
 		a.notch.setEnabled(a.settings.Notch)
 	}
 	a.redraw()
+}
+
+func (a *app) coverBackdropSlider(c *ui.Context, key, label string, value *float64, disabled bool) {
+	ui.Row(c.Key(key)).Gap(8).AlignItems(ui.Center).Children(func() {
+		slider := ui.Slider(c.Key("slider"), value, 0, 100).Step(5).Width(112).Label(label).Disabled(disabled)
+		dirty := ui.Local(slider, "pending-save", func() bool { return false })
+		if slider.Changed() {
+			*dirty = true
+			a.redraw()
+		}
+		// 拖动时只刷新预览，松开时再写盘，键盘调整则立即保存。
+		if *dirty && !slider.Pressed() {
+			*dirty = false
+			a.settings.save()
+		}
+		ui.Text(c, strconv.Itoa(int(*value+0.5))+"%").Width(36).FontSize(12).TextAlign(ui.End)
+	})
 }
 
 // systemLanguages are the languages the system prefers; tests replace it.
@@ -256,13 +271,13 @@ func (a *app) settingsView(c *ui.Context) {
 					ui.Box(c).Grow(1)
 					a.installMenu(c, p)
 				}
+				ui.Icon(c, glyph).Size(16, 16).TextColor(p.accent).IgnoreInput(true)
+				ui.Text(c, title).FontSize(15).FontWeight(700).SingleLine().Shrink(1).MinWidth(0)
 			})
 			// The pointer over it brings the edge up too, as AppKit's does.
 			edge.Opacity(edgeShown(edge, a.settingsUnderTop || header.Hovered()))
 		})
 	})
-	a.installDialog(c, p)
-	a.signInDialog(c, p, true)
 }
 
 // settingsSidebarWidth is the width of the list of the settings' pages.
@@ -337,18 +352,9 @@ func (a *app) settingsGroup(c *ui.Context, p palette, sec settingsSection, title
 	all := query == "" || settingsMatch(query, sec.title)
 	ui.Column(c.Key(sec.id)).Radius(12).Background(p.bg).Border(1, p.hairline).Dividers(1, p.hairline).Children(func() {
 		sec.build(func(label, desc string, control func()) {
-			if !all && !settingsMatch(query, label, desc) {
-				return
+			if all || settingsMatch(query, label, desc) {
+				settingsRowView(c, p, label, desc, control)
 			}
-			ui.Row(c).Padding(12, 16).Gap(16).AlignItems(ui.Center).MinHeight(48).Children(func() {
-				ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-					ui.Text(c, label).FontSize(13.5).FontWeight(500)
-					if desc != "" {
-						ui.Text(c, desc).FontSize(12).TextColor(p.muted).LineHeight(1.4)
-					}
-				})
-				control()
-			})
 		}, func(text string, draw func()) {
 			if all || settingsMatch(query, text) {
 				draw()
@@ -671,22 +677,6 @@ func (a *app) anyCan(what string) bool {
 	return false
 }
 
-// sourceSettings lists the sources, each with what it asks of the listener,
-// and where more of them come from.
-func (a *app) sourceSettings(c *ui.Context, row settingsRow, block settingsBlock, p palette) {
-	for _, lib := range a.allLibs {
-		if lib.id == local.ID {
-			a.localSettings(c, lib, row, block, p)
-			continue
-		}
-		text := lib.name()
-		for _, st := range lib.src.Info().Settings {
-			text += " " + st.Label + " " + st.Help
-		}
-		block(text, func() { a.pluginSettings(c.Key(lib.id), lib, p) })
-	}
-}
-
 // revealFolder shows a folder in the file manager, making it if need be;
 // tests replace it.
 var revealFolder = func(dir string) {
@@ -848,34 +838,6 @@ type guarded interface {
 	Grant(on bool) error
 }
 
-// pluginPermissions says what a plugin can reach, and asks before it may start
-// programs, which can do anything the listener can. It may not until they say.
-func (a *app) pluginPermissions(c *ui.Context, lib *library, g guarded, p palette) {
-	perms := g.Permissions()
-	if len(perms.Network) > 0 {
-		reach := Tf("Can reach %s", strings.Join(perms.Network, ", "))
-		if slices.Contains(perms.Network, "*") {
-			reach = T("Can reach any website")
-		}
-		ui.Text(c, reach).FontSize(12).TextColor(p.muted).LineHeight(1.4)
-	}
-	if len(perms.Process) == 0 {
-		return
-	}
-	granted := g.Granted()
-	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, programsWarning(perms.Process)).
-			FontSize(12).TextColor(p.muted).LineHeight(1.4).Grow(1).Shrink(1).MinWidth(0)
-		label := T("Allow Programs")
-		if granted {
-			label = T("Stop Allowing")
-		}
-		if ui.Button(c.Key("grant"), label).Clicked() {
-			a.grantPrograms(lib, g, !granted)
-		}
-	})
-}
-
 // programsWarning says which programs a plugin wants to start, before the
 // listener lets it.
 func programsWarning(programs plugin.Programs) string {
@@ -897,7 +859,15 @@ func (a *app) grantPrograms(lib *library, g guarded, on bool) {
 			}
 			// Starting programs may be what it needed setting up for.
 			lib.needsSetup, lib.askedSetup, lib.setupReason = false, false, ""
-			a.libraryChanged(lib)
+			if a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
+			a.invalidateDownloads(lib.id)
+			if a.pluginEnabled(lib) {
+				a.libraryChanged(lib)
+			} else {
+				a.redraw()
+			}
 		})
 	}()
 }
@@ -987,7 +957,11 @@ func (a *app) saveSetting(lib *library, key, value string, done func(error)) {
 				a.toast = Tf("Couldn't keep the setting: %s", err.Error())
 				return
 			}
+			wasNeedsSetup := lib.needsSetup
 			lib.needsSetup, lib.askedSetup, lib.setupReason = false, false, ""
+			if wasNeedsSetup && a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
 			a.libraryChanged(lib)
 			a.loadAccount(lib)
 		})

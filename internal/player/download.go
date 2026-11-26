@@ -17,10 +17,11 @@ import (
 // of their own: kept in the cache, a file on disk, or at its source.
 type Song struct {
 	// Type is its file's: one of songTypes, as its source said.
-	Type     string
-	file     *os.File      // kept in the cache, or on disk
-	st       *music.Stream // or else where it streams from
-	prepared stream
+	Type       string
+	PlaybackID string
+	file       *os.File      // kept in the cache, or on disk
+	st         *music.Stream // or else where it streams from
+	prepared   stream
 }
 
 // FindSong finds track t of src at quality, to save, as the player would play
@@ -36,7 +37,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 	}
 	if f, st, ok := p.Cache.find(t.Source, t.ID, quality); ok {
 		if t.PlaybackID == "" || st.PlaybackID == t.PlaybackID {
-			return &Song{Type: st.Type, file: f, st: st}, nil
+			return &Song{Type: st.Type, PlaybackID: st.PlaybackID, file: f, st: st}, nil
 		}
 		f.Close()
 	}
@@ -56,7 +57,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 			prepared.Close()
 			return nil, music.ErrRecordingSelectionRequired
 		}
-		return &Song{Type: songType(info.Type), st: info, prepared: prepared}, nil
+		return &Song{Type: songType(info.Type), PlaybackID: info.PlaybackID, st: info, prepared: prepared}, nil
 	}
 	st, err := src.Stream(t.ID, quality)
 	if err != nil {
@@ -68,7 +69,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 	if t.PlaybackID != "" && st.PlaybackID != t.PlaybackID {
 		return nil, music.ErrRecordingSelectionRequired
 	}
-	s := &Song{Type: songType(st.Type), st: st}
+	s := &Song{Type: songType(st.Type), PlaybackID: st.PlaybackID, st: st}
 	if path, ok := music.PathOf(st.URL); ok {
 		if s.file, err = os.Open(path); err != nil {
 			return nil, err
@@ -131,6 +132,48 @@ func (s *Song) SaveToContext(ctx context.Context, path string) error {
 	return err
 }
 
+// WriteDownload streams a song to a download file while reporting byte progress.
+func (s *Song) WriteDownload(ctx context.Context, w io.Writer, progress func(written, total int64)) error {
+	copyWithProgress := func(reader io.Reader, total int64) error {
+		writer := &downloadProgressWriter{Writer: w, report: progress, total: total}
+		_, err := io.Copy(writer, contextReader{ctx: ctx, reader: reader})
+		return err
+	}
+	if s.prepared != nil {
+		download, _ := s.prepared.source()
+		stop := context.AfterFunc(ctx, download.Close)
+		defer stop()
+		download.mu.Lock()
+		total := download.size
+		download.mu.Unlock()
+		return copyWithProgress(&downloadReader{d: download}, total)
+	}
+	if s.file != nil {
+		info, err := s.file.Stat()
+		if err != nil {
+			return err
+		}
+		return copyWithProgress(s.file, info.Size())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.st.URL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", music.Agent)
+	for key, value := range s.st.Headers {
+		req.Header.Set(key, value)
+	}
+	response, err := music.HeadersStay(http.DefaultClient, req.URL.Hostname(), s.st.Headers).Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return errors.New(response.Status)
+	}
+	return copyWithProgress(response.Body, response.ContentLength)
+}
+
 // copy writes all of the song to w.
 func (s *Song) copy(w io.Writer) error {
 	return s.copyContext(context.Background(), w)
@@ -165,8 +208,24 @@ func (s *Song) copyContext(ctx context.Context, w io.Writer) error {
 	if res.StatusCode != http.StatusOK {
 		return errors.New(res.Status)
 	}
-	_, err = io.Copy(w, res.Body)
+	_, err = io.Copy(w, contextReader{ctx: ctx, reader: res.Body})
 	return err
+}
+
+type downloadProgressWriter struct {
+	io.Writer
+	report  func(written, total int64)
+	total   int64
+	written int64
+}
+
+func (w *downloadProgressWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n > 0 {
+		w.written += int64(n)
+		w.report(w.written, w.total)
+	}
+	return n, err
 }
 
 type contextReader struct {

@@ -88,7 +88,8 @@ type library struct {
 	home        *music.Browse // the source's own Home
 	homeErr     string
 	homeLoading bool
-	homeAt      time.Time // when what the home page shows was asked for
+	homeAt      time.Time               // when what the home page shows was asked for
+	homePagers  map[int]*pagerState     // where Home's pagers rest, by section
 
 	playlists map[string]*music.Playlist
 	loadingPl map[string]bool
@@ -100,7 +101,8 @@ type library struct {
 	shows     map[string]*showData
 	browses   map[string]*browseData
 	searches  map[route]*searchData
-	searched  route // the search last shown, which the sidebar goes back to
+	searched  route  // the search last shown, which the sidebar goes back to
+	pageEpoch uint64 // 页面请求独立换代；停用不能丢弃正在结算的收藏写入。
 
 	subscribed     []music.Show
 	subscribedOnce bool // what the listener subscribes to was asked
@@ -124,6 +126,18 @@ func newLibrary(src music.Source) *library {
 
 // forget drops what was loaded of the source, whose answers may have changed.
 func (l *library) forget() {
+	l.forgetPages()
+	l.liked = nil
+	l.likesPending = map[string]bool{}
+	l.likesFailed = map[string]bool{}
+	l.likeVersions = map[string]uint64{}
+	l.likeWrites = map[string]*likeWrite{}
+	l.likeEpoch++
+}
+
+func (l *library) forgetPages() {
+	l.pageEpoch++
+	l.homeLoading = false
 	l.playlists = map[string]*music.Playlist{}
 	l.loadingPl = map[string]bool{}
 	l.plAt = map[string]time.Time{}
@@ -133,17 +147,13 @@ func (l *library) forget() {
 	l.albums = map[string]*albumData{}
 	l.shows = map[string]*showData{}
 	l.browses = map[string]*browseData{}
+	l.homePagers = map[int]*pagerState{}
 	l.searches = map[route]*searchData{}
-	l.liked = nil
-	l.likesPending = map[string]bool{}
-	l.likesFailed = map[string]bool{}
-	l.likeVersions = map[string]uint64{}
-	l.likeWrites = map[string]*likeWrite{}
-	l.likeEpoch++
 	l.likedList, l.likedPaged, l.likedAt = nil, paged{}, time.Time{}
+	l.likedFresh = false
 	l.savedAlbums, l.savedAlbumsPaged = nil, paged{}
-	l.subscribed, l.subscribedOnce = nil, false
-	l.stations, l.stationsOnce = nil, false
+	l.subscribed, l.subscribedOnce, l.subscribedBusy = nil, false, false
+	l.stations, l.stationsOnce, l.stationsBusy = nil, false, false
 }
 
 // can reports whether the source does what's named.
@@ -174,6 +184,10 @@ func (a *app) libOf(id string) *library {
 		}
 	}
 	return nil
+}
+
+func (a *app) libraryCurrent(lib *library, epoch uint64) bool {
+	return lib.pageEpoch == epoch && a.libOf(lib.id) == lib
 }
 
 // trackLib returns the library of the source of tr, or the active one's for a
@@ -228,6 +242,21 @@ func (a *app) switchSource(id string) {
 	}
 }
 
+// leaveSource makes the first source on the active one, as the one active was
+// turned off or removed: on the Plugins page, where that's done, the page stays,
+// now of that source; elsewhere, its Home shows.
+func (a *app) leaveSource() {
+	next := a.libs[0]
+	if a.route.page != pagePlugins || a.nowPlaying {
+		a.switchSource(next.id)
+		return
+	}
+	a.activate(next)
+	// Still the page it was, scrolled as it was.
+	a.route.src = next.id
+	a.scrolled = a.currentPageIdentity()
+}
+
 // errNoAnswer stands for a source that answered nothing where it had to answer
 // something, which shouldn't take the app down with it.
 var errNoAnswer = errors.New("the source gave no answer")
@@ -258,7 +287,7 @@ func (a *app) problem(lib *library, err error, msg string) string {
 		lib.needsSetup, lib.setupReason = true, music.Reason(err)
 		if !lib.askedSetup {
 			lib.askedSetup = true
-			a.openSourceSettings()
+			a.openPlugins()
 		}
 		if lib.setupReason != "" {
 			return lib.setupReason
@@ -279,7 +308,7 @@ func (a *app) actionFailed(lib *library, err error, msg string) {
 		a.promptSignIn(lib)
 	case errors.Is(err, music.ErrSetup):
 		lib.needsSetup, lib.setupReason = true, music.Reason(err)
-		a.openSourceSettings()
+		a.openPlugins()
 	default:
 		a.toast = msg
 	}
@@ -316,16 +345,26 @@ func (a *app) libraryChanged(lib *library) {
 				lib.artists[r.id] = d
 			}
 		case pageSearch:
-			if d := was.searches[r]; d != nil {
-				lib.searches[r] = d
+			if d := was.searches[r]; d != nil && d.page.loaded {
+				next := *d
+				next.page.loading = false
+				lib.searches[r] = &next
 			}
 		case pageLiked:
-			lib.likedList, lib.likedPaged = was.likedList, was.likedPaged
+			if was.likedPaged.loaded {
+				lib.likedList, lib.likedPaged = was.likedList, was.likedPaged
+				lib.likedPaged.loading = false
+			}
 		}
 	}
-	for page := range lib.browses {
+	for page, data := range lib.browses {
 		if a.route.page != pageBrowse || a.route.id != page || a.route.src != lib.id {
 			delete(lib.browses, page)
+		} else {
+			// 数据可以沿用；旧代请求的 loading 不能跟着保留，否则刷新后永远等不到当前代回执。
+			next := *data
+			next.loading = false
+			lib.browses[page] = &next
 		}
 	}
 	a.loadMine(lib)

@@ -22,6 +22,7 @@ type browseData struct {
 	at      time.Time // when page came
 	loading bool
 	err     string
+	pagers  map[int]*pagerState // where the section's pagers rest, by section
 }
 
 // loadBrowse loads a page, unless it has, or again. One loaded longer than
@@ -40,9 +41,13 @@ func (a *app) loadBrowse(lib *library, page string, again bool) {
 		return
 	}
 	d.loading, d.err = true, ""
+	epoch := lib.pageEpoch
 	go func() {
 		b, err := answered(lib.src.Browse(page))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) || lib.browses[page] != d {
+				return
+			}
 			d.loading = false
 			if err != nil {
 				d.err = a.problem(lib, err, T("Couldn't load this page"))
@@ -127,6 +132,11 @@ type browseRow struct {
 	from, to int
 }
 
+type browseTrackKey struct {
+	section int
+	track   trackRowKey
+}
+
 type rowKind int
 
 const (
@@ -139,6 +149,7 @@ const (
 	rowShows
 	rowStations
 	rowLinks
+	rowPager
 	rowEmpty
 )
 
@@ -146,7 +157,10 @@ const (
 // the card that leads it.
 func browseLayout(page *music.Browse, pageID string, cols int) []browseRow {
 	var rows []browseRow
-	cards := func(kind rowKind, s, n int) {
+	cards := func(kind rowKind, sec *music.Section, s, n int) {
+		if sec.OneRow {
+			n = min(n, cols)
+		}
 		for from := 0; from < n; from += cols {
 			rows = append(rows, browseRow{kind, s, from, min(from+cols, n)})
 		}
@@ -158,20 +172,27 @@ func browseLayout(page *music.Browse, pageID string, cols int) []browseRow {
 			if len(sec.Albums)+len(sec.Artists)+len(sec.Playlists)+len(sec.Shows)+len(sec.Stations)+len(sec.Links) == 0 {
 				continue
 			}
-		} else if sec.Title != "" || sec.MorePage != "" {
+		} else if sec.Title != "" || sec.MorePage != "" || sec.Pager {
 			rows = append(rows, browseRow{rowTitle, s, 0, 0})
+		}
+		// A pager's cards make its own rows, a page at a time.
+		if sec.Pager {
+			if len(sec.Stations)+len(sec.Playlists) > 0 {
+				rows = append(rows, browseRow{rowPager, s, 0, 0})
+			}
+			continue
 		}
 		if s != 0 || pageID != "" {
 			for i := range sec.Tracks {
 				rows = append(rows, browseRow{rowTrack, s, i, i})
 			}
 		}
-		cards(rowAlbums, s, len(sec.Albums))
-		cards(rowArtists, s, len(sec.Artists))
-		cards(rowPlaylists, s, len(sec.Playlists))
-		cards(rowShows, s, len(sec.Shows))
-		cards(rowStations, s, len(sec.Stations))
-		cards(rowLinks, s, len(sec.Links))
+		cards(rowAlbums, sec, s, len(sec.Albums))
+		cards(rowArtists, sec, s, len(sec.Artists))
+		cards(rowPlaylists, sec, s, len(sec.Playlists))
+		cards(rowShows, sec, s, len(sec.Shows))
+		cards(rowStations, sec, s, len(sec.Stations))
+		cards(rowLinks, sec, s, len(sec.Links))
 		if sec.Empty != "" && len(sec.Tracks)+len(sec.Albums)+len(sec.Artists)+len(sec.Playlists)+len(sec.Shows)+len(sec.Stations)+len(sec.Links) == 0 {
 			rows = append(rows, browseRow{rowEmpty, s, 0, 0})
 		}
@@ -186,6 +207,22 @@ func (a *app) browseRows(c *ui.Context, page *music.Browse, pageID string, heade
 	top, bottom := a.insets(c)
 	a.underTop, a.underBottom = true, true
 	rows := len(layout) + 1
+	keys := make([]any, rows)
+	keys[0] = "header"
+	counts := make(map[browseTrackKey]int)
+	for index, row := range layout {
+		keys[index+1] = row
+		if row.kind == rowTrack {
+			track := page.Sections[row.section].Tracks[row.from]
+			key := browseTrackKey{row.section, trackRowKey{source: track.Source, id: track.ID}}
+			occurrence := counts[key]
+			counts[key]++
+			key.track.occurrence = occurrence
+			keys[index+1] = key
+		}
+	}
+	a.trackList.Key = func(index int) any { return keys[index] }
+	a.rowKeys = trackRowKeys{}
 	now := c.Now()
 	ui.List(c.Key(a.route), &a.trackList, rows, func(i int) {
 		if i == 0 {
@@ -210,9 +247,11 @@ func (a *app) browseRows(c *ui.Context, page *music.Browse, pageID string, heade
 			}
 			ui.Box(c).Padding(0, 12, below, 12).Children(func() { a.featureCard(c, sec, pageID, r.section, now) })
 		case rowTitle:
-			a.browseTitle(c, sec, r.section == 0)
+			a.browseTitle(c, pageID, r.section, cols, sec, r.section == 0)
 		case rowTrack:
 			a.trackRow(c, sec.Tracks, r.from, true, "")
+		case rowPager:
+			a.cardPager(c, pageID, r.section, cols, sec)
 		case rowEmpty:
 			ui.Column(c).Margin(0, 12, cardRowGap, 12).Children(func() { a.empty(c, sec.Empty) })
 		default:
@@ -221,14 +260,18 @@ func (a *app) browseRows(c *ui.Context, page *music.Browse, pageID string, heade
 	}).Grow(1).Padding(top+pageGap, pagePad-12, bottom+32, pagePad-12).ScrollbarInsets(top, 0, bottom, 0)
 }
 
-// browseTitle is a section's title, with a way to all of it if there's more.
-func (a *app) browseTitle(c *ui.Context, sec *music.Section, first bool) {
+// browseTitle is a section's title, with the pages of it, or a way to all of
+// it, if there's more.
+func (a *app) browseTitle(c *ui.Context, pageID string, section, cols int, sec *music.Section, first bool) {
 	margin := float32(34)
 	if first {
 		margin = 0
 	}
 	ui.Row(c).Margin(margin, 12, 14, 12).AlignItems(ui.Baseline).Children(func() {
 		ui.Text(c, sec.Title).FontSize(19).FontWeight(700).LetterSpacing(-0.3).Grow(1).Shrink(1).MinWidth(0)
+		if sec.Pager {
+			a.pagerControls(c, pageID, section, cols, sec)
+		}
 		if sec.MorePage != "" {
 			more := ui.ButtonBase(c.Key("more")).Padding(2, 8).Radius(6).FocusRing(false).Label(T("See All"))
 			if more.Hovered() {
@@ -312,7 +355,7 @@ func (a *app) sectionPage(c *ui.Context) {
 				ui.Text(c, i18n.Today(now)).FontSize(12).FontWeight(600).LetterSpacing(0.3).TextColor(p.muted).MaxLines(1)
 				ui.Text(c, title).FontSize(30).FontWeight(800).LetterSpacing(-0.6).MaxLines(2).LineHeight(1.2)
 				ui.Text(c, about).FontSize(13).TextColor(p.muted).MaxLines(2)
-				ui.Row(c).Gap(10).Margin(8, 0, 0, 0).Children(func() { a.playButtons(c, sec.Tracks) })
+				ui.Row(c).Wrap().Gap(10).Margin(8, 0, 0, 0).Children(func() { a.playButtons(c, sec.Tracks) })
 			})
 		})
 	})

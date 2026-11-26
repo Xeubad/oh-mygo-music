@@ -95,9 +95,13 @@ func (a *app) loadArtist(lib *library, id string) {
 		return
 	}
 	d.loading, d.err = true, ""
+	epoch := lib.pageEpoch
 	go func() {
 		ar, err := answered(lib.src.Artist(id))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) || lib.artists[id] != d {
+				return
+			}
 			d.loading = false
 			if err != nil {
 				d.err = a.problem(lib, err, T("Couldn't load this artist"))
@@ -157,6 +161,17 @@ func (a *app) artistPage(c *ui.Context) {
 		a.trackSkeleton(c, s, true, func(c *ui.Context) { a.artistHeaderSkeleton(c, s) })
 		return
 	}
+	if a.restoreArtistTab {
+		d.tab, a.restoreArtistTab = a.artistTab, false
+	}
+	defer func() {
+		if a.artistTab >= 0 && a.artistTab != d.tab {
+			// 显式切换内容从顶部开始；历史恢复则沿用对应列表或卡片的独立位置。
+			a.pageScroll.Y = 0
+			a.trackList.ScrollTo(0, ui.Start)
+		}
+		a.artistTab = d.tab
+	}()
 	header := func(c *ui.Context) { a.artistHeader(c, d) }
 	tab := d.tab
 	switch {
@@ -181,6 +196,7 @@ func (a *app) artistPage(c *ui.Context) {
 // scrollPage scrolls a page of cards and rows, inset as one of tracks is:
 // a tab of a page that lists tracks puts its header in the same place.
 func (a *app) scrollPage(c *ui.Context, content func()) {
+	a.rowKeys = trackRowKeys{}
 	top, bottom := a.insets(c)
 	ui.Scroll(c.Key(a.route)).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad-12, bottom+32, pagePad-12).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
@@ -219,7 +235,7 @@ func (a *app) artistHeader(c *ui.Context, d *artistData) {
 				meta = append(meta, Tf("%d albums", n))
 			}
 			ui.Text(c, strings.Join(meta, " · ")).FontSize(13).TextColor(p.muted)
-			ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
+			ui.Row(c).Wrap().Gap(10).Margin(10, 0, 0, 0).Children(func() {
 				if len(songs) > 0 {
 					a.playButtons(c, songs)
 				}

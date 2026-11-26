@@ -49,7 +49,7 @@ const signInSettle = 250 * time.Millisecond
 
 // loadAccount asks a source who is signed in.
 func (a *app) loadAccount(lib *library) {
-	if !lib.can("account") || lib.accountBusy {
+	if !lib.can("account") || lib.accountBusy || a.libOf(lib.id) != lib {
 		return
 	}
 	lib.accountBusy = true
@@ -87,8 +87,14 @@ func (a *app) loadAccount(lib *library) {
 
 // afterAccount loads anew what's personal to who listens to a source.
 func (a *app) afterAccount(lib *library) {
+	if a.pl != nil {
+		a.pl.InvalidateSource(lib.id)
+	}
+	a.invalidateDownloads(lib.id)
+	a.discardPagePositions(lib)
 	lib.accountAsked = true
 	lib.forget()
+	lib.mine, lib.saved, lib.home, lib.recent = nil, nil, nil, nil
 	lib.needsSignIn, lib.askedSignIn = false, false
 	a.loadMine(lib)
 	a.loadHome(lib)
@@ -106,12 +112,6 @@ func (a *app) promptSignIn(lib *library) {
 	}
 	a.showMain()
 	a.signIn = signInDialog{open: true, lib: lib, gen: a.signIn.gen + 1}
-}
-
-// promptSignInInSettings asks it in the settings window, where they asked,
-// instead of bringing up the main window behind it.
-func (a *app) promptSignInInSettings(lib *library) {
-	a.signIn = signInDialog{open: true, lib: lib, here: true, gen: a.signIn.gen + 1}
 }
 
 // startSignIn signs in to the source asked about, off the main thread: it
@@ -132,7 +132,7 @@ func (a *app) startSignIn() {
 		over = a.settingsWin
 	}
 	if a.signInOver != nil {
-		a.signInOver.Store(over)
+		a.signInOver.Store(a.win)
 	}
 	if p, ok := lib.src.(music.Prompter); ok {
 		p.OnSignInPrompt(func(prompt music.SignInPrompt) {
@@ -217,13 +217,9 @@ func (a *app) signOut(lib *library) {
 }
 
 // signInDialog says which source the listener signs in to, while it waits for
-// them there, in the window it was asked in: settings says whether that's
-// the settings window.
-func (a *app) signInDialog(c *ui.Context, p palette, settings bool) {
+// them there.
+func (a *app) signInDialog(c *ui.Context, p palette) {
 	d := &a.signIn
-	if d.here != settings {
-		return
-	}
 	ui.DialogBase(c.Key("sign-in"), &d.open, func(backdrop, panel ui.Element) {
 		backdrop.Background(ui.RGBA(0, 0, 0, 0.35))
 		// What it holds changes its height, and it follows at once: a spring
