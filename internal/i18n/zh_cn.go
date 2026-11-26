@@ -711,6 +711,8 @@ var zhCN = map[string]string{
 	"Online link will be generated when copying or saving":                 "复制或保存卡片时生成在线链接，未操作不上传",
 	"Copy Listen Link":                                                     "复制听歌链接",
 	"Copying or saving reuses an active share or creates a listening link": "复制或保存时优先复用有效分享，没有则生成听歌链接",
+	"Cards and links use the online listening link from your share service": "卡片和链接都使用分享服务生成的在线听歌链接",
+	"A share service is set up, so songs are shared through it":            "已配置分享服务，歌曲统一通过它分享",
 	"Checking existing shares…":                                            "正在查找可复用的分享…",
 	"Preparing share":                                                      "正在生成分享",
 	"Preparing share…":                                                     "正在生成分享…",

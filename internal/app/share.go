@@ -74,6 +74,13 @@ func (draft *shareDraft) clipRange() (time.Duration, time.Duration, bool) {
 	return shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable)
 }
 
+// shareServerConfigured says whether the listener set up a share service.
+// Songs are shared through it whatever their source page is, so logging in
+// to a source does not turn sharing into a link back to that source.
+func (a *app) shareServerConfigured() bool {
+	return strings.TrimSpace(a.settings.ShareServerURL) != ""
+}
+
 func (a *app) openShare(track music.Track) {
 	if track.Source == "" && a.library != nil {
 		track.Source = a.library.id
@@ -88,7 +95,7 @@ func (a *app) openShare(track music.Track) {
 	draft := &shareDraft{
 		open: true, track: track, selected: make(map[int]bool),
 		onlineMode: "full", onlineQuality: a.settings.Quality,
-		cardOnline: strings.TrimSpace(a.settings.ShareServerURL) != "",
+		cardOnline: a.shareServerConfigured(),
 	}
 	if len(uniqueAggregateSources(track.AggregateSources)) > 1 {
 		draft.aggregateView = &aggregateView{}

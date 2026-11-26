@@ -410,6 +410,7 @@ func (a *app) shareControls(c *ui.Context, draft *shareDraft) {
 }
 
 func (a *app) shareLinkControls(c *ui.Context, draft *shareDraft) {
+	serverConfigured := a.shareServerConfigured()
 	label := "Original Song Page"
 	hint := "QR code links to the original song page"
 	if draft.cardOnline {
@@ -417,6 +418,9 @@ func (a *app) shareLinkControls(c *ui.Context, draft *shareDraft) {
 		hint = "Copying or saving reuses an active share or creates a listening link"
 		if a.onlineLinkMatchesDraft(draft) {
 			hint = "QR code uses the online listening link"
+		}
+		if serverConfigured {
+			hint = "Cards and links use the online listening link from your share service"
 		}
 	}
 	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
@@ -427,7 +431,12 @@ func (a *app) shareLinkControls(c *ui.Context, draft *shareDraft) {
 					draft.cardOnline = true
 					a.requestShareRender()
 				}
-				if menu.Item(T("Original Song Page")).Radio(!draft.cardOnline).Chosen() && draft.cardOnline {
+				original := menu.Item(T("Original Song Page")).Radio(!draft.cardOnline)
+				if serverConfigured {
+					// 配好分享服务后不再把卡片链接回原曲页面，登录渠道也不改变分享去向。
+					original.Disabled(true).Tooltip(T("A share service is set up, so songs are shared through it"))
+				}
+				if original.Chosen() && draft.cardOnline {
 					draft.cardOnline = false
 					a.requestShareRender()
 				}

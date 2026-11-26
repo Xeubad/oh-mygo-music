@@ -51,6 +51,67 @@ func TestSongMenuCopies(t *testing.T) {
 	}
 }
 
+// 已登录渠道且配好分享服务时，歌曲菜单不再直接复制原曲链接，只经分享卡片
+// 发布在线听歌链接；播客仍保留自己的链接。
+func TestSongMenuSharesThroughConfiguredServer(t *testing.T) {
+	var copied string
+	real := copyText
+	copyText = func(s string) error { copied = s; return nil }
+	defer func() { copyText = real }()
+
+	a := newTestApp()
+	a.settings.ShareServerURL = "https://share.example.com"
+	// library.account 与 app.account 是同一个已登录的来源。
+	a.library.account = &music.Account{ID: "1", Name: "小明"}
+	a.account = a.library.account
+	signedIn := song("1", "宝船", "DOUDOU")
+	signedIn.URL = "https://example.com/song/1"
+	episode := song("2", "第 1 集", "主播")
+	episode.ShowID = "show"
+	episode.URL = "https://example.com/episode/2"
+	a.playlists["42"] = &music.Playlist{ID: "42", Name: "飙升榜", Tracks: []music.Track{signedIn, episode}}
+	a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+
+	if err := tt.RightClick("宝船"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Copy Link"); err == nil {
+		t.Fatalf("a signed-in song offered its source link; the menu shows %q", tt.Menu())
+	}
+	tt.CloseMenu()
+	tt.Frame()
+	if copied != "" {
+		t.Fatalf("copied %q without the share card", copied)
+	}
+
+	if err := tt.RightClick("第 1 集"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Copy Link"); err != nil {
+		t.Fatalf("%v; the menu shows %q", err, tt.Menu())
+	}
+	tt.Frame()
+	if copied != episode.URL {
+		t.Fatalf("podcast copied %q, want %q", copied, episode.URL)
+	}
+
+	if err := tt.RightClick("宝船"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem("Share Card…"); err != nil {
+		t.Fatalf("%v; the menu shows %q", err, tt.Menu())
+	}
+	tt.Frame()
+	if a.sharing == nil || !a.sharing.open || !a.sharing.cardOnline {
+		t.Fatalf("share card did not open on the share service: %+v", a.sharing)
+	}
+	if a.sharing.track.URL != signedIn.URL {
+		t.Fatalf("share card lost the song's page: %q", a.sharing.track.URL)
+	}
+}
+
 // A right click on a song's row opens its menu, without playing it, and a song
 // with no page at its source offers no link to copy.
 func TestSongMenuOnRightClick(t *testing.T) {

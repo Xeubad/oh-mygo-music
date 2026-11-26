@@ -308,36 +308,17 @@ func TestCopyListenLinkAndSaveCardReusePublishedShare(t *testing.T) {
 	}
 }
 
-// 原曲目标不触发上传，选句变化后的在线导出必须重新发布当前快照。
-func TestCardLinkTargetAndChangedSelectionKeepCorrectQRCode(t *testing.T) {
+// 有来源页面的歌曲也走分享服务，快照变化后的在线导出必须重新发布，不能沿用旧链接。
+func TestCardLinkAndChangedSnapshotKeepCorrectQRCode(t *testing.T) {
 	a, tester, posted, uploads := onlineCardOutputApp(t)
 	copied := make(chan []byte, 3)
 	previous := copyImage
 	copyImage = func(data []byte) error { copied <- data; return nil }
 	defer func() { copyImage = previous }()
 	until(t, posted, func() bool { tester.Frame(); return len(a.sharing.png) > 0 })
-	if err := tester.Click("Card Link"); err != nil {
-		t.Fatal(err)
+	if !a.sharing.cardOnline {
+		t.Fatal("a source page turned the card into a link back to the source")
 	}
-	if err := tester.ChooseMenuItem("Original Song Page"); err != nil {
-		t.Fatal(err)
-	}
-	until(t, posted, func() bool { tester.Frame(); return len(a.sharing.png) > 0 })
-	if err := tester.Click("Copy Image"); err != nil {
-		t.Fatal(err)
-	}
-	until(t, posted, func() bool { tester.Frame(); return !a.sharing.exporting })
-	assertCardListeningQR(t, wait(t, copied, "original card"), "https://catalog.example/song/old")
-	if uploads.Load() != 0 {
-		t.Fatal("original-song card uploaded audio")
-	}
-	if err := tester.Click("Card Link"); err != nil {
-		t.Fatal(err)
-	}
-	if err := tester.ChooseMenuItem("Online Listening Link"); err != nil {
-		t.Fatal(err)
-	}
-	until(t, posted, func() bool { tester.Frame(); return len(a.sharing.png) > 0 })
 	if err := tester.Click("Copy Image"); err != nil {
 		t.Fatal(err)
 	}
