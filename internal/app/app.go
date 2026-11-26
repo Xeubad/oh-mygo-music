@@ -21,6 +21,15 @@ import (
 	"mygo-music/internal/plugin"
 )
 
+// vibrancyForPlatform 决定窗口背景材质。Windows 上系统透明关闭时 Mica 会画成
+// 实心白标题栏，和内容区割裂，索性让内容自绘；macOS 保留侧栏玻璃。
+func vibrancyForPlatform() mygo.Vibrancy {
+	if runtime.GOOS == "windows" {
+		return mygo.VibrancyNone
+	}
+	return mygo.VibrancySidebar
+}
+
 type pageKind int
 
 const (
@@ -476,9 +485,12 @@ func Run() error {
 			// Inset from the corner, within the sidebar, as macOS 26's
 			// apps with a sidebar place them.
 			TrafficLightPosition: &mygo.Point{X: 20, Y: 20},
-			Vibrancy:             mygo.VibrancySidebar,
-			BackgroundColor:      "light-dark(#ffffff, #141416)",
-			Content:              ui.View(a.view),
+			// Windows 上 VibrancySidebar 是系统 Mica：用户关闭透明效果时它会退化成
+			// 一条实心白标题栏，和内容区的封面氛围色割裂。Windows 关掉，让内容自绘标题栏；
+			// macOS 保留侧栏玻璃。
+			Vibrancy:        vibrancyForPlatform(),
+			BackgroundColor: "light-dark(#ffffff, #141416)",
+			Content:         ui.View(a.view),
 		})
 		a.setMenu()
 		a.initGlobalShortcuts()

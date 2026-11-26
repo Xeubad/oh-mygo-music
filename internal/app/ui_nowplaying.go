@@ -340,7 +340,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 		// showing only while the pointer is in the window, as the pane tabs do.
 		a.npRise(ui.Row(c).Height(topBar(c)).Justify(ui.Center).AlignItems(ui.Center).DragWindow(), 0).Children(func() {
 			reveal(ui.Box(c.Key("close-reveal")), pointerIn).Children(func() {
-				closeBtn := npGlassControl(iconButton(c.Key("close"), iconDown, 18, white.Alpha(0.85), T("Close")))
+				closeBtn := npGlassControlDark(iconButton(c.Key("close"), iconDown, 18, white.Alpha(0.85), T("Close")))
 				if closeBtn.Clicked() {
 					a.nowPlaying = false
 				}
@@ -597,6 +597,13 @@ func (a *app) npTabs() []npTab {
 func npGlassControl(e ui.Element) ui.Element {
 	return e.Radius(999).
 		Material(forcedGlass{interactive: true}).
+		Border(1, white.Alpha(0.14))
+}
+
+// npGlassControlDark 是浮在深色封面上的顶部按钮用的暗底胶囊，避免浅底发白。
+func npGlassControlDark(e ui.Element) ui.Element {
+	return e.Radius(999).
+		Material(forcedGlass{interactive: true, dark: true}).
 		Border(1, white.Alpha(0.14))
 }
 

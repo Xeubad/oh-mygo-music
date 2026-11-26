@@ -13,6 +13,8 @@ import (
 // forcedGlass 是半透明 + 高光边的胶囊材质，带按压生长与悬停亮边反馈。
 type forcedGlass struct {
 	interactive bool
+	// dark 固定用暗底，给浮在深色封面上的顶部按钮用，避免浅色底发白。
+	dark bool
 }
 
 // forcedGlassKey 区分按压与悬停动画的键，避免与 MyGo 内部动画串扰。
@@ -71,6 +73,9 @@ func (g forcedGlass) paint(p *ui.Painter, box ui.Rect, radii [4]float32, hover f
 	bg, edge := ui.Hex("#ffffff").Alpha(0.42), ui.Hex("#ffffff").Alpha(0.32)
 	if p.Theme().Dark {
 		bg, edge = ui.Hex("#ffffff").Alpha(0.16), ui.Hex("#ffffff").Alpha(0.22)
+	}
+	if g.dark {
+		bg, edge = ui.Hex("#0b0b0d").Alpha(0.42), ui.Hex("#ffffff").Alpha(0.16)
 	}
 	if hover > 0 {
 		bg = bg.Mix(white, 0.22*hover)

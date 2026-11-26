@@ -406,10 +406,8 @@ func shellGlass(dark bool, lightAlpha, darkAlpha float32) (res struct{ tint, bor
 // it as macOS 26's scroll edge does, with a floating glass capsule for back/forward.
 func (a *app) pageTop(c *ui.Context) {
 	top, _ := a.insets(c)
-	edge := ui.Box(c.Key("top-edge")).Absolute().Top(0).Left(0).Right(0).Height(top).DragWindow().
-		Material(glass.ScrollEdge{Background: a.pal.bg})
-	// The pointer over it brings the edge up too, as AppKit's does.
-	edge.Opacity(edgeShown(edge, a.underTop || edge.Hovered()))
+	// 顶部条只负责拖动窗口，不画材质——浅色主题下的实心白条会盖住封面氛围。
+	ui.Box(c.Key("top-edge")).Absolute().Top(0).Left(0).Right(0).Height(top).DragWindow()
 	if len(a.history) > 0 || len(a.forward) > 0 {
 		g := shellGlass(a.pal.dark, 0.50, 0.54)
 		pill := ui.Row(c.Key("nav-pill")).Absolute().Top(10).Left(16).Height(34).PaddingX(6).Gap(2).

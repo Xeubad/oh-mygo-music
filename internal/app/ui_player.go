@@ -364,11 +364,8 @@ func (a *app) playerBar(c *ui.Context) {
 	pl := a.pl
 	tr := pl.Current()
 	a.tickTimes(c)
-	// Over the foot of the page: while content is under it, a soft scroll edge
-	// keeps rows tidy under the floating glass capsule.
-	edge := ui.Box(c.Key("bottom-edge")).Absolute().Left(0).Right(0).Bottom(0).Height(playerBarHeight).
-		Material(glass.ScrollEdge{Bottom: true, Background: p.bg})
-	edge.Opacity(edgeShown(edge, a.underBottom))
+	// 底部边缘不画材质——浅色主题下的实心白条会盖住封面氛围。
+	ui.Box(c.Key("bottom-edge")).Absolute().Left(0).Right(0).Bottom(0).Height(playerBarHeight)
 	// 底部采用悬浮圆角玻璃播放胶囊，左右留出 16px、距底边 12px 呼吸边距。
 	const controls = 4*32 + 3*4 // lyrics, queue, sleep timer and the speaker
 	g := shellGlass(p.dark, 0.48, 0.52)
