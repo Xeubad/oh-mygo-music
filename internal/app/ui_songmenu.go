@@ -74,6 +74,12 @@ func (a *app) songItems(tr *music.Track, pid string) func(m *ui.Menu) {
 		if tr.Album.ID != "" && lib.can("album") && m.Item(Tf("Go to Album: %s", tr.Album.Name)).Chosen() {
 			a.openPage(route{page: pageAlbum, src: lib.id, id: tr.Album.ID})
 		}
+		if a.settings.AIEnabled && a.settings.AIBaseURL != "" && a.settings.AIModel != "" && lib.can("addToPlaylist") {
+			m.Separator()
+			if m.Item(T("AI Add to Playlist…")).Chosen() {
+				a.openAISuggestion(tr)
+			}
+		}
 		a.playlistItems(m, tr, pid)
 	}
 }

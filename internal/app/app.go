@@ -106,6 +106,9 @@ type app struct {
 	// thread, read on the plugin's.
 	signInOver     *atomic.Pointer[mygo.Window]
 	naming         nameDialog                   // the name of a playlist asked for
+	aiSuggestion   aiSuggestionState            // the AI's pick for a song, asked
+	aiToast        *ui.Toast                    // the AI's pick after a like, shown once
+	aiAsked        map[string]bool              // songs already asked about after a like
 	deleting       deleteDialog                 // whether to delete a playlist, asked
 	toast          string                       // a message to show once
 	dailySpin      spinState                    // the record on the feature card
@@ -150,6 +153,9 @@ type app struct {
 	startupTray             bool
 
 	suggestions suggestState // what the search field's query may be after
+	// cross 是“全部来源”这次搜索的分组结果；epoch 用来丢弃上一轮的迟到响应。
+	cross      *crossSearch
+	crossEpoch uint64
 
 	nowPlaying    bool
 	npOpen        bool    // Now Playing as it last showed: open or not
@@ -222,6 +228,9 @@ type app struct {
 	cacheUsed           int64 // the bytes the song cache takes, -1 until measured
 	updates             bool  // the update plugin is used (useUpdater)
 	shareTokenDraft     string
+	aiKeyDraft          string
+	aiStatus            string
+	aiTesting           bool
 	shareTokenTemp      string
 	shareTokenTempKey   string
 	shareSettingsStatus string
@@ -329,6 +338,8 @@ func (a *app) makeSources() {
 // them off in the settings, as by hand, it's the built-in one.
 func (a *app) enabledChanged() {
 	previous := a.libs
+	// 来源增减后旧分组已不完整，下次显示时重新并发搜索。
+	a.cross = nil
 	a.libs = nil
 	for _, lib := range a.allLibs {
 		if !slices.Contains(a.settings.DisabledPlugins, lib.id) {

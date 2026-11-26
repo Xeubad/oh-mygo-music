@@ -91,9 +91,14 @@ func (a *app) view(c *ui.Context) {
 	a.signInDialog(c, a.pal)
 	a.installDialog(c, a.pal)
 	a.playlistNameDialog(c)
+	a.aiSuggestionDialog(c)
 	a.deletePlaylistDialog(c)
 	a.shareDialog(c)
 	a.downloadPromptDialog(c)
+	if a.aiToast != nil {
+		c.AddToast(*a.aiToast)
+		a.aiToast = nil
+	}
 	if a.toast != "" {
 		c.Toast(a.toast)
 		a.toast = ""

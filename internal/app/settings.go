@@ -24,6 +24,16 @@ type settings struct {
 	// Captions writes down episodes as they play, for their captions, on this
 	// device, once the listener has the model.
 	Captions bool `json:"captions"`
+	// AIEnabled 开启 AI 歌单建议；地址或模型为空时不出现入口。
+	AIEnabled bool   `json:"aiEnabled"`
+	AIBaseURL string `json:"aiBaseUrl,omitempty"`
+	AIModel   string `json:"aiModel,omitempty"`
+	// AIWebSearch 允许服务商自己的联网增强；默认关闭。
+	AIWebSearch bool `json:"aiWebSearch,omitempty"`
+	// AIAutoAdd 高置信度时直接写入；默认关闭。
+	AIAutoAdd bool `json:"aiAutoAdd,omitempty"`
+	// AIAutoSuggestDisabled 关闭喜欢后的自动推荐；默认开启，所以存反向值。
+	AIAutoSuggestDisabled bool `json:"aiAutoSuggestDisabled,omitempty"`
 	// DisabledPlugins are the IDs of the plugins turned off. All are on until
 	// then, the built-in one included.
 	DisabledPlugins []string `json:"disabledPlugins,omitempty"`
@@ -126,6 +136,8 @@ type settings struct {
 	CacheMB int `json:"cacheMB"`
 	// SearchHistory keeps submitted keywords, most recent first.
 	SearchHistory []string `json:"searchHistory,omitempty"`
+	// SearchAll 让搜索一次问遍每个能搜的来源；关闭时只搜当前来源。
+	SearchAll bool `json:"searchAll,omitempty"`
 
 	path string // where they were loaded from, and are saved to
 }

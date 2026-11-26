@@ -1,0 +1,423 @@
+package app
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/ui"
+
+	"mygo-music/internal/music"
+)
+
+// The song menu offers the AI playlist suggestion when the listener turned it
+// on, beside the plain add-to-playlist items.
+func TestSongMenuOffersAIPlaylistSuggestion(t *testing.T) {
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = "https://example.com/v1"
+	a.settings.AIModel = "m"
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	a.playlists["42"] = &music.Playlist{ID: "42", Name: "List", Tracks: []music.Track{song("1", "夜曲", "周杰伦")}}
+	a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+
+	if err := tt.RightClick("夜曲"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(tt.Menu(), "\n"), T("AI Add to Playlist…")) {
+		t.Fatalf("menu = %q", tt.Menu())
+	}
+}
+
+// Choosing the AI item shows the model's pick and writes nothing until the
+// listener confirms it.
+func TestAISuggestionConfirmsBeforeWriting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": `{"playlist_id":"10","confidence":0.9,"reason":"适合通勤"}`,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = srv.URL
+	a.settings.AIModel = "m"
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	a.playlists["42"] = &music.Playlist{ID: "42", Name: "List", Tracks: []music.Track{song("1", "夜曲", "周杰伦")}}
+	a.route = route{page: pagePlaylist, src: "fake", id: "42"}
+
+	var added []string
+	f := fake(a)
+	f.playlist = func(id string) (*music.Playlist, error) {
+		return &music.Playlist{ID: id, Name: "通勤", Tracks: []music.Track{song("2", "稻香", "周杰伦")}}, nil
+	}
+	f.addTo = func(id string, tracks []string) error {
+		added = append(added, id+":"+strings.Join(tracks, ","))
+		return nil
+	}
+
+	ch := posts(a)
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	if err := tt.RightClick("夜曲"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.ChooseMenuItem(T("AI Add to Playlist…")); err != nil {
+		t.Fatalf("%v; menu = %q", err, tt.Menu())
+	}
+	until(t, ch, func() bool { return !a.aiSuggestion.busy })
+	tt.Frame()
+
+	texts := strings.Join(tt.Texts(), "\n")
+	if !strings.Contains(texts, "通勤") || !strings.Contains(texts, "适合通勤") {
+		t.Fatalf("dialog texts = %q", texts)
+	}
+	if len(added) != 0 {
+		t.Fatalf("wrote before confirming: %v", added)
+	}
+	if err := tt.Click(T("Add")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, ch, func() bool { return len(added) == 1 })
+	if added[0] != "10:1" {
+		t.Errorf("added = %v, want 10:1", added)
+	}
+}
+
+// A confirmed like asks for a suggestion and only shows it, until the
+// listener presses the toast's Add.
+func TestLikingSuggestsPlaylistAfterSourceConfirms(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": `{"playlist_id":"10","confidence":0.9,"reason":"适合通勤"}`,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = srv.URL
+	a.settings.AIModel = "m"
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	tr := song("1", "夜曲", "周杰伦")
+	a.pl.Cue([]music.Track{tr})
+	a.account = &music.Account{ID: "1"}
+
+	liked := false
+	f := fake(a)
+	f.like = func(id string, on bool) error {
+		liked = on
+		return nil
+	}
+	ch := posts(a)
+	a.likeCurrent()
+	until(t, ch, func() bool { return a.aiToast != nil })
+	if !liked {
+		t.Fatal("the source was not asked to like the song")
+	}
+
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	if !strings.Contains(strings.Join(tt.Texts(), "\n"), "通勤") {
+		t.Fatalf("texts = %q", tt.Texts())
+	}
+
+	var added []string
+	f.addTo = func(id string, tracks []string) error {
+		added = append(added, id)
+		return nil
+	}
+	if err := tt.Click("Add"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, ch, func() bool { return len(added) == 1 })
+	if added[0] != "10" {
+		t.Errorf("added = %v, want 10", added)
+	}
+}
+
+// Settings has an AI page for the listener to point the app at a service.
+func TestAISettingsPageExists(t *testing.T) {
+	a := newTestApp()
+	tt := ui.NewTester(a.settingsView, 780, 900)
+	tt.Frame()
+	if err := tt.Click(T("AI")); err != nil {
+		t.Fatal(err)
+	}
+	settled(tt)
+	if a.settingsPage != "ai" {
+		t.Fatalf("settings page = %q, want ai; texts = %q", a.settingsPage, tt.Texts())
+	}
+	if !tt.HasText(T("AI Playlist Suggestions")) {
+		t.Fatalf("texts = %q", tt.Texts())
+	}
+}
+
+// The API key goes to the credential store, never into settings.json.
+func TestAISettingsSavesKeyOutsideSettings(t *testing.T) {
+	a := newTestApp()
+	var saved []byte
+	real := setAISecret
+	setAISecret = func(key string, value []byte) error {
+		saved = value
+		return nil
+	}
+	defer func() { setAISecret = real }()
+
+	tt := ui.NewTester(a.settingsView, 780, 1000)
+	tt.Frame()
+	if err := tt.Click(T("AI")); err != nil {
+		t.Fatal(err)
+	}
+	settled(tt)
+
+	n, ok := tt.AccessByRole(ui.RoleTextField, T("API Key"))
+	if !ok {
+		t.Fatalf("no key field; texts = %q", tt.Texts())
+	}
+	r := n.Bounds
+	tt.ClickAt(r.X+r.W/2, r.Y+r.H/2)
+	tt.Type("sk-secret")
+	if err := tt.Click(T("Save Key")); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+
+	if string(saved) != "sk-secret" {
+		t.Fatalf("saved key %q", saved)
+	}
+	b, _ := json.Marshal(a.settings)
+	if strings.Contains(string(b), "sk-secret") {
+		t.Fatal("the API key leaked into settings.json")
+	}
+}
+
+// With auto-add on, a confident suggestion is written and a toast can undo it.
+func TestAutoAddCanBeUndone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": `{"playlist_id":"10","confidence":0.9,"reason":"适合通勤"}`,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = srv.URL
+	a.settings.AIModel = "m"
+	a.settings.AIAutoAdd = true
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	tr := song("1", "夜曲", "周杰伦")
+	a.pl.Cue([]music.Track{tr})
+	a.account = &music.Account{ID: "1"}
+
+	var added, removed []string
+	f := fake(a)
+	f.like = func(id string, on bool) error { return nil }
+	f.addTo = func(id string, tracks []string) error {
+		added = append(added, id)
+		return nil
+	}
+	f.removeFrom = func(id string, tracks []string) error {
+		removed = append(removed, id)
+		return nil
+	}
+
+	ch := posts(a)
+	a.likeCurrent()
+	until(t, ch, func() bool { return len(added) == 1 })
+	until(t, ch, func() bool { return a.aiToast != nil })
+
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	if err := tt.Click(T("Undo")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, ch, func() bool { return len(removed) == 1 })
+	if removed[0] != "10" {
+		t.Errorf("removed = %v, want 10", removed)
+	}
+}
+
+// Candidates are the listener's own playlists, without fixed or saved ones,
+// and each is cut to the requested samples.
+func TestAICandidatesOnlyOwnPlaylists(t *testing.T) {
+	a := newTestApp()
+	a.mine = []music.Playlist{
+		{ID: "1", Name: "通勤", Mine: true},
+		{ID: "2", Name: "喜欢", Mine: true, Fixed: true},
+		{ID: "3", Name: "收藏", Mine: false},
+	}
+	f := fake(a)
+	f.playlist = func(id string) (*music.Playlist, error) {
+		return &music.Playlist{ID: id, Tracks: []music.Track{song("1", "a", "b"), song("2", "c", "d")}}, nil
+	}
+
+	got := a.aiCandidates(a.library, &music.Track{ID: "x"}, 1)
+	if len(got) != 1 || got[0].ID != "1" {
+		t.Fatalf("candidates = %+v", got)
+	}
+	if len(got[0].Samples) != 1 || got[0].Samples[0] != "a - b" {
+		t.Errorf("samples = %v", got[0].Samples)
+	}
+}
+
+// A listener with many playlists has at most twenty sent to the model.
+func TestAICandidatesCapAtTwenty(t *testing.T) {
+	a := newTestApp()
+	for i := range 25 {
+		a.mine = append(a.mine, music.Playlist{ID: string(rune('a' + i)), Name: "list", Mine: true})
+	}
+	if got := a.aiCandidates(a.library, &music.Track{}, 0); len(got) != 20 {
+		t.Errorf("candidates = %d, want 20", len(got))
+	}
+}
+
+// Unliking a song never asks the model for a playlist.
+func TestUnlikingDoesNotSuggestPlaylist(t *testing.T) {
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = "http://127.0.0.1:1"
+	a.settings.AIModel = "m"
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	tr := song("1", "夜曲", "周杰伦")
+	a.pl.Cue([]music.Track{tr})
+	a.account = &music.Account{ID: "1"}
+	a.liked = map[string]bool{tr.ID: true}
+
+	f := fake(a)
+	f.like = func(id string, on bool) error { return nil }
+	ch := posts(a)
+	a.likeCurrent()
+	runPost(t, ch)
+	if a.aiToast != nil {
+		t.Fatal("unliking suggested a playlist")
+	}
+}
+
+// A suggestion the model is not sure of is not shown after a like.
+func TestLowConfidenceLikeShowsNoToast(t *testing.T) {
+	asked := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(asked)
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": `{"playlist_id":"10","confidence":0.5,"reason":"也许"}`,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = srv.URL
+	a.settings.AIModel = "m"
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	tr := song("1", "夜曲", "周杰伦")
+	a.pl.Cue([]music.Track{tr})
+	a.account = &music.Account{ID: "1"}
+
+	f := fake(a)
+	f.like = func(id string, on bool) error { return nil }
+	ch := posts(a)
+	a.likeCurrent()
+	runPost(t, ch)
+	wait(t, asked, "the AI service")
+	if a.aiToast != nil {
+		t.Fatal("showed a suggestion below the confidence threshold")
+	}
+}
+
+// Liking the same song again does not ask the model a second time.
+func TestAutoSuggestAsksOncePerSong(t *testing.T) {
+	asked := make(chan struct{}, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked <- struct{}{}
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": `{"playlist_id":"10","confidence":0.9,"reason":"适合通勤"}`,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = srv.URL
+	a.settings.AIModel = "m"
+	a.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	tr := song("1", "夜曲", "周杰伦")
+
+	ch := posts(a)
+	a.autoSuggestPlaylist(a.library, tr)
+	a.autoSuggestPlaylist(a.library, tr)
+	wait(t, asked, "the first AI call")
+	runPost(t, ch)
+	select {
+	case <-asked:
+		t.Fatal("asked the model twice for the same song")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// With MM_FRAMES set, saves the AI settings and the suggestion dialog.
+func TestAIFrames(t *testing.T) {
+	dir := framesDir(t)
+
+	a := newTestApp()
+	a.settings.AIEnabled = true
+	a.settings.AIBaseURL = "https://api.example.com/v1"
+	a.settings.AIModel = "example-model"
+	prefs := ui.NewTester(a.settingsView, 780, 900)
+	prefs.Frame()
+	if err := prefs.Click(T("AI")); err != nil {
+		t.Fatal(err)
+	}
+	settled(prefs)
+	saveFrame(t, dir, "ai-settings.png", prefs.Image())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": `{"playlist_id":"10","confidence":0.9,"reason":"适合通勤"}`,
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	b := newTestApp()
+	b.settings.AIEnabled = true
+	b.settings.AIBaseURL = srv.URL
+	b.settings.AIModel = "m"
+	b.mine = []music.Playlist{{ID: "10", Name: "通勤", Mine: true}}
+	b.playlists["42"] = &music.Playlist{ID: "42", Name: "List", Tracks: []music.Track{song("1", "夜曲", "周杰伦")}}
+	b.route = route{page: pagePlaylist, src: "fake", id: "42"}
+	f := fake(b)
+	f.playlist = func(id string) (*music.Playlist, error) {
+		return &music.Playlist{ID: id, Tracks: []music.Track{song("2", "稻香", "周杰伦")}}, nil
+	}
+	ch := posts(b)
+	view := ui.NewTester(b.view, 1200, 800)
+	view.Frame()
+	if err := view.RightClick("夜曲"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.ChooseMenuItem(T("AI Add to Playlist…")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, ch, func() bool { return !b.aiSuggestion.busy })
+	view.Frame()
+	saveFrame(t, dir, "ai-suggestion.png", view.Image())
+}
