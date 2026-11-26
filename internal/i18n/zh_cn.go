@@ -293,6 +293,7 @@ var zhCN = map[string]string{
 	"Couldn't create the playlist. Try again later.":         "创建歌单失败，请稍后再试",
 	"Couldn't delete the playlist. Try again later.":         "删除失败，请稍后再试",
 	"Couldn't keep the setting: %s":                          "无法保存设置：%s",
+	"Couldn't load more of these cards":                      "更多内容加载失败",
 	"Couldn't load the comments":                             "评论加载失败",
 	"Couldn't load the stations":                             "电台加载失败",
 	"Couldn't load this album":                               "专辑加载失败",

@@ -214,6 +214,17 @@ type Section struct {
 	// Empty is what the section says while it holds nothing, such as "No
 	// public playlists". Without it, an empty section shows only its title.
 	Empty string `json:"empty,omitempty"`
+	// Pager lays the section's cards out in pages as wide as the row, one page
+	// showing at a time: the pointer turns them, or Left and Right do.
+	Pager bool `json:"pager,omitempty"`
+	// NextPage is the page holding the next batch of a pager's cards, asked
+	// for once the last page of them shows.
+	NextPage string `json:"nextPage,omitempty"`
+	// ResetPager lets a source expire its cursor and start a fresh first batch.
+	ResetPager bool `json:"resetPager,omitempty"`
+	// OneRow shows only the first row of the section's cards, as many as the
+	// row holds, and leaves the rest to MorePage.
+	OneRow bool `json:"oneRow,omitempty"`
 	// PageTitle heads the page of the section's songs that its feature card
 	// opens, such as "Daily Song Picks" for a card titled "Daily Picks".
 	// Without it, the page takes Title.

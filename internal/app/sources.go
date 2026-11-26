@@ -88,7 +88,8 @@ type library struct {
 	home        *music.Browse // the source's own Home
 	homeErr     string
 	homeLoading bool
-	homeAt      time.Time // when what the home page shows was asked for
+	homeAt      time.Time               // when what the home page shows was asked for
+	homePagers  map[int]*pagerState     // where Home's pagers rest, by section
 
 	playlists map[string]*music.Playlist
 	loadingPl map[string]bool
@@ -146,6 +147,7 @@ func (l *library) forgetPages() {
 	l.albums = map[string]*albumData{}
 	l.shows = map[string]*showData{}
 	l.browses = map[string]*browseData{}
+	l.homePagers = map[int]*pagerState{}
 	l.searches = map[route]*searchData{}
 	l.likedList, l.likedPaged, l.likedAt = nil, paged{}, time.Time{}
 	l.likedFresh = false
