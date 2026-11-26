@@ -393,7 +393,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 
 				// 保留左侧圆角艺术封面卡片，将下方曲目信息、进度、播控与音量收进紧凑圆角玻璃控制胶囊。
 				ctrl := a.npRise(ui.Column(c.Key("np-controls")).Margin(18, 0, 0, 0).Padding(14, 16).Radius(20).
-					Material(glass.Glass{Style: glass.Regular, Clarity: 0.64, Tint: ui.RGBA(18, 18, 22, 0.42)}).
+					Material(forcedGlass{}).
 					Border(1, white.Alpha(0.14)).Shadow(0, 12, 32, -8, ui.RGBA(0, 0, 0, 0.35)), 1)
 				ctrl.Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(0, 0, 12, 0).Children(func() {
@@ -593,30 +593,80 @@ func (a *app) npTabs() []npTab {
 	return tabs
 }
 
-// npGlassPill 为正在播放页的玻璃外壳提供统一的暗色材质，容器与按钮共用。
-// 容器不是按压目标，但 BuildMaterial 在构建期读 Pressed()/Hovered() 会把它
-// 标成可按压，内边距就成了按下去没反应的空隙；所以交互只由 npGlassControl 开。
-func npGlassPill(e ui.Element) ui.Element {
-	return npGlass(e, false)
-}
-
-// npGlassControl 是按钮型玻璃胶囊：悬停亮边、按下生长都由材质完成，
-// 减少动效时 MyGo 直接跳到终态，不需要额外分支。
+// npGlassControl 是按钮型半透明胶囊：按下轻微生长，减少动效时 MyGo 直接跳到终态。
 func npGlassControl(e ui.Element) ui.Element {
-	return npGlass(e, true)
-}
-
-func npGlass(e ui.Element, interactive bool) ui.Element {
 	return e.Radius(999).
-		Material(glass.Glass{Style: glass.Regular, Clarity: 0.72, Tint: ui.RGBA(20, 20, 24, 0.42), Interactive: interactive}).
+		Material(forcedGlass{interactive: true}).
 		Border(1, white.Alpha(0.14))
 }
 
+// paneTabs 照 ToolNest segmentedControl 做：等宽段 + 弹簧滑移的白色高亮胶囊。
+// 高亮位置只由 npPane 的索引驱动，不绑定分段控件的可变选中值，避免二者打架。
 func (a *app) paneTabs(c *ui.Context) {
-	pill := npGlassPill(ui.Row(c.Key("np-tabs-pill")).Padding(2).Gap(2).AlignItems(ui.Center))
-	pill.Children(func() {
-		for _, t := range a.npTabs() {
-			a.paneTab(c, t.pane, t.label)
+	tabs := a.npTabs()
+	selected := 0
+	for i, t := range tabs {
+		if t.pane == a.npPane {
+			selected = i
+			break
+		}
+	}
+
+	theme := c.Theme()
+	size := float32(13)
+	const inset = 2
+	segW := float32(58)
+	for _, t := range tabs {
+		w, _ := c.MeasureText(0, ui.Span{Text: t.label, Size: size, Weight: 600})
+		segW = max(segW, w+22)
+	}
+
+	track := ui.Row(c.Key("np-tabs-pill")).Width(segW*float32(len(tabs))+2*inset).Height(30).
+		Shrink(0).Gap(0).Padding(inset).Radius(15).
+		Background(ui.Hex("#ffffff").Alpha(0.1)).FocusRing(false)
+	if theme.Dark {
+		track.Background(ui.Hex("#000000").Alpha(0.16))
+	}
+	// 胶囊位置用弹簧滑移，切换页签时从旧位置平滑滑到新位置。
+	position := track.AnimateTo("np-seg-pos", float32(selected),
+		ui.Animation{Spring: ui.SpringOptions{Duration: 220 * time.Millisecond}})
+	track.Draw(func(p *ui.Painter, bounds ui.Rect) {
+		pill := ui.Rect{X: bounds.X + inset + position*segW, Y: bounds.Y + inset,
+			W: segW, H: bounds.H - 2*inset}
+		fill := ui.Hex("#ffffff").Alpha(0.92)
+		if theme.Dark {
+			fill = ui.Hex("#ffffff").Alpha(0.22)
+		}
+		p.Fill(pill, fill, 13)
+	})
+	track.Children(func() {
+		for i, t := range tabs {
+			tab := t
+			seg := ui.ButtonBase(c.Key(tab.pane)).Width(segW).Height(26).Shrink(0).
+				Radius(13).AlignItems(ui.Center).Justify(ui.Center).FocusRing(false)
+			fg := white.Alpha(0.75)
+			if i == selected {
+				if theme.Dark {
+					fg = white
+				} else {
+					fg = ui.Hex("#282a30")
+				}
+			}
+			seg.Children(func() {
+				if tab.pane != paneComments {
+					ui.Text(c, tab.label).FontSize(size).FontWeight(600).TextColor(fg).SingleLine()
+					return
+				}
+				n, text := a.commentCount(), ""
+				if n > 0 {
+					text = " " + count(n)
+				}
+				ui.Text(c, tab.label).FontSize(size).FontWeight(600).TextColor(fg)
+				rollCount(c, &a.tabCount, n, text, fg)
+			})
+			if seg.Clicked() {
+				a.choosePane(tab.pane)
+			}
 		}
 	})
 }
@@ -702,41 +752,6 @@ func (a *app) stageBar(c *ui.Context, tr *music.Track, art *artwork, accent ui.C
 			})
 		})
 	})
-}
-
-func (a *app) paneTab(c *ui.Context, i int, label string) {
-	b := ui.ButtonBase(c.Key(i)).Padding(5, 13).Radius(999).FocusRing(false).Label(label)
-	pose := ui.Pose{}
-	if b.Pressed() {
-		pose.Scale = 0.97
-	}
-	b.AnimatePose(pose, ui.Snappy)
-	// 页签背景用两层常驻叠层：选中与悬停各一层，按状态以姿态淡入淡出，
-	// 悬停、切换都不重建视图。
-	selShown := a.npPane == i
-	hovShown := !selShown && b.Hovered()
-	fg := white.Alpha(0.65)
-	if selShown {
-		fg = white
-	}
-	b.Children(func() {
-		fadeLayer(c, white.Alpha(0.18), selShown, 999)
-		fadeLayer(c, white.Alpha(0.08), hovShown, 999)
-		if i != paneComments {
-			ui.Text(c, label).FontSize(13).FontWeight(600).TextColor(fg)
-			return
-		}
-		// The count rolls as it changes, from one song's to the next.
-		n, text := a.commentCount(), ""
-		if n > 0 {
-			text = " " + count(n)
-		}
-		ui.Text(c, label).FontSize(13).FontWeight(600).TextColor(fg)
-		rollCount(c, &a.tabCount, n, text, fg)
-	})
-	if b.Clicked() {
-		a.choosePane(i)
-	}
 }
 
 func (a *app) lyricsPane(c *ui.Context, tr *music.Track, h float32) {
