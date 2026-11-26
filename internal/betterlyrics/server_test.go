@@ -32,7 +32,9 @@ func TestStatusReturnsCurrentTrack(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.TrackID != 7 || got.Title != "醒" || got.PositionMs != 12000 || got.DurationMs != 240000 || !got.Playing {
+	// The server adds the time since the status was published, so the position
+	// is that much on from what was published, never less.
+	if got.TrackID != 7 || got.Title != "醒" || got.PositionMs < 12000 || got.PositionMs > 12000+5000 || got.DurationMs != 240000 || !got.Playing {
 		t.Fatalf("status: %+v", got)
 	}
 }
