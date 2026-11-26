@@ -383,15 +383,15 @@ func (a *app) playbackDetailsPopover(c *ui.Context, panel, anchor ui.Element, tr
 						a.promptSignIn(lib)
 					})
 				} else {
-					ui.PrimaryButton(c.Key("open-settings"), T("Open Source Settings")).FontSize(12).Padding(6, 10).OnClick(func() {
+					ui.PrimaryButton(c.Key("open-settings"), T("Open Plugins")).FontSize(12).Padding(6, 10).OnClick(func() {
 						a.playbackDetailsOpen = false
-						a.openSourceSettings()
+						a.openPlugins()
 					})
 				}
 			case "setup", "source-unavailable":
-				ui.PrimaryButton(c.Key("open-settings"), T("Open Source Settings")).FontSize(12).Padding(6, 10).OnClick(func() {
+				ui.PrimaryButton(c.Key("open-settings"), T("Open Plugins")).FontSize(12).Padding(6, 10).OnClick(func() {
 					a.playbackDetailsOpen = false
-					a.openSourceSettings()
+					a.openPlugins()
 				})
 			default:
 				if lib != nil {

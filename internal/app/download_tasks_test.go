@@ -296,8 +296,7 @@ func TestDownloadTaskStopsWhenSourceDisabled(t *testing.T) {
 	until(t, ch, func() bool { return len(a.backgroundTasks) == 1 })
 	wait(t, started, "download transfer")
 	defer a.stopBackgroundTasks()
-	a.settingsPage = "plugins"
-	settings := ui.NewTester(a.settingsView, 780, 1400)
+	settings := pluginsView(a, 1400)
 	clickDownloadUI(t, settings, "Enable fake")
 	until(t, ch, func() bool { return a.downloads.active == nil })
 	wait(t, canceled, "disabled source request cancellation")
@@ -368,7 +367,6 @@ func TestDownloadTaskRejectsChangedFileType(t *testing.T) {
 		t.Fatalf("changed format was published: %v", err)
 	}
 }
-
 
 // 完成的下载可以定位文件，文件被移走时给出提示。
 func TestDownloadTaskOpensSavedFile(t *testing.T) {
@@ -802,10 +800,10 @@ func TestDownloadTaskFailureCategoriesAndRecoveryActions(t *testing.T) {
 			name:        "setup",
 			err:         music.ErrSetup,
 			wantStatus:  "Source needs setup or permission",
-			clickAction: "Open Source Settings",
+			clickAction: "Open Plugins",
 			checkAfter: func(t *testing.T, a *app) {
-				if a.settingsPage != "plugins" {
-					t.Fatalf("did not switch to source settings: %q", a.settingsPage)
+				if a.route.page != pagePlugins {
+					t.Fatalf("did not open the plugins page: %+v", a.route)
 				}
 			},
 		},
@@ -891,8 +889,7 @@ func TestDownloadTaskStopsOnPermissionRevokeAndRetriesAfterRegrant(t *testing.T)
 	until(t, ch, func() bool { return len(a.backgroundTasks) == 1 })
 	wait(t, started, "guarded transfer")
 
-	a.settingsPage = "plugins"
-	settings := ui.NewTester(a.settingsView, 780, 1400)
+	settings := pluginsView(a, 1400)
 	clickDownloadUI(t, settings, "Stop Allowing")
 	until(t, ch, func() bool {
 		return a.downloads.active == nil && a.backgroundTasks[0].state == backgroundTaskCanceled

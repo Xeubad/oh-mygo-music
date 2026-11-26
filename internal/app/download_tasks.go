@@ -371,10 +371,10 @@ func (a *app) attachDownload(d *downloadTask) {
 func (a *app) downloadLibrary(d *downloadTask) (*library, string, *backgroundTaskAction) {
 	lib := a.libOf(d.track.Source)
 	if lib == nil || !lib.can("stream") || lib.src.Info().Playback != music.PlaybackStream {
-		return nil, T("Download source is unavailable"), &backgroundTaskAction{label: T("Open Source Settings"), run: a.openSourceSettings}
+		return nil, T("Download source is unavailable"), &backgroundTaskAction{label: T("Open Plugins"), run: a.openPlugins}
 	}
 	if g, ok := lib.src.(guarded); ok && len(g.Permissions().Process) > 0 && !g.Granted() || lib.needsSetup {
-		return nil, T("Source needs setup or permission"), &backgroundTaskAction{label: T("Open Source Settings"), run: a.openSourceSettings}
+		return nil, T("Source needs setup or permission"), &backgroundTaskAction{label: T("Open Plugins"), run: a.openPlugins}
 	}
 	if lib.accountUnknown() {
 		a.loadAccount(lib)
@@ -396,7 +396,7 @@ func (a *app) downloadStartFailed(lib *library, err error) {
 		a.promptSignIn(lib)
 	case errors.Is(err, music.ErrSetup):
 		lib.needsSetup, lib.setupReason = true, music.Reason(err)
-		a.openSourceSettings()
+		a.openPlugins()
 	case errors.Is(err, music.ErrUnavailable):
 		a.toast = T("Song unavailable from this source")
 	case errors.Is(err, context.DeadlineExceeded):
@@ -419,7 +419,7 @@ func (a *app) downloadFailureDetails(d *downloadTask, err error) (string, *backg
 		if lib != nil {
 			lib.needsSetup, lib.setupReason = true, music.Reason(err)
 		}
-		return T("Source needs setup or permission"), &backgroundTaskAction{label: T("Open Source Settings"), run: a.openSourceSettings}
+		return T("Source needs setup or permission"), &backgroundTaskAction{label: T("Open Plugins"), run: a.openPlugins}
 	case errors.Is(err, music.ErrUnavailable):
 		return T("Song unavailable from this source"), nil
 	case errors.Is(err, context.DeadlineExceeded):

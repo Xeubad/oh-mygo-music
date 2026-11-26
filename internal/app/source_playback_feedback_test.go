@@ -85,7 +85,7 @@ func TestDisabledSourceShowsCapabilitiesWithoutProbing(t *testing.T) {
 	src.caps = map[string]bool{"search": true, "account": true}
 	src.account = func() (*music.Account, error) { t.Error("opened a disabled source account"); return nil, nil }
 	lib := newLibrary(src)
-	tt := ui.NewTester(func(c *ui.Context) { a.pluginSettings(c, lib, paletteFor(c.Theme())) }, 640, 520)
+	tt := ui.NewTester(func(c *ui.Context) { a.pluginCard(c, lib, paletteFor(c.Theme())) }, 640, 520)
 	tt.Frame()
 	if err := tt.Click("Source capabilities"); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestDisabledSourceShowsUnknownAccountState(t *testing.T) {
 	src := newFakeSource("Disabled example")
 	src.caps = map[string]bool{"account": true}
 	lib := newLibrary(src)
-	tt := ui.NewTester(func(c *ui.Context) { a.pluginSettings(c, lib, paletteFor(c.Theme())) }, 640, 520)
+	tt := ui.NewTester(func(c *ui.Context) { a.pluginCard(c, lib, paletteFor(c.Theme())) }, 640, 520)
 	tt.Frame()
 	if _, ok := tt.Find("Account status not checked"); !ok {
 		t.Fatal("disabled source did not show its unknown account state")
@@ -138,9 +138,9 @@ func TestSourceSettingsModePermissionsAndHealthSummary(t *testing.T) {
 
 	tt := ui.NewTester(func(c *ui.Context) {
 		a.pal = paletteFor(c.Theme())
-		a.pluginSettings(c.Key("remote"), remoteLib, a.pal)
-		a.pluginSettings(c.Key("on"), onLib, a.pal)
-		a.pluginSettings(c.Key("disabled"), disabledLib, a.pal)
+		a.pluginCard(c.Key("remote"), remoteLib, a.pal)
+		a.pluginCard(c.Key("on"), onLib, a.pal)
+		a.pluginCard(c.Key("disabled"), disabledLib, a.pal)
 	}, 720, 960)
 	tt.Frame()
 
@@ -212,10 +212,10 @@ func TestPlaybackFailureRecoveryActionsAndInvalidation(t *testing.T) {
 			err:          music.ErrSetup,
 			wantTitle:    "Setup required",
 			wantCategory: "category=setup",
-			clickAction:  "Open Source Settings",
+			clickAction:  "Open Plugins",
 			checkAfter: func(t *testing.T, a *app, _ *library) {
-				if a.settingsPage != "plugins" {
-					t.Fatalf("did not switch to source settings page: %q", a.settingsPage)
+				if a.route.page != pagePlugins {
+					t.Fatalf("did not open the plugins page: %+v", a.route)
 				}
 			},
 		},
@@ -514,9 +514,9 @@ func TestSourceAndPlaybackFeedbackFrames(t *testing.T) {
 
 		tt := ui.NewTester(func(c *ui.Context) {
 			a.pal = paletteFor(c.Theme())
-			a.pluginSettings(c.Key("on"), onLib, a.pal)
-			a.pluginSettings(c.Key("remote"), remoteLib, a.pal)
-			a.pluginSettings(c.Key("off"), offLib, a.pal)
+			a.pluginCard(c.Key("on"), onLib, a.pal)
+			a.pluginCard(c.Key("remote"), remoteLib, a.pal)
+			a.pluginCard(c.Key("off"), offLib, a.pal)
 		}, 760, 720)
 		tt.SetDark(dark)
 		settled(tt)
