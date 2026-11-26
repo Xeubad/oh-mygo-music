@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -63,6 +64,41 @@ func TestHomeEmptyFrame(t *testing.T) {
 	tt := ui.NewTester(a.view, 1180, 780)
 	settled(tt)
 	saveFrame(t, dir, "home-empty.png", tt.Image())
+}
+
+// 设置 MM_FRAMES 后保存“全部来源”的搜索页，供目视核对分组与列宽。
+func TestCrossSearchFrame(t *testing.T) {
+	dir := framesDir(t)
+	a := newTestApp()
+	a.settings.SearchAll = true
+	answer := func(src *fakeSource, name string, songs []music.Track, more bool) {
+		src.info.Name = name
+		src.search = func(string, music.SearchKind, int) (*music.SearchResult, error) {
+			return &music.SearchResult{Tracks: songs, More: more}, nil
+		}
+	}
+	answer(fake(a), "Local Files", []music.Track{
+		song("l1", "詩超絆", "MyGO!!!!!"), song("l2", "迷星叫", "MyGO!!!!!"), song("l3", "壱雫空", "MyGO!!!!!"),
+	}, false)
+	alpha := newFakeSource("plugin-a")
+	answer(alpha, "Plugin A", []music.Track{
+		song("a1", "碧天伴走", "MyGO!!!!!"), song("a2", "音一会", "MyGO!!!!!"), song("a3", "栞", "MyGO!!!!!"),
+	}, true)
+	addFake(a, alpha)
+	broken := newFakeSource("Plugin B")
+	broken.info.Name = "Plugin B"
+	broken.search = func(string, music.SearchKind, int) (*music.SearchResult, error) {
+		return nil, errors.New("the source did not answer")
+	}
+	addFake(a, broken)
+
+	ch := posts(a)
+	tt := ui.NewTester(a.view, 1180, 780)
+	a.search("MyGO")
+	tt.Frame()
+	until(t, ch, func() bool { return a.cross != nil && a.cross.settled() })
+	settled(tt)
+	saveFrame(t, dir, "search-all-sources.png", tt.Image())
 }
 
 // With MM_FRAMES set, saves Home showing cached playlists while account lookup waits.

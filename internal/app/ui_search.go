@@ -58,6 +58,10 @@ func (a *app) searchFor(r route) {
 
 // loadSearch loads the first page of a search, unless it has, or again.
 func (a *app) loadSearch(r route, again bool) {
+	// 全部来源的歌曲搜索由页面并发发起，这里不再单独问当前来源。
+	if a.settings.SearchAll && r.kind == music.SearchTracks {
+		return
+	}
 	lib := a.libOf(r.src)
 	if lib == nil || lib.searches[r] != nil && !again {
 		return
@@ -120,6 +124,11 @@ func (a *app) clearSearchHistory() {
 
 func (a *app) searchPage(c *ui.Context) {
 	r := a.route
+	// 跨源首版只做歌曲；其它分类仍按当前来源搜索。
+	if a.settings.SearchAll && r.kind == music.SearchTracks {
+		a.crossSearchPage(c)
+		return
+	}
 	lib := a.library
 	d := lib.searches[r]
 	if d == nil {
@@ -207,6 +216,7 @@ func (a *app) searchHeader(c *ui.Context, d *searchData) {
 			}
 		})
 	}
+	a.searchScopeControl(c)
 	if r.kind == music.SearchTracks && a.countDownloadable(d.res.Tracks) > 0 {
 		ui.Row(c).Wrap().Gap(10).Margin(0, 0, 14, 0).Children(func() {
 			a.batchDownloadButtons(c, d.res.Tracks)

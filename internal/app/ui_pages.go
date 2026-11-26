@@ -552,6 +552,9 @@ func sameTrack(x, y *music.Track) bool {
 	return x != nil && y != nil && x.ID == y.ID && x.Source == y.Source
 }
 
+// trackKey 区分不同来源的同号歌曲，列表与行键不会互相顶掉。
+type trackKey struct{ source, id string }
+
 // trackRow is a row of the list tracks, its track i, which plays the list from
 // there as it's clicked.
 func (a *app) trackRow(c *ui.Context, tracks []music.Track, i int, covers bool, pid string) {
@@ -582,7 +585,7 @@ func (a *app) trackRowPlay(c *ui.Context, tracks []music.Track, i int, covers bo
 	canSelect := a.canDownload(tr)
 	selected := selecting && a.isTrackSelected(tr)
 	// 歌曲行内有独立入口，以组合控件暴露子项，避免专辑和收藏被父按钮折叠。
-	row := ui.ButtonBase(c.Key(tr.ID)).Role(ui.RoleGroup).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
+	row := ui.ButtonBase(c.Key(trackKey{tr.Source, tr.ID})).Role(ui.RoleGroup).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
 		ContextMenu(a.songItems(tr, pid))
 	a.trackFocus(c, row, tracks, i)
 	hovered := row.Hovered()
