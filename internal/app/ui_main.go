@@ -20,7 +20,11 @@ func (a *app) view(c *ui.Context) {
 	t.Selection = p.accent.Alpha(0.3)
 	c.SetTheme(&t)
 
+	a.checkSleepTimer()
 	a.shortcuts(c)
+	if a.nowPlaying {
+		a.queueOpen = false
+	}
 
 	// Back to the front, after the listener may have changed their
 	// playlists elsewhere.
@@ -34,7 +38,7 @@ func (a *app) view(c *ui.Context) {
 		c.Root().Background(ui.Transparent)
 	}
 	root := ui.Box(c).Fill()
-	if !c.Focused(a.searchBox) && a.sharing == nil {
+	if !c.Focused(a.searchBox) && (a.sharing == nil || !a.sharing.open) && !a.sleep.open && !a.downloadPrompt.open {
 		// Space plays and pauses wherever the focus is, as in Music. On
 		// the container around everything, it comes before a button the
 		// pointer focused, which would take Space as a click; on the
@@ -46,37 +50,51 @@ func (a *app) view(c *ui.Context) {
 	}
 	npOpen, npSettled := a.npState(c)
 	root.Children(func() {
-		page := ui.Row(c).Fill().AlignItems(ui.Stretch)
-		page.Children(func() {
-			if npOpen && npSettled {
-				// Covered by Now Playing: not built, which would cost each
-				// of its frames as much again as the stage itself. Where
-				// it is scrolled is the app's (pageScroll, navScroll,
-				// trackList), so it shows again as it was.
-				return
+		if !(npOpen && npSettled) {
+			// 浏览页整窗底层绘出独立封面氛围，侧栏、主内容区与悬浮胶囊共享同一片通透底色。
+			page := ui.Box(c).Fill()
+			if !c.Vibrancy() && !a.settings.CoverBackdrop {
+				page.Background(p.bg)
+				a.browseBackdrop = browseBackdropCache{}
 			}
-			side := ui.Column(c).Width(sidebarWidth)
-			if !c.Vibrancy() {
-				side.Background(p.sidebar)
-			}
-			side.Children(func() { a.sidebar(c) })
-			// Keyed, so that a popover of the sidebar opening or closing
-			// keeps what the page and its bars hold, their edges' fades.
-			ui.Box(c.Key("main")).Grow(1).Background(p.bg).Children(func() {
-				a.content(c)
-				// The bars float over the page, which scrolls under them:
-				// positioned, they paint over it.
-				a.pageTop(c)
-				a.playerBar(c)
+			page.Children(func() {
+				if !c.Vibrancy() && a.settings.CoverBackdrop {
+					a.browseBackdropView(c)
+				}
+				// 与背景同为定位层，保证流式子内容绘制在封面氛围之上而非被定位背景覆盖。
+				ui.Row(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).AlignItems(ui.Stretch).Children(func() {
+					side := ui.Column(c).Width(sidebarWidth).Padding(10, 4, 10, 10)
+					side.Children(func() {
+						card := ui.Column(c.Key("sidebar-glass")).Fill().Radius(18).Clip()
+						if !c.Vibrancy() {
+							g := shellGlass(p.dark, 0.40, 0.48)
+							card.Material(glass.Glass{Style: glass.Regular, Clarity: 0.78, Tint: g.tint}).
+								Border(1, g.border).Shadow(0, 10, 28, -8, g.shade)
+						}
+						card.Children(func() { a.sidebar(c) })
+					})
+					// Keyed, so that a popover of the sidebar opening or closing
+					// keeps what the page and its bars hold, their edges' fades.
+					ui.Box(c.Key("main")).Grow(1).Children(func() {
+						a.content(c)
+						// The bars float over the page, which scrolls under them:
+						// positioned, they paint over it.
+						a.pageTop(c)
+						a.playerBar(c)
+					})
+				})
 			})
-		})
+		}
 		a.nowPlayingLayer(c, npOpen, npSettled)
 	})
+	a.backgroundTasksLayer(c)
 	a.signInDialog(c, a.pal, false)
+	a.installDialog(c, a.pal)
 	a.playlistNameDialog(c)
 	a.deletePlaylistDialog(c)
 	a.aggregateWriteDialog(c)
 	a.shareDialog(c)
+	a.downloadPromptDialog(c)
 	if a.toast != "" {
 		c.Toast(a.toast)
 		a.toast = ""
@@ -86,7 +104,7 @@ func (a *app) view(c *ui.Context) {
 }
 
 func (a *app) shortcuts(c *ui.Context) {
-	if a.sharing != nil {
+	if (a.sharing != nil && a.sharing.open) || a.downloadPrompt.open {
 		return
 	}
 	// The side buttons of a mouse, the keys of keyboards that have them
@@ -130,6 +148,7 @@ func (a *app) show(r route) {
 	if r.src == "" {
 		r.src = a.route.src
 	}
+	a.installer.marked = "" // a plugin just installed is marked until the listener leaves
 	lib := a.libOf(r.src)
 	if lib == nil {
 		// Its source went away since: the active one's Home instead.
@@ -137,6 +156,9 @@ func (a *app) show(r route) {
 		lib = a.library
 	}
 	a.activate(lib)
+	if r != a.route {
+		a.exitTrackSelect()
+	}
 	a.route = r
 	if r.page == pageSearch {
 		a.query, a.searched = r.query, r
@@ -183,6 +205,10 @@ func (a *app) load(r route) {
 		if r.id != "" {
 			a.loadBrowse(lib, r.id, false)
 		}
+	case pagePlugins:
+		if r.id == communityTab {
+			a.loadCommunity()
+		}
 	}
 }
 
@@ -218,13 +244,14 @@ func (a *app) goForward() {
 func (a *app) sidebar(c *ui.Context) {
 	// Under the window buttons where they sit over the sidebar, as the
 	// traffic lights do; elsewhere, as close to the top as to the sides.
-	top := float32(14)
+	top := float32(12)
 	if c.TitleBar().Left > 0 {
-		top = topBar(c) + 4
+		top = max(12, topBar(c)-6)
 	}
 	// Where nothing in it takes the press, the sidebar moves the window, as
 	// the title bar it reaches up into would.
-	ui.Column(c).Fill().Padding(top, 14, 14, 14).Gap(4).DragWindow().Children(func() {
+	ui.Column(c).Fill().Padding(top, 8, 12, 8).Gap(4).DragWindow().Children(func() {
+		a.sidebarBrand(c)
 		a.sourceSwitcher(c)
 		if a.can("search") {
 			a.searchField(c)
@@ -237,12 +264,15 @@ func (a *app) sidebar(c *ui.Context) {
 			if a.searched.query != "" && a.searched.src == a.id {
 				a.navItem(c, iconSearch, T("Search Results"), a.searched)
 			}
+			a.navItem(c, iconDownload, T("Downloads"), route{page: pageDownloads})
 			if a.can("playlists") {
 				a.myPlaylists(c, T("My Playlists"), a.mine, true, &a.mineCollapsed)
 				a.myPlaylists(c, T("Saved Playlists"), a.saved, false, &a.savedCollapsed)
 			}
 		})
 
+		// The plugins others made are the app's, whichever source is active.
+		a.navItem(c, iconPlug, T("Plugins"), route{page: pagePlugins})
 		a.accountRow(c)
 	})
 }
@@ -251,21 +281,26 @@ func (a *app) navItem(c *ui.Context, icon *ui.SVG, label string, r route) {
 	p := a.pal
 	selected := a.route.page == r.page && !a.nowPlaying && (r.page != pageBrowse || a.route.id == r.id)
 	b := ui.ButtonBase(c.Key(label)).Height(34).PaddingX(10).Gap(10).Radius(8).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false)
-	bg := ui.Transparent
-	switch {
-	case selected:
-		bg = p.press
-	case b.Hovered():
-		bg = p.hover
-	}
-	b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
+	// 侧栏项在指针下的频率很高，底色用常驻叠层 + 姿态淡入淡出，
+	// 不使用 AnimateColor（它会每帧重建整份视图）。
+	selectedBg, hoverBg := selected, !selected && b.Hovered()
 	color := p.text
 	if selected {
 		color = p.accent
 	}
 	b.Children(func() {
+		fadeLayer(c, p.press, selectedBg, 8)
+		fadeLayer(c, p.hover, hoverBg, 8)
+		// 选中指示条同样靠淡入淡出，选中时展开到可见。
+		marker := ui.Box(c.Key("nav-active")).Absolute().Left(-1).Top(9).Width(3).Height(16).
+			Radius(2).Background(p.accent)
+		markerFade := float32(1)
+		if selected {
+			markerFade = 0
+		}
+		marker.AnimatePose(ui.Pose{Fade: markerFade}, ui.Animation{Duration: 160 * time.Millisecond})
 		ui.Icon(c, icon).Size(17, 17).TextColor(color)
-		ui.Text(c, label).FontSize(13.5).FontWeight(500).TextColor(p.text)
+		ui.Text(c, label).FontSize(13.5).FontWeight(500).TextColor(color)
 	})
 	if b.Clicked() {
 		a.open(r)
@@ -354,25 +389,41 @@ func edgeShown(el ui.Element, under bool) float32 {
 	return el.AnimateTo("shown", target, ui.Animation{Duration: 180 * time.Millisecond})
 }
 
+// shellGlass 为悬浮玻璃侧栏、顶部导航胶囊与底部播放胶囊提供一致的浅/深色调色参数。
+func shellGlass(dark bool, lightAlpha, darkAlpha float32) (res struct{ tint, border, shade ui.Color }) {
+	if dark {
+		res.tint = ui.RGBA(26, 26, 32, darkAlpha)
+		res.border = ui.RGBA(255, 255, 255, 0.13)
+		res.shade = ui.RGBA(0, 0, 0, 0.36)
+		return res
+	}
+	res.tint = ui.RGBA(255, 255, 255, lightAlpha)
+	res.border = ui.RGBA(255, 255, 255, 0.68)
+	res.shade = ui.RGBA(0, 0, 0, 0.12)
+	return res
+}
+
 // pageTop is the strip over the top of a page, frosting what scrolls under
-// it as macOS 26's hard scroll edge does: it drags the window, and holds
-// the back button once there is a page to go back to.
+// it as macOS 26's scroll edge does, with a floating glass capsule for back/forward.
 func (a *app) pageTop(c *ui.Context) {
 	top, _ := a.insets(c)
-	edge := ui.Box(c.Key("top-edge")).Absolute().Top(0).Left(0).Right(0).Height(top).DragWindow().
-		Material(glass.ScrollEdge{Hard: true, Background: a.pal.bg})
-	// The pointer over it brings the edge up too, as AppKit's does.
-	edge.Opacity(edgeShown(edge, a.underTop || edge.Hovered()))
+	// 顶部条只负责拖动窗口，不画材质——浅色主题下的实心白条会盖住封面氛围。
+	ui.Box(c.Key("top-edge")).Absolute().Top(0).Left(0).Right(0).Height(top).DragWindow()
 	if len(a.history) > 0 || len(a.forward) > 0 {
-		ui.Row(c).Absolute().Top(0).Left(20).Height(topBar(c)).AlignItems(ui.Center).Children(func() {
-			back := iconButton(c.Key("back"), iconBack, 18, a.pal.muted, T("Back")).Disabled(len(a.history) == 0)
+		g := shellGlass(a.pal.dark, 0.50, 0.54)
+		pill := ui.Row(c.Key("nav-pill")).Absolute().Top(10).Left(16).Height(34).PaddingX(6).Gap(2).
+			Radius(999).AlignItems(ui.Center).
+			Material(glass.Glass{Style: glass.Regular, Clarity: 0.74, Tint: g.tint}).
+			Border(1, g.border).Shadow(0, 6, 18, -4, g.shade)
+		pill.Children(func() {
+			back := iconButton(c.Key("back"), iconBack, 17, a.pal.text.Alpha(0.75), T("Back")).Disabled(len(a.history) == 0)
 			if len(a.history) == 0 {
 				back.Opacity(0.35)
 			}
 			if back.Clicked() {
 				a.back()
 			}
-			if len(a.forward) > 0 && iconButton(c.Key("forward"), iconForward, 18, a.pal.muted, T("Forward")).Clicked() {
+			if len(a.forward) > 0 && iconButton(c.Key("forward"), iconForward, 17, a.pal.text.Alpha(0.75), T("Forward")).Clicked() {
 				a.goForward()
 			}
 		})
@@ -380,11 +431,8 @@ func (a *app) pageTop(c *ui.Context) {
 }
 
 func (a *app) content(c *ui.Context) {
-	// A new page starts at its top. Not as it is opened: a control in a
-	// list, as a page's tabs in its header, opens it as the list builds.
-	if a.scrolled != a.route {
-		a.trackList, a.pageScroll, a.scrolled = ui.ListState{}, ui.ScrollState{}, a.route
-	}
+	// 切页动作可能发生在列表头构建中，等下一次构建再交换页面状态。
+	a.restorePagePosition()
 	// Pages mark where their content is, as they scroll.
 	a.underTop, a.underBottom = false, false
 	switch a.route.page {
@@ -412,6 +460,10 @@ func (a *app) content(c *ui.Context) {
 		a.browsePage(c)
 	case pageSection:
 		a.sectionPage(c)
+	case pageDownloads:
+		a.downloadPage(c)
+	case pagePlugins:
+		a.pluginsPage(c)
 	}
 }
 
@@ -441,8 +493,8 @@ func (a *app) remedy(c *ui.Context) {
 			a.promptSignIn(lib)
 		}
 	case lib.needsSetup:
-		if ui.PrimaryButton(c.Key("setup"), T("Open Settings")).Clicked() {
-			a.openSourceSettings()
+		if ui.PrimaryButton(c.Key("setup"), T("Open Plugins")).Clicked() {
+			a.openPlugins()
 		}
 	}
 }
@@ -458,6 +510,7 @@ const homeFresh = time.Hour
 func (a *app) loadHome(lib *library) {
 	lib.homeLoading, lib.homeErr = true, ""
 	at := time.Now()
+	epoch := lib.pageEpoch
 	go func() {
 		var home *music.Browse
 		var recent []music.Track
@@ -472,8 +525,14 @@ func (a *app) loadHome(lib *library) {
 			}
 		}
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			lib.homeLoading = false
-			lib.home, lib.recent = home, recent
+			// 临时失败不能抹掉可操作缓存；成功的空结果仍然可以清空旧内容。
+			if homeErr == nil && recentErr == nil || home != nil || len(recent) > 0 {
+				lib.home, lib.recent = home, recent
+			}
 			lib.homeAt = at
 			switch {
 			case homeErr != nil:
@@ -517,9 +576,14 @@ func (a *app) loadPlaylist(lib *library, id string, thenPlay bool) {
 	lib.loadingPl[id] = true
 	delete(lib.plErr, id)
 	at := time.Now()
+	epoch := lib.pageEpoch
 	go func() {
 		pl, err := answered(lib.src.Playlist(id))
 		a.post(func() {
+			// 账号或来源换代后，旧响应不能改写新缓存，也不能触发旧账号的登录提示。
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			delete(lib.loadingPl, id)
 			if err != nil {
 				lib.plErr[id] = a.problem(lib, err, T("Couldn't load this playlist"))
@@ -540,9 +604,13 @@ func (a *app) freshenPlaylist(lib *library, id string) {
 	before := *was
 	lib.freshPl[id] = true
 	at := time.Now()
+	epoch := lib.pageEpoch
 	go func() {
 		pl, err := answered(lib.src.Playlist(id))
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			delete(lib.freshPl, id)
 			// Changed in the app meanwhile, its songs or name, or forgotten:
 			// what's there is newer than what was asked for.
@@ -668,9 +736,10 @@ func (a *app) sourceSwitcher(c *ui.Context) {
 	b := sel.Trigger.Height(height).PaddingX(7).Gap(4).Radius(7).AlignItems(ui.Center).
 		FocusRing(false).Label(T("Plugin"))
 	if left := c.TitleBar().Left; left > 0 {
-		b.Absolute().Top((topBar(c) - height) / 2).Left(left + 12).MaxWidth(sidebarWidth - left - 22)
+		// 悬浮侧栏外层已有 10px 边距，macOS 窗口按钮旁的来源选择器坐标同步扣除外边距。
+		b.Absolute().Top(max(4, (topBar(c)-height)/2-10)).Left(max(4, left+2)).MaxWidth(sidebarWidth - left - 26)
 	} else {
-		b.AlignSelf(ui.Start).Margin(0, 0, 4, -7).MaxWidth(sidebarWidth - 28)
+		b.AlignSelf(ui.Start).Margin(0, 0, 4, -7).MaxWidth(sidebarWidth - 32)
 	}
 	color := p.muted
 	if b.Hovered() || sel.Open() {

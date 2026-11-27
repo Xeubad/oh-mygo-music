@@ -2,6 +2,8 @@ package app
 
 import (
 	"encoding/json"
+	"image"
+
 	"os"
 	"path/filepath"
 	"reflect"
@@ -177,4 +179,30 @@ func TestStageLanguageFrames(t *testing.T) {
 	compact.Move(450, 320)
 	settled(compact)
 	saveFrame(t, directory, "stage-language-compact.png", compact.Image())
+}
+
+func cloneRGBA(source *image.RGBA) *image.RGBA {
+	copy := image.NewRGBA(source.Bounds())
+	copy.Pix = append(copy.Pix[:0], source.Pix...)
+	return copy
+}
+
+func imagesDifferWithin(before, after *image.RGBA, box ui.Rect) bool {
+	return changedPixels(before, after, box) != 0
+}
+
+func changedPixels(before, after *image.RGBA, box ui.Rect) int {
+	if before.Bounds() != after.Bounds() {
+		return -1
+	}
+	region := image.Rect(int(box.X), int(box.Y), int(box.X+box.W), int(box.Y+box.H)).Intersect(before.Bounds())
+	changed := 0
+	for y := region.Min.Y; y < region.Max.Y; y++ {
+		for x := region.Min.X; x < region.Max.X; x++ {
+			if before.RGBAAt(x, y) != after.RGBAAt(x, y) {
+				changed++
+			}
+		}
+	}
+	return changed
 }

@@ -49,7 +49,7 @@ const signInSettle = 250 * time.Millisecond
 
 // loadAccount asks a source who is signed in.
 func (a *app) loadAccount(lib *library) {
-	if !lib.can("account") || lib.accountBusy {
+	if !lib.can("account") || lib.accountBusy || a.libOf(lib.id) != lib {
 		return
 	}
 	lib.accountBusy = true
@@ -87,8 +87,14 @@ func (a *app) loadAccount(lib *library) {
 
 // afterAccount loads anew what's personal to who listens to a source.
 func (a *app) afterAccount(lib *library) {
+	if a.pl != nil {
+		a.pl.InvalidateSource(lib.id)
+	}
+	a.invalidateDownloads(lib.id)
+	a.discardPagePositions(lib)
 	lib.accountAsked = true
 	lib.forget()
+	lib.mine, lib.saved, lib.home, lib.recent = nil, nil, nil, nil
 	lib.needsSignIn, lib.askedSignIn = false, false
 	a.loadMine(lib)
 	a.loadHome(lib)
@@ -108,15 +114,13 @@ func (a *app) promptSignIn(lib *library) {
 	a.signIn = signInDialog{open: true, lib: lib, gen: a.signIn.gen + 1}
 }
 
-// promptSignInInSettings asks it in the settings window, where they asked,
-// instead of bringing up the main window behind it.
+// startSignIn signs in to the source asked about, off the main thread: it
+// waits for the listener at the source. A sign-in that ends after they closed
+// the dialog still counts.
 func (a *app) promptSignInInSettings(lib *library) {
 	a.signIn = signInDialog{open: true, lib: lib, here: true, gen: a.signIn.gen + 1}
 }
 
-// startSignIn signs in to the source asked about, off the main thread: it
-// waits for the listener at the source. A sign-in that ends after they closed
-// the dialog still counts.
 func (a *app) startSignIn() {
 	d := &a.signIn
 	lib := d.lib
@@ -217,11 +221,10 @@ func (a *app) signOut(lib *library) {
 }
 
 // signInDialog says which source the listener signs in to, while it waits for
-// them there, in the window it was asked in: settings says whether that's
-// the settings window.
-func (a *app) signInDialog(c *ui.Context, p palette, settings bool) {
+// them there.
+func (a *app) signInDialog(c *ui.Context, p palette, settings ...bool) {
 	d := &a.signIn
-	if d.here != settings {
+	if len(settings) > 0 && d.here != settings[0] {
 		return
 	}
 	ui.DialogBase(c.Key("sign-in"), &d.open, func(backdrop, panel ui.Element) {

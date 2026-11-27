@@ -55,7 +55,7 @@ If you are switching from the original project, install MyGo Music by XEU manual
 ## Quick start
 
 1. **Install the player.** Pick the installer for your device above.
-2. **Add music.** Go to **Settings → Plugins → Local Files → Add Folder…**, choose your music folder, let it scan, and return to the main view to play a track. For another music source, install and enable its plugin in **Settings → Plugins**, complete any sign-in or configuration, then switch to that source in the main view.
+2. **Add music.** Go to **Plugins → Local Files in the sidebar → Add Folder…**, choose your music folder, let it scan, and return to the main view to play a track. For another music source, install and enable its plugin in **Plugins in the sidebar**, complete any sign-in or configuration, then switch to that source in the main view.
 3. **Make playback easier.** Enable global shortcuts in **Settings → Shortcuts**, then customize the bindings to suit you.
 
 Global shortcuts are off by default. Once enabled, they work while the player is running, including when its window is hidden. They stop working when you quit the app.
@@ -91,7 +91,7 @@ From immersive lyrics to a retro player, give a familiar song a different atmosp
 
 ## Plugins
 
-Open **Settings → Plugins** and click **+** to install a plugin from GitHub, a local folder, or a ZIP file. Plugins can provide accounts, search, playlists, lyrics, podcasts, stations, and more. Available features depend on each plugin.
+Open **Plugins in the sidebar** and click **+** to install a plugin from GitHub, a local folder, or a ZIP file. Plugins can provide accounts, search, playlists, lyrics, podcasts, stations, and more. Available features depend on each plugin.
 
 The [original project's plugin directory](https://mygo-music.egoist.dev/plugins) is a place to start and is maintained by the original project. Check plugin requirements before installing; see this project's [latest release notes](https://github.com/zxbdzh/oh-mygo-music/releases/latest) for compatibility information.
 

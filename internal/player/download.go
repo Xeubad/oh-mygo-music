@@ -17,10 +17,11 @@ import (
 // of their own: kept in the cache, a file on disk, or at its source.
 type Song struct {
 	// Type is its file's: one of songTypes, as its source said.
-	Type     string
-	file     *os.File      // kept in the cache, or on disk
-	st       *music.Stream // or else where it streams from
-	prepared stream
+	Type       string
+	PlaybackID string
+	file       *os.File      // kept in the cache, or on disk
+	st         *music.Stream // or else where it streams from
+	prepared   stream
 }
 
 // FindSong finds track t of src at quality, to save, as the player would play
@@ -36,7 +37,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 	}
 	if f, st, ok := p.Cache.find(t.Source, t.ID, quality); ok {
 		if t.PlaybackID == "" || st.PlaybackID == t.PlaybackID {
-			return &Song{Type: st.Type, file: f, st: st}, nil
+			return &Song{Type: st.Type, PlaybackID: st.PlaybackID, file: f, st: st}, nil
 		}
 		f.Close()
 	}
@@ -56,7 +57,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 			prepared.Close()
 			return nil, music.ErrRecordingSelectionRequired
 		}
-		return &Song{Type: songType(info.Type), st: info, prepared: prepared}, nil
+		return &Song{Type: songType(info.Type), PlaybackID: info.PlaybackID, st: info, prepared: prepared}, nil
 	}
 	st, err := src.Stream(t.ID, quality)
 	if err != nil {
@@ -68,7 +69,7 @@ func (p *Player) FindSongContext(ctx context.Context, src music.Source, t music.
 	if t.PlaybackID != "" && st.PlaybackID != t.PlaybackID {
 		return nil, music.ErrRecordingSelectionRequired
 	}
-	s := &Song{Type: songType(st.Type), st: st}
+	s := &Song{Type: songType(st.Type), PlaybackID: st.PlaybackID, st: st}
 	if path, ok := music.PathOf(st.URL); ok {
 		if s.file, err = os.Open(path); err != nil {
 			return nil, err
@@ -131,23 +132,54 @@ func (s *Song) SaveToContext(ctx context.Context, path string) error {
 	return err
 }
 
+// WriteDownload streams a song and reports copied bytes to the download center.
 // copy writes all of the song to w.
 func (s *Song) copy(w io.Writer) error {
 	return s.copyContext(context.Background(), w)
 }
 
 func (s *Song) copyContext(ctx context.Context, w io.Writer) error {
+	return s.write(ctx, w, nil)
+}
+
+// WriteDownload 仅负责写入音频；调用方负责关闭 Song 和提交临时文件。
+func (s *Song) WriteDownload(ctx context.Context, w io.Writer, progress func(written, total int64)) error {
+	return s.write(ctx, w, progress)
+}
+
+func (s *Song) write(ctx context.Context, w io.Writer, progress func(written, total int64)) error {
+	copyAudio := func(r io.Reader, size int64) error {
+		if progress == nil {
+			_, err := io.Copy(w, r)
+			return err
+		}
+		writer := &downloadProgressWriter{Writer: w, report: progress, total: size}
+		written, err := io.Copy(writer, contextReader{ctx: ctx, reader: r})
+		if err == nil && (written == 0 || size > 0 && written != size) {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
 	if s.prepared != nil {
 		// 直接复制已验证候选的原始下载，不能重新请求临时 URL 导致版本或字节变化。
 		download, _ := s.prepared.source()
 		stop := context.AfterFunc(ctx, download.Close)
 		defer stop()
-		_, err := io.Copy(w, contextReader{ctx: ctx, reader: &downloadReader{d: download}})
-		return err
+		download.mu.Lock()
+		size := download.size
+		download.mu.Unlock()
+		return copyAudio(contextReader{ctx: ctx, reader: &downloadReader{d: download}}, size)
 	}
 	if s.file != nil {
-		_, err := io.Copy(w, contextReader{ctx: ctx, reader: s.file})
-		return err
+		var size int64
+		if progress != nil {
+			info, err := s.file.Stat()
+			if err != nil {
+				return err
+			}
+			size = info.Size()
+		}
+		return copyAudio(contextReader{ctx: ctx, reader: s.file}, size)
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", s.st.URL, nil)
 	if err != nil {
@@ -165,8 +197,23 @@ func (s *Song) copyContext(ctx context.Context, w io.Writer) error {
 	if res.StatusCode != http.StatusOK {
 		return errors.New(res.Status)
 	}
-	_, err = io.Copy(w, res.Body)
-	return err
+	return copyAudio(res.Body, res.ContentLength)
+}
+
+type downloadProgressWriter struct {
+	io.Writer
+	report  func(written, total int64)
+	total   int64
+	written int64
+}
+
+func (w *downloadProgressWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n > 0 {
+		w.written += int64(n)
+		w.report(w.written, w.total)
+	}
+	return n, err
 }
 
 type contextReader struct {

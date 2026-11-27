@@ -21,6 +21,15 @@ import (
 	"mygo-music/internal/plugin"
 )
 
+// vibrancyForPlatform 决定窗口背景材质。Windows 上系统透明关闭时 Mica 会画成
+// 实心白标题栏，和内容区割裂，索性让内容自绘；macOS 保留侧栏玻璃。
+func vibrancyForPlatform() mygo.Vibrancy {
+	if runtime.GOOS == "windows" {
+		return mygo.VibrancyNone
+	}
+	return mygo.VibrancySidebar
+}
+
 type pageKind int
 
 const (
@@ -36,6 +45,8 @@ const (
 	pageSavedAlbums
 	pageBrowse
 	pageSection
+	pageDownloads
+	pagePlugins // the plugins others made, of no source
 )
 
 type route struct {
@@ -76,6 +87,7 @@ type app struct {
 
 	captions  captionState    // the episode playing's captions, and the model they take
 	installer pluginInstaller // installing and updating plugins
+	community communityState  // the plugins others made, for the Plugins page
 	// links are the app's links opened before its window was made, macOS
 	// handing over the one it was started with first.
 	links []string
@@ -106,12 +118,18 @@ type app struct {
 	settingSaves   map[*library]<-chan struct{} // source save order, main thread only
 	settingPending map[string]*settingWrite     // last queued value per source/key
 
-	trackList ui.ListState
+	trackList        ui.ListState
+	rowKeys          trackRowKeys
+	pageFocus        trackRowFocus
+	pageFocusHandle  ui.Handle
+	artistTab        int
+	restoreArtistTab bool
 	// Where the page and the sidebar are scrolled, kept while Now Playing
 	// covers them, unbuilt.
 	pageScroll ui.ScrollState
 	navScroll  ui.ScrollState
-	scrolled   route // the page trackList and pageScroll are of
+	scrolled   pageIdentity // the page trackList and pageScroll are of
+	positions  []pagePosition
 
 	mineCollapsed, savedCollapsed bool
 
@@ -124,6 +142,7 @@ type app struct {
 	settingsUnderTop      bool // the settings' page has scrolled under its top edge
 	playbackSettingsError string
 	betterLyricsServer    *betterlyrics.Server
+	betterLyricsOverrides *betterlyrics.OverrideStore
 	betterLyricsTimer     *time.Timer
 	betterLyricsTrackKey  string
 	betterLyricsTrackID   uint64
@@ -135,26 +154,43 @@ type app struct {
 
 	suggestions suggestState // what the search field's query may be after
 
-	nowPlaying   bool
-	npOpen       bool    // Now Playing as it last showed: open or not
-	npT          float32 // how far open Now Playing last showed, 0 to 1
-	npShift      float32 // how far down it last showed, pulled
-	npPull       float32 // how far the pointer has pulled it down
-	npHeld       bool    // whether the pointer presses on it, to pull it
-	npStill      bool    // whether it comes and goes in place, sliding or fading, rather than out of the bar's cover
-	npFrom       ui.Rect // the player bar's cover, which it grows out of
-	npPane       int     // paneLyrics, paneQueue, paneStage, paneComments or paneShow
-	lyricScroll  ui.ScrollState
-	lyricGlide   lyricGlide
-	lyricAt      int
-	lyricTrack   string
-	lyricDisplay lyricDisplayCache
-	stageDisplay stageLyricCache
-	sharing      *shareDraft
-	queueList    ui.ListState
-	queueAt      int // the row of the queue pane last scrolled to, -1 while it is hidden
-	comments     commentState
-	tabCount     rollState // the count on the comments' tab, as it rolls
+	nowPlaying             bool
+	npOpen                 bool    // Now Playing as it last showed: open or not
+	npT                    float32 // how far open Now Playing last showed, 0 to 1
+	npShift                float32 // how far down it last showed, pulled
+	npPull                 float32 // how far the pointer has pulled it down
+	npHeld                 bool    // whether the pointer presses on it, to pull it
+	npStill                bool    // whether it comes and goes in place, sliding or fading, rather than out of the bar's cover
+	npFrom                 ui.Rect // the player bar's cover, which it grows out of
+	npPane                 int     // paneLyrics, paneQueue, paneStage, paneComments or paneShow
+	npPrevPane             int
+	lyricScroll            ui.ScrollState
+	lyricGlide             lyricGlide
+	lyricAt                int
+	lyricTrack             string
+	lyricDisplay           lyricDisplayCache
+	stageDisplay           stageLyricCache
+	sharing                *shareDraft
+	queueOpen              bool
+	queueButton            ui.Handle
+	queueDrawer            queueViewState
+	queuePaneView          queueViewState
+	queueList              ui.ListState
+	backgroundTasks        []*backgroundTask
+	nextBackgroundTask     uint64
+	backgroundTasksOpen    bool
+	downloads              downloadCenter
+	downloadPrompt         downloadPromptState
+	trackSelect            trackSelectState
+	capabilitiesOpen       map[string]bool
+	playbackDetailsOpen    bool
+	playbackDetailsAnchor  string
+	playbackDetailsTrackID string
+	playbackDetailsSource  string
+	playbackDetailsFailure string
+	queueAt                int // the row of the queue pane last scrolled to, -1 while it is hidden
+	comments               commentState
+	tabCount               rollState // the count on the comments' tab, as it rolls
 
 	radioStarting string // the radio asked for its first songs, or ""
 	stationAt     int    // which of a few stations their switch has chosen
@@ -162,6 +198,8 @@ type app struct {
 	volume              float64
 	volumeOpen          bool // the volume popover of the player bar shows
 	mutedFrom           float64
+	sleep               sleepTimerState
+	now                 func() time.Time
 	globalShortcuts     *shortcutManager
 	shortcutEdit        shortcutEditor
 	shortcutLikePending *shortcutLikeRequest
@@ -172,11 +210,12 @@ type app struct {
 	underTop, underBottom bool
 	barScrub              scrubState
 	npScrub               scrubState
-	backdropCache         backdropCache // the backdrop of Now Playing, as last painted
-	npArt                 *artwork      // the cover whose colors Now Playing shows
-	npCoverState          coverState    // the cover of Now Playing, as it is tilted and flicked
-	wallState             wallState     // the wall of the queue's covers, as it is dragged
-	quiet                 quietState    // the quiet parts of the song playing, for its top comments
+	backdropCache         backdropCache       // 正在播放页独立背景缓存
+	browseBackdrop        browseBackdropCache // 浏览页轻封面氛围独立缓存，与播放页互不踩踏
+	npArt                 *artwork            // the cover whose colors Now Playing shows
+	npCoverState          coverState          // the cover of Now Playing, as it is tilted and flicked
+	wallState             wallState           // the wall of the queue's covers, as it is dragged
+	quiet                 quietState          // the quiet parts of the song playing, for its top comments
 	sig                   playerSig
 	quitting              bool
 
@@ -291,6 +330,7 @@ func (a *app) makeSources() {
 // enabledChanged lists the plugins that are on. There's always one: with all of
 // them off in the settings, as by hand, it's the built-in one.
 func (a *app) enabledChanged() {
+	previous := a.libs
 	a.libs = nil
 	for _, lib := range a.allLibs {
 		if !slices.Contains(a.settings.DisabledPlugins, lib.id) {
@@ -299,6 +339,17 @@ func (a *app) enabledChanged() {
 	}
 	if len(a.libs) == 0 && len(a.allLibs) > 0 {
 		a.libs = a.allLibs[:1]
+	}
+	for _, lib := range previous {
+		if a.libOf(lib.id) != lib {
+			if a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
+			a.invalidateDownloads(lib.id)
+			a.discardPagePositions(lib)
+			lib.forgetPages()
+			lib.started = false
+		}
 	}
 	if a.headers != nil {
 		var on []*plugin.Plugin
@@ -326,7 +377,7 @@ func (a *app) setPluginEnabled(lib *library, on bool) {
 	a.enabledChanged()
 	if !on {
 		if a.library == lib {
-			a.switchSource(a.libs[0].id)
+			a.leaveSource()
 		}
 		if closer, ok := lib.src.(interface{ Close() }); ok {
 			go closer.Close()
@@ -391,10 +442,18 @@ func Run() error {
 			go retroBitmaps() // rendered before Now Playing first shows them
 		}
 		a.makeSources()
+		if overrides, err := betterlyrics.NewOverrideStore(userDataDir("betterlyrics-lyrics.json")); err != nil {
+			log.Printf("loading BetterLyrics lyric overrides: %v", err)
+		} else {
+			a.betterLyricsOverrides = overrides
+		}
 		// Before the window: on Windows it lays out its content as it is
 		// made, and the view asks the player what plays.
 		a.art = newArtCache(a.post)
 		a.pl = player.New(a.post)
+		a.pl.LyricsOverride = func(track music.Track) *music.Lyrics {
+			return a.betterLyricsOverrides.Get(a.betterLyricsSongKey(track))
+		}
 		a.pl.Quiet = func(fn func()) { mygo.RunOnMain(fn) }
 		a.pl.Source = a.sourceByID
 		a.pl.Failed = a.sourceFailed
@@ -402,10 +461,13 @@ func Run() error {
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
 		a.pl.Transitions = func() player.TransitionSettings { return a.settings.playbackTransitions() }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
+		a.pl.SleepEnded = func() { a.clearSleepTimer() }
+		a.restoreDownloads()
 		a.pl.Changed = func() {
 			if draft := a.sharing; draft != nil && draft.clipPreviewActive && a.pl.Playing() {
 				a.stopSharePreview(draft)
 			}
+			a.syncSleepTimerPlayback()
 			a.keepSession()
 			a.syncCaptions()
 			a.publishBetterLyrics()
@@ -432,9 +494,12 @@ func Run() error {
 			// Inset from the corner, within the sidebar, as macOS 26's
 			// apps with a sidebar place them.
 			TrafficLightPosition: &mygo.Point{X: 20, Y: 20},
-			Vibrancy:             mygo.VibrancySidebar,
-			BackgroundColor:      "light-dark(#ffffff, #141416)",
-			Content:              ui.View(a.view),
+			// Windows 上 VibrancySidebar 是系统 Mica：用户关闭透明效果时它会退化成
+			// 一条实心白标题栏，和内容区的封面氛围色割裂。Windows 关掉，让内容自绘标题栏；
+			// macOS 保留侧栏玻璃。
+			Vibrancy:        vibrancyForPlatform(),
+			BackgroundColor: "light-dark(#ffffff, #141416)",
+			Content:         ui.View(a.view),
 		})
 		a.setMenu()
 		a.initGlobalShortcuts()
@@ -447,14 +512,20 @@ func Run() error {
 		// From the menu bar alone, the Dock icon shows while the window
 		// does.
 		a.syncDock()
-		a.win.OnShow(a.syncDock)
+		a.win.OnShow(func() {
+			a.syncDock()
+			a.checkSleepTimer()
+		})
 		a.win.OnHide(a.syncDock)
 		// Hidden, it draws nothing for a while: what the heap took for
 		// the pages it showed goes back to the system, which Go would
 		// keep for minutes.
 		a.win.OnHide(func() { go debug.FreeOSMemory() })
 		// Shown or switched to a while after, it shows what's new.
-		a.win.OnFocus(a.freshenHome)
+		a.win.OnFocus(func() {
+			a.freshenHome()
+			a.checkSleepTimer()
+		})
 		a.applyTray()
 		// 无法创建托盘时显示主窗口，避免后台启动后失去打开入口。
 		if a.startupTray && a.tray == nil {
@@ -485,6 +556,8 @@ func Run() error {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
+		a.cancelSleepTimer()
+		a.stopBackgroundTasks()
 		if a.sharing != nil {
 			a.stopSharePreview(a.sharing)
 		}

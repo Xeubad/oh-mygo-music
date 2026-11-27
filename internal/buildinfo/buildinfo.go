@@ -19,5 +19,9 @@ func PluginVersion() string {
 	if release.UpstreamVersion == "" {
 		panic("release.json is missing upstreamVersion")
 	}
+	// 翻页是 fork 的扩展，保留真实上游基线并用第四段区分旧宿主。
+	if release.UpstreamVersion == "0.1.26" {
+		return "0.1.26.1"
+	}
 	return release.UpstreamVersion
 }

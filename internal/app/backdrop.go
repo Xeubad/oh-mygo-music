@@ -115,6 +115,9 @@ type backdropCache struct {
 	art    *artwork
 	tint   ui.Color
 	fog    bool
+	hasBmp bool      // 当前画布是否显示清晰封面，用于在封面就绪或开关变化后重绘。
+	soft   float32
+	shade  float32
 	at     time.Time // when it was painted
 	drift  float64   // the clouds' time, in seconds, which stops on pause
 	speed  float64   // how fast drift goes: 1 playing, 0 paused
@@ -122,19 +125,125 @@ type backdropCache struct {
 	last   time.Time
 }
 
+// browseBackdropCache 单独维护浏览页的封面氛围状态，避免与正在播放页互相踩踏。
+type browseBackdropCache struct {
+	art    *artwork
+	before *artwork
+	fadeAt time.Time
+	track  string
+}
+
+// browseBackdropView 在主界面底层绘制克制的封面漫射氛围，切歌平滑过渡、静止零动画开销。
+func (a *app) browseBackdropView(c *ui.Context) {
+	tr := a.pl.Current()
+	var art *artwork
+	key := ""
+	if tr != nil && tr.Album.ImageURL != "" {
+		key = tr.Source + "\x00" + tr.ID + "\x00" + tr.Album.ImageURL
+		art = a.art.get(sized(tr.Album.ImageURL, 600), true)
+	}
+	bb := &a.browseBackdrop
+	// 仅在已知封面已加载完毕或当前切到无封面曲目时更新目标，加载期间保持上一首氛围防闪烁。
+	if tr == nil || tr.Album.ImageURL == "" {
+		if bb.art != nil {
+			bb.before, bb.art, bb.fadeAt = bb.art, nil, c.Now()
+		}
+		bb.track = ""
+	} else {
+		shown := art
+		if shown != nil && shown.failed {
+			shown = nil
+		}
+		if art != nil || bb.track != key {
+			if art != nil && shown != bb.art {
+				bb.before, bb.art, bb.fadeAt = bb.art, shown, c.Now()
+			} else if art != nil && art.failed && bb.art != nil {
+				bb.before, bb.art, bb.fadeAt = bb.art, nil, c.Now()
+			}
+			bb.track = key
+		}
+	}
+
+	bg := a.pal.bg
+	dark := a.pal.dark
+	reduce := c.Preferences().ReduceMotion
+	ui.Box(c.Key("browse-backdrop")).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
+		p.Fill(r, bg, 0)
+		now := p.Now()
+		alpha := float32(1)
+		if bb.before != nil {
+			if reduce {
+				bb.before = nil
+			} else if k := float32(now.Sub(bb.fadeAt)) / float32(backdropFade); k < 1 {
+				k = 1 - (1-k)*(1-k)*(1-k)
+				alpha = k
+				drawBrowseWash(p, r, bb.before, 1-k, bg, dark)
+				p.AnimationFrame()
+			} else {
+				bb.before = nil
+			}
+		}
+		if bb.art != nil {
+			drawBrowseWash(p, r, bb.art, alpha, bg, dark)
+		}
+	})
+}
+
+// drawBrowseWash 将模糊封面漫射光晕铺满整个浏览页背景，并叠加与主题一致的柔和保护渐变。
+func drawBrowseWash(p *ui.Painter, r ui.Rect, art *artwork, alpha float32, bg ui.Color, dark bool) {
+	if art == nil || art.failed || alpha <= 0.004 {
+		return
+	}
+	img := art.backdrop
+	if img == nil {
+		img = art.bmp
+	}
+	if img != nil {
+		p.ImageRegion(img, ui.Rect{}, r, ui.ImageOptions{Tint: white.Alpha(alpha)})
+	} else {
+		p.Fill(r, art.tint.Mix(bg, 0.45).Alpha(alpha), 0)
+	}
+	// 浅色主题顶部轻透封面色并迅速融回纯净浅底；深色主题略加深氛围以衬托玻璃面板层次。
+	if dark {
+		p.FillGradient(r, ui.LinearGradient{Angle: 180, Stops: []ui.GradientStop{
+			{Color: bg.Alpha(0.68 * alpha), At: 0},
+			{Color: bg.Alpha(0.84 * alpha), At: 0.42},
+			{Color: bg.Alpha(0.94 * alpha), At: 1},
+		}}, 0)
+		return
+	}
+	p.FillGradient(r, ui.LinearGradient{Angle: 180, Stops: []ui.GradientStop{
+		{Color: bg.Alpha(0.74 * alpha), At: 0},
+		{Color: bg.Alpha(0.89 * alpha), At: 0.42},
+		{Color: bg.Alpha(0.96 * alpha), At: 1},
+	}}, 0)
+}
+
 // backdrop paints the backdrop behind Now Playing, still or fog.
-func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color) {
+func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color, materialBlur bool) {
 	pl := a.pl
 	fog, still := a.settings.Fog, c.Preferences().ReduceMotion
+	coverBackdrop := a.settings.CoverBackdrop
+	style := a.settings.CoverBackdropStyle
 	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
-		// The CPU, drawing the fog for want of a GPU, paints far fewer
-		// pixels, and those once a song: the fog stays still.
+		// 默认关闭雾效且已有清晰封面时，使用窗口分辨率画布保留封面细节；仅雾效或回退渐变降采样绘制。
 		gpu := p.Accelerated()
+		hasBmp := !fog && coverBackdrop && art != nil && !art.failed && art.bmp != nil
+		var soft, shade float32
+		if hasBmp {
+			shade = style.shadeScale()
+			if !materialBlur {
+				// 关闭透明效果时使用已缓存的模糊封面，避免系统材质填成实色。
+				soft = clamp01(float32(style.Blur / 100))
+			}
+		}
 		div := float32(8)
 		if fog && gpu {
 			div = 2
+		} else if hasBmp {
+			div = 1
 		}
-		cw, ch := int(r.W/div)+1, int(r.H/div)+1
+		cw, ch := max(1, int(r.W/div)+1), max(1, int(r.H/div)+1)
 		bd := &a.backdropCache
 		if bd.canvas != nil {
 			if w, h := bd.canvas.Size(); w != cw || h != ch {
@@ -142,26 +251,28 @@ func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color) {
 			}
 		}
 		now := p.Now()
-		if bd.canvas != nil && (bd.art != art || bd.tint != tint) {
-			// Another song: the last one's stays as it was, fading out.
+		if bd.canvas != nil && (bd.art != art || bd.tint != tint || (!fog && bd.hasBmp != hasBmp)) {
+			// Another song or newly decoded cover: fade from the previous canvas.
 			bd.canvas, bd.before, bd.fadeAt = bd.before, bd.canvas, now
 		}
 		moving := fog && gpu && !still
 		lv, live := pl.Levels()
 		moved := bd.step(now, pl.Playing() && moving, lv, live && moving)
 		due := now.Sub(bd.at) >= backdropFrame-2*time.Millisecond
-		if bd.canvas == nil || bd.art != art || bd.tint != tint || bd.fog != fog || moved && due {
+		if bd.canvas == nil || bd.art != art || bd.tint != tint || bd.fog != fog || bd.hasBmp != hasBmp ||
+			bd.soft != soft || bd.shade != shade || moved && due {
 			if bd.canvas == nil {
 				bd.canvas = ui.NewCanvas(cw, ch)
 			}
-			bd.art, bd.tint, bd.fog, bd.at = art, tint, fog, now
+			bd.art, bd.tint, bd.fog, bd.hasBmp, bd.at = art, tint, fog, hasBmp, now
+			bd.soft, bd.shade = soft, shade
 			bass := bd.level.group(0, 6)
 			bd.canvas.Draw(p, func(cp *ui.Painter) {
 				box := ui.Rect{W: float32(cw), H: float32(ch)}
 				if fog {
 					drawFog(cp, box, tint, float32(bd.drift), bass)
 				} else {
-					drawBackdrop(cp, box, art, tint)
+					drawBackdrop(cp, box, art, tint, hasBmp, soft, shade)
 				}
 			})
 		}
@@ -205,7 +316,31 @@ func (bd *backdropCache) step(now time.Time, playing bool, lv [player.Bands]floa
 }
 
 // drawBackdrop paints the still backdrop in r.
-func drawBackdrop(p *ui.Painter, r ui.Rect, art *artwork, tint ui.Color) {
+func drawBackdrop(p *ui.Painter, r ui.Rect, art *artwork, tint ui.Color, hasBmp bool, soft, shade float32) {
+	if hasBmp {
+		// 清晰封面满铺底层，同时叠温和压暗梯度保护左侧边缘、顶部胶囊、右侧歌词与底部播控对比度。
+		top, foot := backdropColors(tint)
+		p.FillGradient(r, ui.LinearGradient{Angle: 180, Oklab: true, Stops: []ui.GradientStop{
+			{Color: top, At: 0}, {Color: foot, At: 1},
+		}}, 0)
+		p.Image(art.bmp, r, ui.Cover)
+		if soft > 0 && art.backdrop != nil {
+			p.ImageRegion(art.backdrop, ui.Rect{}, coverRect(r, 48, 48), ui.ImageOptions{Tint: white.Alpha(soft)})
+		}
+		mask := func(alpha float32) ui.Color { return ui.RGBA(8, 9, 13, min(1, alpha*shade)) }
+		p.FillGradient(r, ui.LinearGradient{Angle: 90, Stops: []ui.GradientStop{
+			{Color: mask(0.18), At: 0},
+			{Color: mask(0.36), At: 0.42},
+			{Color: mask(0.62), At: 1},
+		}}, 0)
+		p.FillGradient(r, ui.LinearGradient{Angle: 180, Stops: []ui.GradientStop{
+			{Color: mask(0.36), At: 0},
+			{Color: mask(0.18), At: 0.25},
+			{Color: mask(0.28), At: 0.62},
+			{Color: mask(0.68), At: 1},
+		}}, 0)
+		return
+	}
 	top, foot := backdropColors(tint)
 	p.FillGradient(r, ui.LinearGradient{Angle: 180, Oklab: true, Stops: []ui.GradientStop{
 		{Color: top, At: 0}, {Color: foot, At: 1},

@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,7 +55,6 @@ func (a *app) openSettings() {
 		a.endShortcutRecording()
 		a.shortcutEdit.confirm = false
 		a.settingsWin = nil
-		// Its sign-in dialog goes with it; a sign-in on its way still counts.
 		if a.signIn.here {
 			a.signIn.open = false
 		}
@@ -64,10 +64,11 @@ func (a *app) openSettings() {
 	a.syncDock()
 }
 
-// openSourceSettings shows the page of the settings where plugins are set up.
-func (a *app) openSourceSettings() {
-	a.settingsPage, a.settingsQuery = "plugins", ""
-	a.openSettings()
+// openPlugins shows the Plugins page in the main window, on its Installed tab,
+// where plugins are set up.
+func (a *app) openPlugins() {
+	a.showMain()
+	a.open(route{page: pagePlugins})
 }
 
 // changed applies the settings everywhere and keeps them.
@@ -78,6 +79,23 @@ func (a *app) changed() {
 		a.notch.setEnabled(a.settings.Notch)
 	}
 	a.redraw()
+}
+
+func (a *app) coverBackdropSlider(c *ui.Context, key, label string, value *float64, disabled bool) {
+	ui.Row(c.Key(key)).Gap(8).AlignItems(ui.Center).Children(func() {
+		slider := ui.Slider(c.Key("slider"), value, 0, 100).Step(5).Width(112).Label(label).Disabled(disabled)
+		dirty := ui.Local(slider, "pending-save", func() bool { return false })
+		if slider.Changed() {
+			*dirty = true
+			a.redraw()
+		}
+		// 拖动时只刷新预览，松开时再写盘，键盘调整则立即保存。
+		if *dirty && !slider.Pressed() {
+			*dirty = false
+			a.settings.save()
+		}
+		ui.Text(c, strconv.Itoa(int(*value+0.5))+"%").Width(36).FontSize(12).TextAlign(ui.End)
+	})
 }
 
 // systemLanguages are the languages the system prefers; tests replace it.
@@ -252,16 +270,12 @@ func (a *app) settingsView(c *ui.Context) {
 				}
 				ui.Icon(c, glyph).Size(16, 16).TextColor(p.accent).IgnoreInput(true)
 				ui.Text(c, title).FontSize(15).FontWeight(700).SingleLine().Shrink(1).MinWidth(0)
-				if query == "" && current.id == "plugins" {
-					ui.Box(c).Grow(1)
-					a.installMenu(c, p)
-				}
+
 			})
 			// The pointer over it brings the edge up too, as AppKit's does.
 			edge.Opacity(edgeShown(edge, a.settingsUnderTop || header.Hovered()))
 		})
 	})
-	a.installDialog(c, p)
 	a.signInDialog(c, p, true)
 }
 
@@ -337,18 +351,9 @@ func (a *app) settingsGroup(c *ui.Context, p palette, sec settingsSection, title
 	all := query == "" || settingsMatch(query, sec.title)
 	ui.Column(c.Key(sec.id)).Radius(12).Background(p.bg).Border(1, p.hairline).Dividers(1, p.hairline).Children(func() {
 		sec.build(func(label, desc string, control func()) {
-			if !all && !settingsMatch(query, label, desc) {
-				return
+			if all || settingsMatch(query, label, desc) {
+				settingsRowView(c, p, label, desc, control)
 			}
-			ui.Row(c).Padding(12, 16).Gap(16).AlignItems(ui.Center).MinHeight(48).Children(func() {
-				ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-					ui.Text(c, label).FontSize(13.5).FontWeight(500)
-					if desc != "" {
-						ui.Text(c, desc).FontSize(12).TextColor(p.muted).LineHeight(1.4)
-					}
-				})
-				control()
-			})
 		}, func(text string, draw func()) {
 			if all || settingsMatch(query, text) {
 				draw()
@@ -369,6 +374,18 @@ func settingsHeading(c *ui.Context, block settingsBlock, title string, glyph *ui
 }
 
 // settingsSections are the pages of the settings, those that apply here.
+func settingsRowView(c *ui.Context, p palette, label, desc string, control func()) {
+	ui.Row(c).Padding(12, 16).Gap(16).AlignItems(ui.Center).MinHeight(48).Children(func() {
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
+			ui.Text(c, label).FontSize(13.5).FontWeight(500)
+			if desc != "" {
+				ui.Text(c, desc).FontSize(12).TextColor(p.muted).LineHeight(1.4)
+			}
+		})
+		control()
+	})
+}
+
 func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 	s := &a.settings
 	var sections []settingsSection
@@ -417,6 +434,44 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				s.Appearance = modes[i]
 				a.changed()
 			}
+		})
+		row(T("Cover Backdrop"), T("Add a cover glow to browsing and show the full cover behind Now Playing"), func() {
+			if ui.Switch(c.Key("cover-backdrop"), &s.CoverBackdrop).Label(T("Cover Backdrop")).Changed() {
+				a.changed()
+			}
+		})
+		coverStyleDisabled := !s.CoverBackdrop || s.Fog
+		presetHint := T("For Now Playing")
+		if s.Fog && s.CoverBackdrop {
+			presetHint = T("Turn off Fog Backdrop to adjust the cover")
+		}
+		row(T("Backdrop Presets"), presetHint, func() {
+			ui.Row(c.Key("backdrop-presets")).Gap(5).AlignItems(ui.Center).Children(func() {
+				for _, preset := range []struct {
+					key, label string
+					style      coverBackdropStyle
+				}{
+					{"crisp", T("Crisp"), coverBackdropStyle{Blur: 10, Shade: 30}},
+					{"soft", T("Soft"), coverBackdropStyle{Blur: 85, Shade: 50}},
+					{"dark", T("Dark"), coverBackdropStyle{Blur: 70, Shade: 80}},
+					{"reset", T("Reset"), defaultCoverBackdropStyle()},
+				} {
+					button := ui.Button(c.Key(preset.key), preset.label).Height(28).PaddingX(8).Disabled(coverStyleDisabled)
+					if preset.key != "reset" && s.CoverBackdropStyle == preset.style {
+						button.Background(p.press)
+					}
+					if button.Clicked() {
+						s.CoverBackdropStyle = preset.style
+						a.changed()
+					}
+				}
+			})
+		})
+		row(T("Backdrop Blur"), "", func() {
+			a.coverBackdropSlider(c, "backdrop-blur", T("Backdrop Blur"), &s.CoverBackdropStyle.Blur, coverStyleDisabled)
+		})
+		row(T("Backdrop Shade"), "", func() {
+			a.coverBackdropSlider(c, "backdrop-shade", T("Backdrop Shade"), &s.CoverBackdropStyle.Shade, coverStyleDisabled)
 		})
 		settingsHeading(c, block, T("Playback Display"), iconLyrics)
 		row(T("Chinese Lyrics"), T("Use the same text in lyrics, visualizers and share cards"), func() {
@@ -475,14 +530,14 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 			row(T("Start in background at login"), T("Do not open the main window when the app starts at login"), func() {
 				ui.Switch(c.Key("open-at-login-background"), &s.LaunchAtLoginBackground).
 					Label(T("Start in background at login")).Disabled(!startupEnabled).OnClick(func() {
-						err := s.save()
-						a.startupBackgroundFailed = err != nil
-						if err != nil {
-							s.LaunchAtLoginBackground = !s.LaunchAtLoginBackground
-							log.Printf("save background startup setting: %v", err)
-						}
-						a.redraw()
-					})
+					err := s.save()
+					a.startupBackgroundFailed = err != nil
+					if err != nil {
+						s.LaunchAtLoginBackground = !s.LaunchAtLoginBackground
+						log.Printf("save background startup setting: %v", err)
+					}
+					a.redraw()
+				})
 			})
 			if a.startupBackgroundFailed {
 				block(T("Start in background at login"), func() {
@@ -512,7 +567,9 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 		}
 	})
 
-	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) { a.sourceSettings(c, row, block, p) })
+	add("plugins", T("Plugins"), iconPlug, func(row settingsRow, block settingsBlock) {
+		a.sourceSettings(c, row, block, p)
+	})
 	if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && a.globalShortcuts != nil {
 		add("shortcuts", T("Shortcuts"), iconKeyboard, func(row settingsRow, block settingsBlock) {
 			a.shortcutSettings(c, p, row, block)
@@ -559,6 +616,61 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 				a.changed()
 			}
 		})
+		row(T("Download Quality"), T("Default quality requested from plugins when downloading songs"), func() {
+			labels := make([]string, len(downloadQualityLevels))
+			at := 0
+			for i, q := range downloadQualityLevels {
+				labels[i] = q.label
+				if q.level == s.DownloadQuality {
+					at = i
+				}
+			}
+			if i, ok := choice(c, "download-quality", T("Download Quality"), labels, at); ok {
+				s.DownloadQuality = downloadQualityLevels[i].level
+				a.changed()
+			}
+		})
+		folderDesc := strings.TrimSpace(s.DownloadDirectory)
+		if folderDesc == "" {
+			if sysDir := defaultSystemDownloadDir(); sysDir != "" {
+				folderDesc = Tf("Default: %s", sysDir)
+			} else {
+				folderDesc = T("System downloads folder")
+			}
+		}
+		row(T("Download Folder"), folderDesc, func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				if s.DownloadDirectory != "" && ui.Button(c.Key("reset-download-folder"), T("Reset")).Clicked() {
+					s.DownloadDirectory = ""
+					a.changed()
+				}
+				if ui.Button(c.Key("choose-download-folder"), T("Browse…")).Clicked() {
+					go func() {
+						picked := pickDownloadFolder(a)
+						if picked == "" {
+							return
+						}
+						dir, err := downloadDir(picked)
+						a.post(func() {
+							if a.quitting {
+								return
+							}
+							if err != nil {
+								a.toast = T("Check the download location")
+								return
+							}
+							s.DownloadDirectory = dir
+							a.changed()
+						})
+					}()
+				}
+			})
+		})
+		row(T("Ask Before Downloading"), T("Choose folder and quality before each download; turn off to start immediately using defaults"), func() {
+			if ui.Switch(c.Key("prompt-download"), &s.PromptDownload).Label(T("Ask Before Downloading")).Changed() {
+				a.changed()
+			}
+		})
 		row(T("Even Out Loudness"), T("Adjust each song's volume by what its plugin measured of it, for them to sound as loud as each other"), func() {
 			if ui.Switch(c.Key("normalize"), &s.Normalize).Label(T("Even Out Loudness")).Changed() {
 				a.setPlayerVolume(a.volume)
@@ -574,6 +686,20 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 			if ui.Switch(c.Key("betterlyrics"), &s.BetterLyricsIntegration).Label(T("Share with BetterLyrics")).Changed() {
 				a.changed()
 				a.setBetterLyricsIntegration()
+			}
+		})
+		row(T("Allow BetterLyrics to Change Lyrics"), T("Save manually selected lyrics on this computer"), func() {
+			if ui.Switch(c.Key("betterlyrics-write"), &s.BetterLyricsLyricsWrite).
+				Label(T("Allow BetterLyrics to Change Lyrics")).Disabled(!s.BetterLyricsIntegration).Changed() {
+				a.changed()
+				a.setBetterLyricsIntegration()
+			}
+		})
+		row(T("Restore Current Song Lyrics"), T("Clear the manual choice and use the original source"), func() {
+			hasOverride := a.betterLyricsOverrides != nil && a.pl != nil && a.pl.Current() != nil &&
+				a.betterLyricsOverrides.Has(a.betterLyricsSongKey(*a.pl.Current()))
+			if ui.Button(c.Key("betterlyrics-clear"), T("Restore Current Song Lyrics")).Disabled(!hasOverride).Clicked() {
+				a.clearBetterLyricsOverride()
 			}
 		})
 		if a.anyCan("comments") {
@@ -671,8 +797,13 @@ func (a *app) anyCan(what string) bool {
 	return false
 }
 
-// sourceSettings lists the sources, each with what it asks of the listener,
-// and where more of them come from.
+// revealFolder shows a folder in the file manager, making it if need be;
+// tests replace it.
+var revealFolder = func(dir string) {
+	os.MkdirAll(dir, 0o755)
+	mygo.Shell.OpenPath(dir)
+}
+
 func (a *app) sourceSettings(c *ui.Context, row settingsRow, block settingsBlock, p palette) {
 	for _, lib := range a.allLibs {
 		if lib.id == local.ID {
@@ -685,13 +816,6 @@ func (a *app) sourceSettings(c *ui.Context, row settingsRow, block settingsBlock
 		}
 		block(text, func() { a.pluginSettings(c.Key(lib.id), lib, p) })
 	}
-}
-
-// revealFolder shows a folder in the file manager, making it if need be;
-// tests replace it.
-var revealFolder = func(dir string) {
-	os.MkdirAll(dir, 0o755)
-	mygo.Shell.OpenPath(dir)
 }
 
 // localSettings are the folders of the built-in source.
@@ -848,34 +972,6 @@ type guarded interface {
 	Grant(on bool) error
 }
 
-// pluginPermissions says what a plugin can reach, and asks before it may start
-// programs, which can do anything the listener can. It may not until they say.
-func (a *app) pluginPermissions(c *ui.Context, lib *library, g guarded, p palette) {
-	perms := g.Permissions()
-	if len(perms.Network) > 0 {
-		reach := Tf("Can reach %s", strings.Join(perms.Network, ", "))
-		if slices.Contains(perms.Network, "*") {
-			reach = T("Can reach any website")
-		}
-		ui.Text(c, reach).FontSize(12).TextColor(p.muted).LineHeight(1.4)
-	}
-	if len(perms.Process) == 0 {
-		return
-	}
-	granted := g.Granted()
-	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, programsWarning(perms.Process)).
-			FontSize(12).TextColor(p.muted).LineHeight(1.4).Grow(1).Shrink(1).MinWidth(0)
-		label := T("Allow Programs")
-		if granted {
-			label = T("Stop Allowing")
-		}
-		if ui.Button(c.Key("grant"), label).Clicked() {
-			a.grantPrograms(lib, g, !granted)
-		}
-	})
-}
-
 // programsWarning says which programs a plugin wants to start, before the
 // listener lets it.
 func programsWarning(programs plugin.Programs) string {
@@ -897,7 +993,15 @@ func (a *app) grantPrograms(lib *library, g guarded, on bool) {
 			}
 			// Starting programs may be what it needed setting up for.
 			lib.needsSetup, lib.askedSetup, lib.setupReason = false, false, ""
-			a.libraryChanged(lib)
+			if a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
+			a.invalidateDownloads(lib.id)
+			if a.pluginEnabled(lib) {
+				a.libraryChanged(lib)
+			} else {
+				a.redraw()
+			}
 		})
 	}()
 }
@@ -987,7 +1091,11 @@ func (a *app) saveSetting(lib *library, key, value string, done func(error)) {
 				a.toast = Tf("Couldn't keep the setting: %s", err.Error())
 				return
 			}
+			wasNeedsSetup := lib.needsSetup
 			lib.needsSetup, lib.askedSetup, lib.setupReason = false, false, ""
+			if wasNeedsSetup && a.pl != nil {
+				a.pl.InvalidateSource(lib.id)
+			}
 			a.libraryChanged(lib)
 			a.loadAccount(lib)
 		})

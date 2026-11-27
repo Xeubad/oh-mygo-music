@@ -289,7 +289,7 @@ func (a *app) aggregateAccountRows(c *ui.Context, lib *library, e *aggregateEdit
 				ui.Row(c).Wrap().Gap(8).Width(164).Shrink(0).Justify(ui.End).Children(func() {
 					if row.account == nil {
 						if ui.Button(c.Key("sign-in"), T("Sign In")).Label(T("Sign In") + " " + name).Width(164).Disabled(row.busy || a.signIn.waiting).Clicked() {
-							a.signIn = signInDialog{open: true, lib: lib, here: true, platform: platform, gen: a.signIn.gen + 1}
+							a.signIn = signInDialog{open: true, lib: lib, here: a.route.page != pagePlugins, platform: platform, gen: a.signIn.gen + 1}
 						}
 					} else if ui.Button(c.Key("sign-out"), T("Sign Out")).Label(T("Sign Out") + " " + name).Width(164).Disabled(row.busy || a.signIn.waiting).Clicked() {
 						a.signOutAggregateAccount(lib, e, platform, row)

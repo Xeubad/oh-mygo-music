@@ -364,18 +364,18 @@ func (a *app) playerBar(c *ui.Context) {
 	pl := a.pl
 	tr := pl.Current()
 	a.tickTimes(c)
-	// Over the foot of the page: while content is under it, its edge frosts
-	// it, with a hairline along the top.
-	edge := ui.Box(c.Key("bottom-edge")).Absolute().Left(0).Right(0).Bottom(0).Height(playerBarHeight).
-		Material(glass.ScrollEdge{Hard: true, Bottom: true, Background: p.bg})
-	edge.Opacity(edgeShown(edge, a.underBottom))
-	// The controls keep the middle, between sides that share what is left:
-	// narrower, the middle gives up to 140 DIPs, and what plays keeps room
-	// for its cover, some of its title and its heart.
-	const controls = 3*32 + 2*4 // lyrics, queue and the speaker
-	ui.Row(c).Absolute().Left(0).Right(0).Bottom(0).Height(playerBarHeight).PaddingX(20).Gap(20).AlignItems(ui.Center).Children(func() {
+	// 底部边缘不画材质——浅色主题下的实心白条会盖住封面氛围。
+	ui.Box(c.Key("bottom-edge")).Absolute().Left(0).Right(0).Bottom(0).Height(playerBarHeight)
+	// 底部采用悬浮圆角玻璃播放胶囊，左右留出 16px、距底边 12px 呼吸边距。
+	const controls = 4*32 + 3*4 // lyrics, queue, sleep timer and the speaker
+	g := shellGlass(p.dark, 0.48, 0.52)
+	bar := ui.Row(c.Key("player-capsule")).Absolute().Left(16).Right(16).Bottom(12).Height(72).
+		PaddingX(16).Gap(16).AlignItems(ui.Center).Radius(20).
+		Material(glass.Glass{Style: glass.Regular, Clarity: 0.72, Tint: g.tint}).
+		Border(1, g.border).Shadow(0, 12, 32, -6, g.shade)
+	bar.Children(func() {
 		// What plays.
-		ui.Row(c).Grow(1).Basis(0).MinWidth(150).Children(func() {
+		ui.Row(c).Grow(1).Basis(0).MinWidth(140).Children(func() {
 			if tr == nil {
 				ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 					ui.Box(c).Size(48, 48).Radius(8).Background(p.hover).Center().Children(func() {
@@ -408,14 +408,12 @@ func (a *app) playerBar(c *ui.Context) {
 				})
 				ui.Column(c).Shrink(1).MinWidth(0).Gap(3).Children(func() {
 					ui.Text(c, tr.Name).FontSize(13.5).FontWeight(600).SingleLine()
-					// What it is waiting on shows in place of the artists.
-					var sub string
+					// 只显示脱敏后的阶段或失败分类，绝不直接渲染原始错误。
+					fb := pl.Feedback()
+					sub, isErr := a.playbackStatusText(fb)
 					color := p.muted
-					switch {
-					case pl.Loading():
-						sub = T("Buffering…")
-					case pl.Err() != "":
-						sub, color = pl.Err(), p.accent
+					if isErr {
+						color = p.accent
 					}
 					if sub == "" {
 						a.artistLinks(c, tr, p.muted, p.text).FontSize(12).SingleLine()
@@ -427,11 +425,20 @@ func (a *app) playerBar(c *ui.Context) {
 			if info.Clicked() {
 				a.nowPlaying = true
 			}
+			fb := pl.Feedback()
+			a.syncPlaybackDetailsState(tr, fb)
+			if fb.Failure != "" || fb.Stage != "" || pl.Loading() {
+				fg, bg := p.muted, p.hover
+				if fb.Failure != "" {
+					fg, bg = p.accent, p.accent.Alpha(0.14)
+				}
+				a.playbackDetailsTrigger(c, "bar", tr, fb, fg, bg, "", true, a.pal.dark, false)
+			}
 			a.likeButton(c.Key("like"), tr, 16, p.muted).Margin(0, 0, 0, 4).Shrink(0)
 		})
 
 		// Controls over the progress.
-		ui.Column(c).Width(440).Shrink(1).MinWidth(300).Gap(0).AlignItems(ui.Stretch).Children(func() {
+		ui.Column(c).Width(440).Shrink(1).MinWidth(250).Gap(0).AlignItems(ui.Stretch).Children(func() {
 			a.transport(c, p.text, p.muted, p.accent, 18)
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Margin(-4, 0, 0, 0).Children(func() {
 				ui.Text(c, clock(pl.Position())).FontSize(10.5).FontFeatures("tnum").TextColor(p.faint).Width(34).TextAlign(ui.End)
@@ -453,9 +460,8 @@ func (a *app) playerBar(c *ui.Context) {
 			if iconButton(c.Key("lyrics"), iconLyrics, 16, lyr, label).Clicked() && tr != nil {
 				a.nowPlaying, a.npPane = true, a.lyricsPaneChosen()
 			}
-			if iconButton(c.Key("queue"), iconQueue, 16, p.muted, T("Queue")).Clicked() && tr != nil {
-				a.nowPlaying, a.npPane = true, paneQueue
-			}
+			a.queueDrawerButton(c)
+			a.sleepTimerButton(c, "bar", p.muted, a.pal.dark, false)
 			a.volumeButton(c, p.text.Alpha(0.75))
 		})
 	})
