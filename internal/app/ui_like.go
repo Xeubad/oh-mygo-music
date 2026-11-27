@@ -211,6 +211,9 @@ func (a *app) likedChanged(lib *library, tr music.Track, like bool) {
 		}
 	}
 	lib.likedList = list
+	if like {
+		a.autoSuggestPlaylist(lib, tr)
+	}
 }
 
 // likeCurrent likes the song playing, or unlikes it, from the keyboard (⌘D),

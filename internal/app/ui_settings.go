@@ -712,6 +712,10 @@ func (a *app) settingsSections(c *ui.Context, p palette) []settingsSection {
 		}
 	})
 
+	add("ai", T("AI"), iconSparkles, func(row settingsRow, block settingsBlock) {
+		a.aiSettings(c, p, s, row, block)
+	})
+
 	add("cache", T("Cache"), iconDatabase, func(row settingsRow, block settingsBlock) {
 		row(T("Song Cache"), Tf("Songs from elsewhere are kept here to play again at once, without the network. %s", a.cacheUsage()), func() {
 			labels := make([]string, len(cacheLimits))
