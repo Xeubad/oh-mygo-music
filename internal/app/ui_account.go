@@ -307,45 +307,36 @@ func drawQR(p *ui.Painter, r ui.Rect, code *qr.Code, pad float32) {
 	}
 }
 
-// accountRow sits at the foot of the sidebar: who is signed in to the source,
-// with a dropdown of the settings and signing out; or a way to sign in, if it
-// has accounts; or else the way to the settings.
+// accountRow shows the listener's account, a sign-in action, or its loading state.
 func (a *app) accountRow(c *ui.Context) {
 	p := a.pal
 	lib := a.library
-	// Keep Settings reachable while the app is still asking who is signed in.
 	if lib.account == nil && lib.accountUnknown() {
 		s := a.pageShimmer(c)
-		ui.Row(c.Key("account-unknown-row")).Height(40).Gap(4).AlignItems(ui.Center).Children(func() {
-			ui.Row(c.Key("account-unknown")).Grow(1).Height(40).PaddingX(8).Gap(10).AlignItems(ui.Center).Children(func() {
-				s.bone(c, 13).Size(26, 26)
-				s.text(c, 13, 1.3).Width(96)
-			})
-			a.settingsButton(c, p)
+		ui.Row(c.Key("account-unknown")).Height(40).PaddingX(8).Gap(10).AlignItems(ui.Center).Children(func() {
+			s.bone(c, 13).Size(26, 26)
+			s.text(c, 13, 1.3).Width(96)
 		})
 		return
 	}
 	if lib.account == nil {
 		a.accountOpen = false
-		ui.Row(c.Key("account-signed-out-row")).Height(40).Gap(4).AlignItems(ui.Center).Children(func() {
-			if lib.can("signIn") {
-				label := Tf("Sign in to %s", lib.name())
-				b := ui.ButtonBase(c.Key("account")).Grow(1).Height(40).PaddingX(8).Gap(10).Radius(10).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false).Label(label)
-				if b.Hovered() {
-					b.Background(p.hover)
-				}
-				b.Children(func() {
-					ui.Box(c).Size(26, 26).Radius(13).Background(p.press).Center().Children(func() {
-						ui.Icon(c, iconUser).Size(14, 14).TextColor(p.muted)
-					})
-					ui.Text(c, label).FontSize(13).FontWeight(500).TextColor(p.muted).SingleLine().Shrink(1).MinWidth(0)
-				})
-				if b.Clicked() {
-					a.promptSignIn(lib)
-				}
+		if lib.can("signIn") {
+			label := Tf("Sign in to %s", lib.name())
+			b := ui.ButtonBase(c.Key("account")).Height(40).PaddingX(8).Gap(10).Radius(10).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false).Label(label)
+			if b.Hovered() {
+				b.Background(p.hover)
 			}
-			a.settingsButton(c, p)
-		})
+			b.Children(func() {
+				ui.Box(c).Size(26, 26).Radius(13).Background(p.press).Center().Children(func() {
+					ui.Icon(c, iconUser).Size(14, 14).TextColor(p.muted)
+				})
+				ui.Text(c, label).FontSize(13).FontWeight(500).TextColor(p.muted).SingleLine().Shrink(1).MinWidth(0)
+			})
+			if b.Clicked() {
+				a.promptSignIn(lib)
+			}
+		}
 		return
 	}
 	b := ui.ButtonBase(c.Key("account")).Height(40).PaddingX(8).Gap(10).Radius(10).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false)
@@ -362,21 +353,6 @@ func (a *app) accountRow(c *ui.Context) {
 		a.accountOpen = !a.accountOpen
 	}
 	a.accountMenu(c, b)
-}
-
-// settingsButton keeps the app settings reachable beside sign-in while logged out.
-func (a *app) settingsButton(c *ui.Context, p palette) {
-	b := ui.ButtonBase(c.Key("open-settings")).Size(38, 38).Radius(10).AlignItems(ui.Center).Justify(ui.Center).
-		FocusRing(false).Label(T("Settings")).Tooltip(T("Settings"))
-	if b.Hovered() {
-		b.Background(p.hover)
-	}
-	b.Children(func() {
-		ui.Icon(c, iconSettings).Size(16, 16).TextColor(p.muted)
-	})
-	if b.Clicked() {
-		a.openSettings()
-	}
 }
 
 // accountMenu drops up from the account row, as wide as it, in the colors

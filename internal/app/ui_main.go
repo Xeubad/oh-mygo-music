@@ -276,16 +276,22 @@ func (a *app) sidebar(c *ui.Context) {
 			}
 		})
 
-		// The plugins others made are the app's, whichever source is active.
-		a.navItem(c, iconPlug, T("Plugins"), route{page: pagePlugins})
 		a.accountRow(c)
+		a.navItem(c, iconPlug, T("Plugins"), route{page: pagePlugins})
+		a.sidebarNavButton(c.Key("open-settings"), iconSettings, T("Settings"), a.settingsWin != nil).OnClick(a.openSettings)
 	})
 }
 
 func (a *app) navItem(c *ui.Context, icon *ui.SVG, label string, r route) {
-	p := a.pal
 	selected := a.route.page == r.page && !a.nowPlaying && (r.page != pageBrowse || a.route.id == r.id)
-	b := ui.ButtonBase(c.Key(label)).Height(34).PaddingX(10).Gap(10).Radius(8).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false)
+	if a.sidebarNavButton(c.Key(label), icon, label, selected).Clicked() {
+		a.open(r)
+	}
+}
+
+func (a *app) sidebarNavButton(c *ui.Context, icon *ui.SVG, label string, selected bool) ui.Element {
+	p := a.pal
+	b := ui.ButtonBase(c).Height(34).PaddingX(10).Gap(10).Radius(8).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false).Label(label)
 	// 侧栏项在指针下的频率很高，底色用常驻叠层 + 姿态淡入淡出，
 	// 不使用 AnimateColor（它会每帧重建整份视图）。
 	selectedBg, hoverBg := selected, !selected && b.Hovered()
@@ -307,9 +313,7 @@ func (a *app) navItem(c *ui.Context, icon *ui.SVG, label string, r route) {
 		ui.Icon(c, icon).Size(17, 17).TextColor(color)
 		ui.Text(c, label).FontSize(13.5).FontWeight(500).TextColor(color)
 	})
-	if b.Clicked() {
-		a.open(r)
-	}
+	return b
 }
 
 // clearSearch empties the field and forgets the search last shown, which
