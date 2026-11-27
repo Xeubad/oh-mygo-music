@@ -5,6 +5,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,9 +66,10 @@ func TestMain(m *testing.M) {
 // ErrUnsupported to the rest. Can says true of what's in caps, which
 // newFakeSource fills with everything; a test deletes what it wants hidden.
 type fakeSource struct {
-	info music.Info
-	caps map[string]bool
-	vals map[string]string
+	info   music.Info
+	caps   map[string]bool
+	valsMu sync.RWMutex // settings can be written while the test UI reads them
+	vals   map[string]string
 
 	signIn      func() (*music.Account, error)
 	signOut     func() error
@@ -119,12 +121,16 @@ func newFakeSource(id string) *fakeSource {
 func (s *fakeSource) Info() music.Info     { return s.info }
 func (s *fakeSource) Can(what string) bool { return s.caps[what] }
 func (s *fakeSource) Setting(key string) string {
+	s.valsMu.RLock()
+	defer s.valsMu.RUnlock()
 	return s.vals[key]
 }
 func (s *fakeSource) SetSetting(key, value string) error {
 	if s.setSetting != nil {
 		return s.setSetting(key, value)
 	}
+	s.valsMu.Lock()
+	defer s.valsMu.Unlock()
 	s.vals[key] = value
 	return nil
 }
