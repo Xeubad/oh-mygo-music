@@ -1,0 +1,7 @@
+/.env
+/.env.*
+!/.env.example
+/.acceptance-*/
+/.secrets/
+/data/
+/bin/

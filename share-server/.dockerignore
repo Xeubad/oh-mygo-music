@@ -1,0 +1,8 @@
+.gitignore
+.env
+.env.*
+.acceptance-*
+.secrets/
+data/
+bin/
+*.md
