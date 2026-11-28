@@ -1,0 +1,27 @@
+services:
+  share-server:
+    build: .
+    environment:
+      SHARE_LISTEN: 0.0.0.0:8080
+      SHARE_PUBLIC_ORIGIN: ${SHARE_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+      SHARE_TOKEN: ${SHARE_TOKEN:?请先在本机配置 SHARE_TOKEN}
+      SHARE_DATA_DIR: /var/lib/share-server
+      SHARE_TTL: ${SHARE_TTL:-168h}
+    ports:
+      - '127.0.0.1:${SHARE_PORT:-8080}:8080'
+    volumes:
+      - share-data:/var/lib/share-server
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8080/healthz']
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  share-data:
