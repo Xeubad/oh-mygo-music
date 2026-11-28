@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 
 	"mygo-music/internal/lyrics"
@@ -172,7 +173,8 @@ func (a *app) npFromRect(w, h float32) ui.Rect {
 	if a.npFrom.W > 0 {
 		return a.npFrom
 	}
-	return ui.Rect{X: sidebarWidth + 21, Y: h - (playerBarHeight+48)/2, W: 48, H: 48}
+	// 对齐底部悬浮玻璃播放胶囊（Left:16, PaddingX:16, Bottom:12, Height:72）内小封面默认位置。
+	return ui.Rect{X: sidebarWidth + 32, Y: h - 72, W: 48, H: 48}
 }
 
 // npMorph moves e, a cover of Now Playing, out of the player bar's cover
@@ -276,7 +278,30 @@ func (a *app) nowPlayingView(c *ui.Context) {
 			bloom.Opacity(smoothstep(0.05, 0.55, t)).
 				TransformOrigin((from.X+from.W/2)/w, (from.Y+from.H/2)/h).Scale(s, s)
 		}
-		bloom.Children(func() { a.backdrop(c, shown, tint) })
+		bloom.Children(func() {
+			// 减少透明度时，模糊材质会填充系统主题底色，盖掉沉浸页的深色封面背景。
+			useMaterial := !c.Preferences().ReduceTransparency && a.npPane != paneWall
+			a.backdrop(c, shown, tint, useMaterial)
+			style := a.settings.CoverBackdropStyle
+			if a.settings.Fog {
+				style = defaultCoverBackdropStyle()
+			}
+			radius := 80 * clamp01(float32(style.Blur/100))
+			blur := a.settings.CoverBackdrop && useMaterial && radius > 0
+			switch {
+			case a.npPane == paneStage && a.settings.CoverBackdrop:
+				// 律动舞台无左侧卡片，轻柔模糊底层封面并压低亮度，避免封面细节与大字歌词争夺视线。
+				shade := ui.Box(c.Key("np-stage-blur")).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().
+					Background(ui.RGBA(8, 9, 13, 0.24*style.shadeScale()))
+				if blur {
+					shade.Material(glass.Blur{Radius: radius * 0.65})
+				}
+			case blur:
+				// blur.go 只读取 Mask.From/To 端点透明度；从窗口 26% 处向右侧歌词区渐进模糊，保留左侧清晰封面光影。
+				ui.Box(c.Key("np-pane-blur")).Absolute().Top(0).Left(w * 0.26).Right(0).Bottom(0).PassThrough().
+					Material(glass.Blur{Radius: radius, Mask: &ui.LinearGradient{From: ui.Transparent, To: ui.RGB(0, 0, 0), Angle: 90}})
+			}
+		})
 		// Over the backdrop, which is positioned too: positioned elements
 		// paint over those in the flow.
 		ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Children(func() { a.nowPlayingBody(c, tr, art, accent, w, h, pointerIn) })
@@ -315,7 +340,8 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 		// showing only while the pointer is in the window, as the pane tabs do.
 		a.npRise(ui.Row(c).Height(topBar(c)).Justify(ui.Center).AlignItems(ui.Center).DragWindow(), 0).Children(func() {
 			reveal(ui.Box(c.Key("close-reveal")), pointerIn).Children(func() {
-				if iconButton(c.Key("close"), iconDown, 22, white.Alpha(0.7), T("Close")).Clicked() {
+				closeBtn := npGlassControlDark(iconButton(c.Key("close"), iconDown, 18, white.Alpha(0.85), T("Close")))
+				if closeBtn.Clicked() {
 					a.nowPlaying = false
 				}
 			})
@@ -337,7 +363,6 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 			a.wallPane(c, tr, art, accent, w, h, pointerIn)
 			return
 		}
-
 		side := float32(math.Min(float64(w)*0.36, 440))
 		// The cover leaves room above it for the tabs, starting as far
 		// under them as the wall's song does.
@@ -366,36 +391,60 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 					a.npCover(c, tr, art, coverSize)
 				})
 
-				a.npRise(ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(36, 0, 18, 0), 1).Children(func() {
-					ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {
-						if r := pl.Radio(); r != "" {
-							a.radioChip(c, r)
-						}
-						ui.Text(c, tr.Name).FontSize(22).FontWeight(700).LetterSpacing(-0.3).SingleLine()
-						a.artistLinks(c, tr, white.Alpha(0.6), white, true).FontSize(15).SingleLine()
+				// 保留左侧圆角艺术封面卡片，将下方曲目信息、进度、播控与音量收进紧凑圆角玻璃控制胶囊。
+				ctrl := a.npRise(ui.Column(c.Key("np-controls")).Margin(18, 0, 0, 0).Padding(14, 16).Radius(20).
+					Material(forcedGlass{}).
+					Border(1, white.Alpha(0.14)).Shadow(0, 12, 32, -8, ui.RGBA(0, 0, 0, 0.35)), 1)
+				ctrl.Children(func() {
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(0, 0, 12, 0).Children(func() {
+						ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {
+							if r := pl.Radio(); r != "" {
+								a.radioChip(c, r)
+							}
+							ui.Text(c, tr.Name).FontSize(21).FontWeight(700).LetterSpacing(-0.3).SingleLine()
+							a.artistLinks(c, tr, white.Alpha(0.65), white, true).FontSize(14.5).SingleLine()
+						})
+						a.likeButton(c.Key("like"), tr, 21, white.Alpha(0.75))
+						a.songMenu(c.Key("more"), tr, 21, white.Alpha(0.75)).Margin(0, -8, 0, 0)
 					})
-					a.likeButton(c.Key("like"), tr, 22, white.Alpha(0.7))
-					a.songMenu(c.Key("more"), tr, 22, white.Alpha(0.7)).Margin(0, -8, 0, 0)
-				})
-				a.npRise(a.scrubber(c.Key("np-scrub"), &a.npScrub, white.Alpha(0.18), white.Alpha(0.9), 16, accent.Mix(white, 0.35)), 2)
-				// As tall with the quality's badge as without it: the badge goes
-				// while the next song loads, and the column would move with it.
-				a.npRise(ui.Row(c).Height(16).AlignItems(ui.Center), 2).Children(func() {
-					ui.Text(c, clock(pl.Position())).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.5))
-					ui.Spacer(c)
-					qualityBadge(c, pl.Stream())
-					ui.Spacer(c)
-					status := "-" + clock(pl.Duration()-pl.Position())
-					if pl.Loading() {
-						status = T("Buffering…")
-					}
-					ui.Text(c, status).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.5))
-				})
-				a.npRise(ui.Box(c).Margin(14, 0, 18, 0), 3).Children(func() {
-					a.transport(c, white, white.Alpha(0.45), accent, 28)
-				})
-				a.npRise(ui.Row(c).Justify(ui.Center), 4).Children(func() {
-					a.volumeSlider(c, white.Alpha(0.7), white.Alpha(0.18), 180)
+					a.scrubber(c.Key("np-scrub"), &a.npScrub, white.Alpha(0.18), white.Alpha(0.9), 16, accent.Mix(white, 0.35))
+					// As tall with the quality's badge as without it: the badge goes
+					// while the next song loads, and the column would move with it.
+					ui.Row(c).Height(16).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, clock(pl.Position())).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.55))
+						ui.Spacer(c)
+						fb := pl.Feedback()
+						a.syncPlaybackDetailsState(tr, fb)
+						if fb.Failure != "" || fb.Stage != "" || pl.Loading() {
+							sub, isErr := a.playbackStatusText(fb)
+							fg, bg := white.Alpha(0.85), white.Alpha(0.12)
+							if isErr {
+								fg, bg = ui.Hex("#f5d58a"), ui.Hex("#f5d58a").Alpha(0.16)
+							}
+							a.playbackDetailsTrigger(c, "np", tr, fb, fg, bg, sub, false, true, true)
+						} else if st := pl.Stream(); st != nil {
+							if outcome := a.playbackOutcomeText(tr, st, fb); outcome != "" {
+								fg, bg := white.Alpha(0.75), white.Alpha(0.1)
+								if st.Quality == "lossless" || st.Type == "flac" || st.Type == "wav" {
+									fg, bg = ui.Hex("#f5d58a"), ui.Transparent
+								}
+								a.playbackDetailsTrigger(c, "np", tr, fb, fg, bg, outcome, false, true, true)
+							}
+						}
+						ui.Spacer(c)
+						status := "-" + clock(pl.Duration()-pl.Position())
+						if pl.Loading() && fb.Stage == "" {
+							status = T("Buffering…")
+						}
+						ui.Text(c, status).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.55))
+					})
+					ui.Box(c).Margin(10, 0, 12, 0).Children(func() {
+						a.transport(c, white, white.Alpha(0.45), accent, 27)
+					})
+					ui.Row(c).Justify(ui.Center).AlignItems(ui.Center).Gap(8).Children(func() {
+						a.volumeSlider(c, white.Alpha(0.75), white.Alpha(0.18), min(168, side-72))
+						a.sleepTimerButton(c, "np", white.Alpha(0.75), true, true)
+					})
 				})
 				ui.Box(c.Key("under-controls")).Grow(1).Basis(0)
 			})
@@ -411,21 +460,53 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *music.Track, art *artwork, accen
 				// with the cover, it left the top of the window empty, cutting
 				// off the lines before the one sung.
 				ui.Box(c).Height(npCoverTop)
-				switch a.npPane {
-				case paneLyrics:
-					a.lyricsPane(c, tr, h)
-				case paneComments:
-					a.commentsPane(c, tr)
-				case paneShow:
-					a.showPane(c, tr)
-				case paneCaptions:
-					a.captionsPane(c, tr, h)
-				default:
-					a.queuePane(c)
-				}
+				a.npZoomFusion(c, a.npPane, func() {
+					switch a.npPane {
+					case paneLyrics:
+						a.lyricsPane(c, tr, h)
+					case paneComments:
+						a.commentsPane(c, tr)
+					case paneShow:
+						a.showPane(c, tr)
+					case paneCaptions:
+						a.captionsPane(c, tr, h)
+					default:
+						a.queuePane(c)
+					}
+				})
 			})
 		})
 	}
+}
+
+// npZoomFusion 让窗格切换有个过渡：画面型窗格缩放加模糊，列表型窗格短位移淡入。
+// 这类进入/退出过渡由布局驱动，只在切换后的三四百毫秒内重建视图；
+// 静止后不再请求帧。减少动效时直接切到目标。
+func (a *app) npZoomFusion(c *ui.Context, pane int, fn func()) {
+	prev := a.npPrevPane
+	a.npPrevPane = pane
+
+	// 外层容器保持同一个 key，只让内部窗格按 pane 换 key：
+	// 这样旧窗格才能以退出动画离开，新窗格以入场动画进来。
+	wrap := ui.Column(c).Grow(1)
+	if pane == prev || a.npT < 1 || c.Preferences().ReduceMotion {
+		wrap.Children(func() { ui.Column(c.Key(pane)).Grow(1).Children(fn) })
+		return
+	}
+
+	// 画面型窗格（歌词、律动、照片墙）保留缩放与模糊；
+	// 列表型窗格只做短位移与淡入，不把长列表拉糊。
+	visual := func(p int) bool { return p == paneLyrics || p == paneStage || p == paneWall }
+	anim := ui.Animation{Spring: ui.SpringOptions{Duration: 450 * time.Millisecond, Bounce: 0.1}}
+	enter := &ui.Motion{Scale: 0.95, Opacity: 0, Blur: 4}
+	exit := &ui.Motion{Scale: 1.05, Opacity: 0, Blur: 4}
+	if !visual(pane) || !visual(prev) {
+		anim = ui.Animation{Duration: 240 * time.Millisecond, Ease: ui.EaseOut}
+		enter = &ui.Motion{Y: 4, Opacity: 0}
+		exit = &ui.Motion{Y: -4, Opacity: 0}
+	}
+	wrap.Transition(ui.ElementTransition{Animation: &anim, Enter: enter, Exit: exit})
+	wrap.Children(func() { ui.Column(c.Key(pane)).Grow(1).Children(fn) })
 }
 
 // npMaxWidth is how wide the cover and the pane beside it go, at most.
@@ -440,7 +521,7 @@ func npSideX(w float32) float32 {
 
 // npTabsHeight is how tall the row of Now Playing's tabs is, for what is
 // under it to start below it.
-const npTabsHeight = 28
+const npTabsHeight = 32
 
 // npCoverTop is how far under the strip along the top Now Playing's cover
 // starts, at the least, and the pane beside it: clear of the tabs over
@@ -452,7 +533,7 @@ const npCoverTop = npTabsHeight + 22
 // with the cover's left. They start from the left, so that only the last,
 // the comments, moves as its count changes.
 func npTabsRow(c *ui.Context, w float32) ui.Element {
-	return ui.Row(c.Key("tabs")).Absolute().Top(topBar(c)).Left(npSideX(w)).Height(npTabsHeight).Gap(6).AlignItems(ui.Center)
+	return ui.Row(c.Key("tabs")).Absolute().Top(topBar(c)).Left(npSideX(w)).Height(npTabsHeight).Gap(8).AlignItems(ui.Center)
 }
 
 // reveal fades e in while the pointer is in the window, and out when it
@@ -512,10 +593,89 @@ func (a *app) npTabs() []npTab {
 	return tabs
 }
 
+// npGlassControl 是按钮型半透明胶囊：按下轻微生长，减少动效时 MyGo 直接跳到终态。
+func npGlassControl(e ui.Element) ui.Element {
+	return e.Radius(999).
+		Material(forcedGlass{interactive: true}).
+		Border(1, white.Alpha(0.14))
+}
+
+// npGlassControlDark 是浮在深色封面上的顶部按钮用的暗底胶囊，避免浅底发白。
+func npGlassControlDark(e ui.Element) ui.Element {
+	return e.Radius(999).
+		Material(forcedGlass{interactive: true, dark: true}).
+		Border(1, white.Alpha(0.14))
+}
+
+// paneTabs 照 ToolNest segmentedControl 做：等宽段 + 弹簧滑移的白色高亮胶囊。
+// 高亮位置只由 npPane 的索引驱动，不绑定分段控件的可变选中值，避免二者打架。
 func (a *app) paneTabs(c *ui.Context) {
-	for _, t := range a.npTabs() {
-		a.paneTab(c, t.pane, t.label)
+	tabs := a.npTabs()
+	selected := 0
+	for i, t := range tabs {
+		if t.pane == a.npPane {
+			selected = i
+			break
+		}
 	}
+
+	theme := c.Theme()
+	size := float32(13)
+	const inset = 2
+	segW := float32(58)
+	for _, t := range tabs {
+		w, _ := c.MeasureText(0, ui.Span{Text: t.label, Size: size, Weight: 600})
+		segW = max(segW, w+22)
+	}
+
+	track := ui.Row(c.Key("np-tabs-pill")).Width(segW*float32(len(tabs))+2*inset).Height(30).
+		Shrink(0).Gap(0).Padding(inset).Radius(15).
+		Background(ui.Hex("#ffffff").Alpha(0.1)).FocusRing(false)
+	if theme.Dark {
+		track.Background(ui.Hex("#000000").Alpha(0.16))
+	}
+	// 胶囊位置用弹簧滑移，切换页签时从旧位置平滑滑到新位置。
+	position := track.AnimateTo("np-seg-pos", float32(selected),
+		ui.Animation{Spring: ui.SpringOptions{Duration: 220 * time.Millisecond}})
+	track.Draw(func(p *ui.Painter, bounds ui.Rect) {
+		pill := ui.Rect{X: bounds.X + inset + position*segW, Y: bounds.Y + inset,
+			W: segW, H: bounds.H - 2*inset}
+		fill := ui.Hex("#ffffff").Alpha(0.92)
+		if theme.Dark {
+			fill = ui.Hex("#ffffff").Alpha(0.22)
+		}
+		p.Fill(pill, fill, 13)
+	})
+	track.Children(func() {
+		for i, t := range tabs {
+			tab := t
+			seg := ui.ButtonBase(c.Key(tab.pane)).Width(segW).Height(26).Shrink(0).
+				Radius(13).AlignItems(ui.Center).Justify(ui.Center).FocusRing(false)
+			fg := white.Alpha(0.75)
+			if i == selected {
+				if theme.Dark {
+					fg = white
+				} else {
+					fg = ui.Hex("#282a30")
+				}
+			}
+			seg.Children(func() {
+				if tab.pane != paneComments {
+					ui.Text(c, tab.label).FontSize(size).FontWeight(600).TextColor(fg).SingleLine()
+					return
+				}
+				n, text := a.commentCount(), ""
+				if n > 0 {
+					text = " " + count(n)
+				}
+				ui.Text(c, tab.label).FontSize(size).FontWeight(600).TextColor(fg)
+				rollCount(c, &a.tabCount, n, text, fg)
+			})
+			if seg.Clicked() {
+				a.choosePane(tab.pane)
+			}
+		}
+	})
 }
 
 // choosePane shows pane i in Now Playing, remembering lyrics or the stage,
@@ -549,15 +709,6 @@ func (a *app) radioChip(c *ui.Context, name string) {
 	}
 }
 
-// qualityBadge marks a lossless stream, as it plays.
-func qualityBadge(c *ui.Context, st *music.Stream) {
-	if st == nil || st.Quality != "lossless" && st.Type != "flac" && st.Type != "wav" {
-		return
-	}
-	ui.Text(c, T("Lossless")).FontSize(9.5).FontWeight(800).LetterSpacing(0.6).TextColor(ui.Hex("#f5d58a")).
-		Padding(1, 6).Radius(4).Border(1, ui.Hex("#f5d58a").Alpha(0.55))
-}
-
 // stageBar is the slim bar along the foot of the stage: what plays, where
 // it is, and the controls.
 func (a *app) stageBar(c *ui.Context, tr *music.Track, art *artwork, accent ui.Color) {
@@ -582,39 +733,32 @@ func (a *app) stageBar(c *ui.Context, tr *music.Track, art *artwork, accent ui.C
 					a.songMenu(c.Key("more"), tr, 17, white.Alpha(0.6)).Margin(0, 0, 0, -10)
 				})
 			})
-			a.npRise(ui.Row(c), 3).Children(func() { a.transport(c, white, white.Alpha(0.45), white, 22) })
-			a.npRise(ui.Row(c).Grow(1).Basis(0).MinWidth(0).Justify(ui.End), 4).Children(func() {
+			a.npRise(ui.Row(c), 3).Children(func() { a.transport(c, white, white.Alpha(0.45), accent, 22) })
+			a.npRise(ui.Row(c).Grow(1).Basis(0).MinWidth(0).Justify(ui.End).AlignItems(ui.Center).Gap(8), 4).Children(func() {
+				fb := pl.Feedback()
+				a.syncPlaybackDetailsState(tr, fb)
+				if fb.Failure != "" || fb.Stage != "" || pl.Loading() {
+					sub, isErr := a.playbackStatusText(fb)
+					fg, bg := white.Alpha(0.85), white.Alpha(0.12)
+					if isErr {
+						fg, bg = ui.Hex("#f5d58a"), ui.Hex("#f5d58a").Alpha(0.16)
+					}
+					a.playbackDetailsTrigger(c, "stage", tr, fb, fg, bg, sub, false, true, true)
+				} else if st := pl.Stream(); st != nil {
+					if outcome := a.playbackOutcomeText(tr, st, fb); outcome != "" {
+						fg, bg := white.Alpha(0.75), white.Alpha(0.1)
+						if st.Quality == "lossless" || st.Type == "flac" || st.Type == "wav" {
+							fg, bg = ui.Hex("#f5d58a"), ui.Transparent
+						}
+						a.playbackDetailsTrigger(c, "stage", tr, fb, fg, bg, outcome, false, true, true)
+					}
+				}
 				ui.Text(c, clock(pl.Position())+" / "+clock(pl.Duration())).FontSize(11.5).FontFeatures("tnum").TextColor(white.Alpha(0.5))
+				a.sleepTimerButton(c, "stage", white.Alpha(0.65), true, false)
+				a.volumeButton(c, white.Alpha(0.65))
 			})
 		})
 	})
-}
-
-func (a *app) paneTab(c *ui.Context, i int, label string) {
-	b := ui.ButtonBase(c.Key(i)).Padding(6, 14).Radius(999).FocusRing(false).Label(label)
-	bg, fg := ui.Transparent, white.Alpha(0.55)
-	if a.npPane == i {
-		bg, fg = white.Alpha(0.14), white
-	} else if b.Hovered() {
-		bg = white.Alpha(0.06)
-	}
-	b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
-	b.Children(func() {
-		if i != paneComments {
-			ui.Text(c, label).FontSize(13).FontWeight(600).TextColor(fg)
-			return
-		}
-		// The count rolls as it changes, from one song's to the next.
-		n, text := a.commentCount(), ""
-		if n > 0 {
-			text = " " + count(n)
-		}
-		ui.Text(c, label).FontSize(13).FontWeight(600).TextColor(fg)
-		rollCount(c, &a.tabCount, n, text, fg)
-	})
-	if b.Clicked() {
-		a.choosePane(i)
-	}
 }
 
 func (a *app) lyricsPane(c *ui.Context, tr *music.Track, h float32) {
@@ -833,44 +977,9 @@ func (g *lyricGlide) step(c *ui.Context, s *ui.ScrollState) float32 {
 // queuePane lists the whole queue in play order, the track playing marked
 // among the others: a click plays one there, and the list stays as it is.
 func (a *app) queuePane(c *ui.Context) {
-	pl := a.pl
-	order, at := pl.PlayOrder()
-	// Opened, it shows the track playing at its top; after, it follows it
-	// as little as keeps it in view.
-	if at >= 0 && at != a.queueAt {
-		if a.queueAt < 0 {
-			a.queueList.ScrollTo(at, ui.Start)
-		} else {
-			a.queueList.ScrollIntoView(at)
-		}
-		a.queueAt = at
+	if a.queueAt < 0 {
+		a.queuePaneView.current = 0
 	}
-	a.queueList.Key = func(row int) any { return order[row] }
-	ui.List(c.Key("queue"), &a.queueList, len(order), func(r int) {
-		i := order[r]
-		tr := &pl.Queue()[i]
-		playing := r == at
-		row := ui.ButtonBase(c.Key(i)).Height(58).PaddingX(10).Gap(14).Radius(12).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
-			ContextMenu(a.songItems(tr, ""))
-		switch {
-		case playing:
-			row.Background(white.Alpha(0.12))
-		case row.Hovered():
-			row.Background(white.Alpha(0.08))
-		}
-		if tr.Unavailable {
-			row.Opacity(0.4)
-		}
-		row.Children(func() {
-			a.cover(c, tr.Album.ImageURL, 96, 42, 7)
-			ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-				ui.Text(c, tr.Name).FontSize(14).FontWeight(600).SingleLine()
-				a.artistLinks(c, tr, white.Alpha(0.55), white).FontSize(12.5).SingleLine()
-			})
-			ui.Text(c, clock(tr.Length())).FontSize(12).FontFeatures("tnum").TextColor(white.Alpha(0.4))
-		})
-		if row.Clicked() && !tr.Unavailable && !playing {
-			pl.Jump(i)
-		}
-	}).Grow(1).Padding(8, 0, 40, 0).Gap(2)
+	a.queueRows(c, &a.queuePaneView, white)
+	a.queueAt = 0
 }

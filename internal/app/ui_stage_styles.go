@@ -52,16 +52,15 @@ func (a *app) stageStyleButton(c *ui.Context) {
 			label = s.label
 		}
 	}
-	b := ui.ButtonBase(c.Key("stage-style")).Padding(6, 10, 6, 14).Radius(999).Gap(4).AlignItems(ui.Center).
-		FocusRing(false).Label(T("Stage Style")).Tooltip(T("Stage Style"))
-	bg, fg := ui.Transparent, white.Alpha(0.55)
+	b := npGlassControl(ui.ButtonBase(c.Key("stage-style")).Padding(6, 12).Gap(4).AlignItems(ui.Center).
+		FocusRing(false).Label(T("Stage Style")).Tooltip(T("Stage Style")))
+	fg := white.Alpha(0.82)
 	if b.Hovered() {
-		bg, fg = white.Alpha(0.06), white.Alpha(0.8)
+		fg = white
 	}
-	b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
 	b.Children(func() {
-		ui.Text(c, T(label)).FontSize(13).FontWeight(600).TextColor(fg)
-		ui.Icon(c, iconDown).Size(12, 12).TextColor(fg)
+		ui.Text(c, T(label)).FontSize(13).FontWeight(600).TextColor(b.AnimateColor("fg", fg, ui.Animation{Duration: 120 * time.Millisecond}))
+		ui.Icon(c, iconDown).Size(12, 12).TextColor(b.AnimateColor("fg", fg, ui.Animation{Duration: 120 * time.Millisecond}))
 	})
 	b.Menu(func(m *ui.Menu) {
 		for _, s := range stageStyles {

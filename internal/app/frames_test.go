@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
+	"mygo-music/internal/i18n"
 	"mygo-music/internal/local"
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
@@ -64,6 +66,62 @@ func TestHomeEmptyFrame(t *testing.T) {
 	saveFrame(t, dir, "home-empty.png", tt.Image())
 }
 
+// 设置 MM_FRAMES 后保存“全部来源”的搜索页，供目视核对分组与列宽。
+func TestCrossSearchFrame(t *testing.T) {
+	dir := framesDir(t)
+	a := newTestApp()
+	a.settings.SearchAll = true
+	answer := func(src *fakeSource, name string, songs []music.Track, more bool) {
+		src.info.Name = name
+		src.search = func(string, music.SearchKind, int) (*music.SearchResult, error) {
+			return &music.SearchResult{Tracks: songs, More: more}, nil
+		}
+	}
+	answer(fake(a), "Local Files", []music.Track{
+		song("l1", "詩超絆", "MyGO!!!!!"), song("l2", "迷星叫", "MyGO!!!!!"), song("l3", "壱雫空", "MyGO!!!!!"),
+	}, false)
+	alpha := newFakeSource("plugin-a")
+	answer(alpha, "Plugin A", []music.Track{
+		song("a1", "碧天伴走", "MyGO!!!!!"), song("a2", "音一会", "MyGO!!!!!"), song("a3", "栞", "MyGO!!!!!"),
+	}, true)
+	addFake(a, alpha)
+	broken := newFakeSource("Plugin B")
+	broken.info.Name = "Plugin B"
+	broken.search = func(string, music.SearchKind, int) (*music.SearchResult, error) {
+		return nil, errors.New("the source did not answer")
+	}
+	addFake(a, broken)
+
+	ch := posts(a)
+	tt := ui.NewTester(a.view, 1180, 780)
+	a.search("MyGO")
+	tt.Frame()
+	until(t, ch, func() bool { return a.cross != nil && a.cross.settled() })
+	settled(tt)
+	saveFrame(t, dir, "search-all-sources.png", tt.Image())
+}
+
+// With MM_FRAMES set, saves Home showing cached playlists while account lookup waits.
+func TestHomeCachedWhileAccountLoadsFrame(t *testing.T) {
+	dir := framesDir(t)
+	a := newTestApp()
+	lib := a.library
+	lib.started, lib.homeLoading, lib.accountAsked = true, false, false
+	lib.home = nil
+	lib.mine = []music.Playlist{{ID: "cached", Name: "离线缓存歌单", Mine: true}}
+	a.mineCollapsed = true
+	blocked := make(chan struct{})
+	defer close(blocked)
+	fake(a).account = func() (*music.Account, error) {
+		<-blocked
+		return nil, nil
+	}
+	a.loadAccount(lib)
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	saveFrame(t, dir, "home-cached-account-loading.png", tt.Image())
+}
+
 // framesTracks are songs with covers, by an invented band.
 func framesTracks(a *app) []music.Track {
 	covers := []struct{ from, to ui.Color }{
@@ -85,9 +143,12 @@ func framesTracks(a *app) []music.Track {
 	return tracks
 }
 
-// With MM_FRAMES set, saves a playlist's page.
+// 设置 MM_FRAMES 后保存歌单及专辑入口的明暗主题与悬停效果，供目视验收。
 func TestPlaylistFrame(t *testing.T) {
 	dir := framesDir(t)
+	language := i18n.Language()
+	i18n.SetLanguage(i18n.Chinese)
+	t.Cleanup(func() { i18n.SetLanguage(language) })
 	a := newTestApp()
 	a.account = &music.Account{ID: "1", Name: "Alex"}
 	tracks := framesTracks(a)
@@ -99,8 +160,23 @@ func TestPlaylistFrame(t *testing.T) {
 	a.playlists["10"] = &music.Playlist{ID: "10", Name: "Evening Walks", Owner: "Alex", Description: "For the long way home.", ImageURL: "cover:0", Mine: true, Tracks: tracks}
 	a.route = route{page: pagePlaylist, src: "fake", id: "10"}
 	tt := ui.NewTester(a.view, 1180, 780)
+	tt.SetDark(false)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
 	settled(tt)
 	saveFrame(t, dir, "playlist.png", tt.Image())
+	album, ok := tt.Find("Polar Night")
+	if !ok {
+		t.Fatal("no album link")
+	}
+	tt.Move(album.X+album.W/2, album.Y+album.H/2)
+	settled(tt)
+	saveFrame(t, dir, "playlist-album-hover.png", tt.Image())
+	tt.SetDark(true)
+	settled(tt)
+	saveFrame(t, dir, "playlist-album-hover-dark.png", tt.Image())
+	tt.Move(0, 0)
+	settled(tt)
+	saveFrame(t, dir, "playlist-dark.png", tt.Image())
 }
 
 // With MM_FRAMES set, saves Now Playing with lyrics following a song.
@@ -239,9 +315,9 @@ func contactSheet(shots []image.Image, cols int) image.Image {
 	return out
 }
 
-// With MM_FRAMES set, saves the settings as they list the sources: the local
-// files and a plugin that asks for a couple of things.
-func TestSettingsFrame(t *testing.T) {
+// With MM_FRAMES set, saves the Plugins page as it lists the sources: the local
+// files, a plugin that asks for a couple of things, and one just installed.
+func TestPluginsFrame(t *testing.T) {
 	dir := framesDir(t)
 	a := newTestApp()
 	a.libs = nil
@@ -257,10 +333,24 @@ func TestSettingsFrame(t *testing.T) {
 	plugin.vals["region"] = "Nordics"
 	a.library = addFake(a, plugin)
 	a.account = &music.Account{ID: "1", Name: "Alex"}
-	a.settingsPage = "plugins"
-	tt := ui.NewTester(a.settingsView, 780, 720)
+	a.needsSetup = true
+	// GH, from GitHub with no icon of its own, shows its owner's picture.
+	wasAvatar := ownerAvatar
+	defer func() { ownerAvatar = wasAvatar }()
+	ownerAvatar = func(owner string) string { return "avatar:" + owner }
+	a.art.art[sized("avatar:o", pluginTileSize*3)] = &artwork{bmp: ui.NewBitmap(coverImage(ui.RGB(20, 20, 30), ui.RGB(90, 200, 170)))}
+	gh := addFake(a, githubPlugin(t))
+	a.settings.PluginUpdates = map[string]string{gh.id: "v0.2.0"}
+	tools := &guardedSource{fakeSource: newFakeSource("tools")}
+	tools.info.Name = "Podcast Tools"
+	tools.perms.Process = []string{"ffmpeg"}
+	tools.perms.Network = []string{"api.example.com"}
+	addFake(a, tools)
+	a.local.AddFolders(t.TempDir())
+	a.installer.marked = gh.id // as it shows just installed
+	tt := pluginsView(a, 1100)
 	settled(tt)
-	saveFrame(t, dir, "settings.png", tt.Image())
+	saveFrame(t, dir, "plugins.png", tt.Image())
 }
 
 // With MM_FRAMES set, saves Now Playing with and without a radio: the

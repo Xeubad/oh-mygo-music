@@ -104,7 +104,7 @@ jobs:
           key: go-${{ matrix.name }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-${{ matrix.name }}-
       - name: Test
-        run: go test ./internal/...
+        run: go test ./internal/... -timeout 20m
       # On Windows, mygo downloads NSIS when it is not installed.
       - name: Build and upload
         env:

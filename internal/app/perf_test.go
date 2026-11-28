@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +10,29 @@ import (
 	"mygo-music/internal/lyrics"
 	"mygo-music/internal/music"
 )
+
+// 大歌单恢复位置后，静止列表不能因恢复逻辑而持续请求新帧。
+func TestNavigationFrameBudget(t *testing.T) {
+	a, _ := navigationApp()
+	tracks := make([]music.Track, 10000)
+	for index := range tracks {
+		tracks[index] = song(fmt.Sprint(index), fmt.Sprintf("大歌单歌曲%05d", index))
+	}
+	a.playlists["long"].Tracks = tracks
+	a.pl.Cue(tracks[:1])
+	tester := ui.NewTester(a.view, 1200, 800)
+	tester.SetPreferences(ui.Preferences{ReduceMotion: true})
+	settled(tester)
+	tester.Scroll(650, 420, 0, 20000)
+	settled(tester)
+	a.open(route{page: pageAlbum, id: "detail"})
+	settled(tester)
+	tester.Key(0, ui.KeyBack)
+	settled(tester)
+	if count := framesAt(a, tester, 0); count > 1 {
+		t.Fatalf("restored idle list requested %d frames per second", count)
+	}
+}
 
 // playingApp is an app playing a track with lyrics, at a position the test
 // sets with pl.Seek, and the number of times its view was built.
@@ -135,5 +159,55 @@ func TestRetroPlayerPausedFrameBudget(t *testing.T) {
 		if tt.FramePending() {
 			t.Errorf("%s paused: asks for frames", style.id)
 		}
+	}
+}
+
+// 已结束的任务和隐藏的运行任务不持续请求画面，避免后台任务空转。
+func TestBackgroundTaskIdleFrameBudget(t *testing.T) {
+	for _, state := range []backgroundTaskState{backgroundTaskRunning, backgroundTaskSucceeded, backgroundTaskFailed, backgroundTaskCanceled} {
+		a := newTestApp()
+		task := a.newBackgroundTask("Share", "Track")
+		task.state = state
+		task.hidden = state == backgroundTaskRunning
+		tester := ui.NewTester(a.view, 1200, 800)
+		settled(tester)
+		tester.Advance(time.Second)
+		if tester.FramePending() {
+			t.Fatalf("idle task state %d keeps requesting frames", state)
+		}
+	}
+}
+
+// 首页特色卡播放时继续请求唱片动画帧。
+func TestHomeFeatureCardPlayingFrameBudget(t *testing.T) {
+	a := newTestApp()
+	tracks := framesTracks(a)
+	a.pl.Cue(tracks[:1])
+	a.pl.Hold(10 * time.Second)
+	a.home = &music.Browse{Sections: []music.Section{{Title: "For You", Tracks: a.pl.Queue()}}}
+	tester := ui.NewTester(a.view, 1180, 780)
+	tester.Advance(time.Second)
+	if !tester.FramePending() || a.dailySpin.speed <= 0 {
+		t.Fatal("the feature card stopped requesting frames while its record plays")
+	}
+}
+
+// 暂停队列侧栏和空队列静止后不持续请求装饰帧。
+func TestQueueDrawerIdleFrameBudget(t *testing.T) {
+	a := newTestApp()
+	a.pl.Cue([]music.Track{song("1", "一")})
+	tester := ui.NewTester(a.view, 1180, 780)
+	settled(tester)
+	if err := tester.Click("Queue"); err != nil {
+		t.Fatal(err)
+	}
+	settled(tester)
+	if tester.FramePending() {
+		t.Fatal("paused queue drawer continuously requests frames")
+	}
+	a.pl.RemoveQueued(a.pl.QueueEntryID(0))
+	settled(tester)
+	if tester.FramePending() {
+		t.Fatal("empty queue drawer continuously requests frames")
 	}
 }

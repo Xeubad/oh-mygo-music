@@ -121,9 +121,13 @@ func (a *app) loadStations(lib *library) {
 		return
 	}
 	lib.stationsBusy, lib.stationsErr = true, ""
+	epoch := lib.pageEpoch
 	go func() {
 		stations, err := lib.src.Stations()
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			lib.stationsBusy = false
 			if err != nil {
 				lib.stationsErr = a.problem(lib, err, T("Couldn't load the stations"))
@@ -266,12 +270,13 @@ func (a *app) radioCard(c *ui.Context, lib *library) {
 					return
 				}
 				ui.Text(c, tr.Name).FontSize(30).FontWeight(800).LetterSpacing(-0.6).MaxLines(2).LineHeight(1.2)
-				switch {
-				case pl.Loading():
-					ui.Text(c, T("Buffering…")).FontSize(14).TextColor(white.Alpha(0.7)).SingleLine()
-				case pl.Err() != "":
-					ui.Text(c, pl.Err()).FontSize(14).TextColor(white).SingleLine()
-				default:
+				if sub, isErr := a.playbackStatusText(pl.Feedback()); sub != "" {
+					color := white.Alpha(0.7)
+					if isErr {
+						color = white
+					}
+					ui.Text(c, sub).FontSize(14).TextColor(color).SingleLine()
+				} else {
 					a.artistLinks(c, tr, white.Alpha(0.7), white, true).FontSize(14).SingleLine()
 				}
 				ui.Row(c).Gap(14).AlignItems(ui.Center).Margin(20, 0, 0, -8).Children(func() {

@@ -35,8 +35,8 @@ func TestSignedOutAccountRowKeepsSettingsEntry(t *testing.T) {
 	}
 }
 
-// Clicking Settings from a signed-out account row opens Settings without
-// starting login or showing the QR dialog.
+// Clicking the sidebar Settings entry while signed out does not start
+// login or show the QR dialog.
 func TestSignedOutAccountRowSettingsDoesNotSignIn(t *testing.T) {
 	a := newTestApp()
 	lib := a.library
@@ -53,8 +53,7 @@ func TestSignedOutAccountRowSettingsDoesNotSignIn(t *testing.T) {
 	}
 }
 
-// Clicking the login half of the split account row still opens the sign-in
-// dialog, and the Settings half remains available in the same row.
+// The independent Settings button does not replace the sign-in action.
 func TestSignedOutAccountRowLoginEntryStillWorks(t *testing.T) {
 	a := newTestApp()
 	fake(a).signIn = func() (*music.Account, error) { return nil, music.ErrUnsupported }

@@ -1,7 +1,7 @@
 {
-  "version": "0.0.13",
-  "upstreamVersion": "0.1.25",
-  "upstreamCommit": "298c88a03407844ac1c4eb76e3590edfe4577121",
+  "version": "0.0.14",
+  "upstreamVersion": "0.1.26",
+  "upstreamCommit": "a717245f18e773f27ffe9ee08b330dd101218515",
   "repository": "Xeubad/oh-mygo-music",
   "updatePublicKey": "GlIUv35z4LrbdmYiGopOEXD6t0Y6X5AEx0lzGvRuw8w="
 }

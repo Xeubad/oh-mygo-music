@@ -5,3 +5,4 @@ mygo_windows_*.syso
 /node_modules/
 /resources/windows/automix-engine/
 /engine/automix/__pycache__/
+.alma-snapshots

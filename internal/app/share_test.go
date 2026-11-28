@@ -95,6 +95,66 @@ func TestShareClipTimelineDrag(t *testing.T) {
 	}
 }
 
+// 配好分享服务后，带来源页面的歌曲仍走在线链接；未配置时才链接回来源页面。
+func TestShareLinkTargetFollowsShareServer(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		server string
+		online bool
+	}{
+		{"configured", "https://share.example.com", true},
+		{"not configured", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a := newTestApp()
+			a.settings.ShareServerURL = test.server
+			track := song("shared", "Shared")
+			track.URL = "https://music.example.com/song/1"
+			a.openShare(track)
+			draft := a.sharing
+			if draft.cardOnline != test.online {
+				t.Fatalf("card online = %v, want %v", draft.cardOnline, test.online)
+			}
+			// 在线链接发布前不能拿来源页面顶上，预览和导出必须保持同一含义。
+			want := ""
+			if !test.online {
+				want = track.URL
+			}
+			if got := a.shareCardURL(draft); got != want {
+				t.Fatalf("card URL %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// 配好分享服务后，卡片链接不能再切回歌曲的来源页面。
+func TestShareConfiguredServerCannotLinkToSourcePage(t *testing.T) {
+	a := newTestApp()
+	a.settings.ShareServerURL = "https://share.example.com"
+	posted := posts(a)
+	fake(a).lyrics = func(string) (*music.Lyrics, error) {
+		return &music.Lyrics{LRC: "[00:01]First"}, nil
+	}
+	track := song("shared", "Shared")
+	track.URL = "https://music.example.com/song/1"
+	a.openShare(track)
+	tester := ui.NewTester(func(c *ui.Context) {
+		a.pal = paletteFor(c.Theme())
+		a.shareDialog(c)
+	}, 1200, 800)
+	until(t, posted, func() bool { tester.Frame(); _, ok := tester.Find("Card Link"); return ok })
+	if err := tester.Click("Card Link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.ChooseMenuItem("Original Song Page"); err == nil {
+		t.Fatal("a configured share service must keep the card on its online link")
+	}
+	tester.Frame()
+	if !a.sharing.cardOnline {
+		t.Fatal("the card switched away from the share service")
+	}
+}
+
 // 列表分享另一首歌只操作分享草稿，所选文字不借用正在播放的歌词。
 func TestShareMenuKeepsPlaybackAndCopiesSelection(t *testing.T) {
 	var copied string

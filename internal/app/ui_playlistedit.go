@@ -117,9 +117,13 @@ func (a *app) loadMine(lib *library) {
 		return
 	}
 	lib.mineAt = time.Now()
+	epoch := lib.pageEpoch
 	go func() {
 		lists, err := lib.src.Playlists()
 		a.post(func() {
+			if !a.libraryCurrent(lib, epoch) {
+				return
+			}
 			if err != nil {
 				a.problem(lib, err, T("Couldn't load your playlists"))
 				return
@@ -272,15 +276,25 @@ func (l *library) setPlaylistName(id, name string) {
 
 // addTo adds tr to the listener's playlist pid; a toast says how it went.
 func (a *app) addTo(lib *library, pid string, tr *music.Track) {
+	a.addToThen(lib, pid, tr, nil)
+}
+
+// addToThen adds tr and lets done say how it went instead of the default toast.
+func (a *app) addToThen(lib *library, pid string, tr *music.Track, done func(error)) {
 	id := tr.ID
 	go func() {
 		err := lib.src.AddToPlaylist(pid, []string{id})
 		a.post(func() {
+			if done != nil {
+				done(err)
+			}
 			if err != nil {
 				a.actionFailed(lib, err, T("Couldn't add it to the playlist. Try again later."))
 				return
 			}
-			a.toast = T("Added to the playlist")
+			if done == nil {
+				a.toast = T("Added to the playlist")
+			}
 			a.playlistChanged(lib, pid)
 		})
 	}()

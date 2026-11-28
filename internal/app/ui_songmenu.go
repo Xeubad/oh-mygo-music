@@ -51,7 +51,9 @@ func (a *app) songItems(tr *music.Track, pid string) func(m *ui.Menu) {
 		if names := tr.ArtistNames(); names != "" && m.Item(T("Copy Title and Artists")).Chosen() {
 			copyText(tr.Name + " - " + names)
 		}
-		if tr.URL != "" {
+		// 配好分享服务后，歌曲只经分享卡片发布听歌链接，菜单不再直接复制
+		// 原曲页面；播客不生成分享卡片，保留自己的链接。
+		if tr.URL != "" && (tr.ShowID != "" || !a.shareServerConfigured()) {
 			m.Separator()
 			if m.Item(T("Copy Link")).Chosen() {
 				copyText(tr.URL)
@@ -81,6 +83,12 @@ func (a *app) songItems(tr *music.Track, pid string) func(m *ui.Menu) {
 		}
 		if tr.Album.ID != "" && lib.can("album") && m.Item(Tf("Go to Album: %s", tr.Album.Name)).Chosen() {
 			a.openPage(route{page: pageAlbum, src: lib.id, id: tr.Album.ID})
+		}
+		if a.settings.AIEnabled && a.settings.AIBaseURL != "" && a.settings.AIModel != "" && lib.can("addToPlaylist") {
+			m.Separator()
+			if m.Item(T("AI Add to Playlist…")).Chosen() {
+				a.openAISuggestion(tr)
+			}
 		}
 		a.playlistItems(m, tr, pid)
 	}

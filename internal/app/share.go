@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"image"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -16,6 +17,9 @@ import (
 )
 
 type shareDraft struct {
+	aggregateView           *aggregateView
+	recordingSource         *music.AggregateSource
+	pendingAggregateTrackID string
 	open                    bool
 	track                   music.Track
 	position                time.Duration
@@ -31,9 +35,6 @@ type shareDraft struct {
 	coverLoading            bool
 	coverError              error
 	timingReliable          bool
-	aggregateView           *aggregateView
-	recordingSource         *music.AggregateSource
-	pendingAggregateTrackID string
 	display                 lyricDisplayCache
 	renderSerial            int
 	rendering               bool
@@ -44,9 +45,8 @@ type shareDraft struct {
 	exporting               bool
 	status                  string
 	onlineMode              string
+	onlineDefaultView       string
 	cardOnline              bool
-	pendingOutput           shareOutput
-	pendingOutputRevision   uint64
 	onlineQuality           string
 	onlineURL               string
 	onlineID                string
@@ -57,7 +57,12 @@ type shareDraft struct {
 	onlinePublishedRevision uint64
 	onlinePublishing        bool
 	onlineError             error
-	onlineCancel            context.CancelFunc
+	backgroundTask          *backgroundTask
+	metadata                *shareMetadata
+	shareClient             *shareClient
+	cardSnapshot            *sharecard.Card
+	presentation            *sharePresentation
+	shareCover              []byte
 	clipStart, clipEnd      time.Duration
 	clipHead                time.Duration
 	clipPreview             *player.ClipPreview
@@ -67,11 +72,33 @@ type shareDraft struct {
 	clipPreviewSerial       int
 }
 
+type sharePresentation struct {
+	template        string
+	square          bool
+	hideTranslation bool
+	lyrics          lyrics.DisplayOptions
+}
+
+func (a *app) sharePresentation(draft *shareDraft) *sharePresentation {
+	if draft.presentation == nil {
+		draft.presentation = &sharePresentation{
+			template: a.settings.CardTemplate, square: a.settings.CardSquare,
+			hideTranslation: a.settings.HideCardTranslation,
+			lyrics:          a.lyricOptions(&draft.track, a.settings.HideCardTranslation),
+		}
+	}
+	return draft.presentation
+}
+
 func (draft *shareDraft) clipRange() (time.Duration, time.Duration, bool) {
 	if draft.clipEnd > draft.clipStart {
 		return draft.clipStart, draft.clipEnd, true
 	}
 	return shareClipRange(draft.lines, draft.selected, draft.track.Length(), draft.timingReliable)
+}
+
+func (a *app) shareServerConfigured() bool {
+	return strings.TrimSpace(a.settings.ShareServerURL) != ""
 }
 
 func (a *app) openShare(track music.Track) {
@@ -81,14 +108,12 @@ func (a *app) openShare(track music.Track) {
 	track.Artists = slices.Clone(track.Artists)
 	if a.sharing != nil {
 		a.stopSharePreview(a.sharing)
-		if a.sharing.onlineCancel != nil {
-			a.sharing.onlineCancel()
-		}
+		a.sharing.open = false
 	}
 	draft := &shareDraft{
 		open: true, track: track, selected: make(map[int]bool),
 		onlineMode: "full", onlineQuality: a.settings.Quality,
-		cardOnline: strings.TrimSpace(a.settings.ShareServerURL) != "",
+		cardOnline: a.shareServerConfigured(),
 	}
 	if len(uniqueAggregateSources(track.AggregateSources)) > 1 {
 		draft.aggregateView = &aggregateView{}
@@ -108,18 +133,25 @@ func (a *app) openShare(track music.Track) {
 
 func (a *app) loadShareLyrics(draft *shareDraft) {
 	lib := a.libOf(draft.track.Source)
-	if lib == nil {
-		draft.loadError = music.ErrUnavailable
-		return
-	}
-	if !lib.can("lyrics") {
-		return
+	answer := a.betterLyricsOverrides.Get(a.betterLyricsSongKey(draft.track))
+	if answer == nil {
+		if lib == nil {
+			draft.loadError = music.ErrUnavailable
+			return
+		}
+		if !lib.can("lyrics") {
+			return
+		}
 	}
 	draft.loading, draft.loadError = true, nil
 	draft.loadSerial++
 	serial, id := draft.loadSerial, draft.track.ID
 	go func() {
-		answer, err := lib.src.Lyrics(id)
+		// 分享列表项不经过播放器加载流程，必须在这里复用 BetterLyrics 覆盖。
+		var err error
+		if answer == nil {
+			answer, err = lib.src.Lyrics(id)
+		}
 		lines := lyrics.FromSource(answer)
 		a.post(func() {
 			// 同一来源同 ID 的重试也必须匹配代次，关闭的草稿不接收旧结果。
@@ -167,6 +199,10 @@ func (a *app) shareLines(draft *shareDraft) []lyrics.Line {
 		return nil
 	}
 	options := a.lyricOptions(&draft.track, a.settings.HideCardTranslation)
+	if draft.presentation != nil {
+		options = draft.presentation.lyrics
+		options.HideTranslation = draft.presentation.hideTranslation
+	}
 	cache := &draft.display
 	if cache.source != &draft.lines[0] || cache.options != options || cache.count != len(draft.lines) {
 		*cache = lyricDisplayCache{source: &draft.lines[0], count: len(draft.lines), options: options, shown: lyrics.Display(draft.lines, options)}
@@ -175,7 +211,7 @@ func (a *app) shareLines(draft *shareDraft) []lyrics.Line {
 }
 
 func (a *app) shareFragment(draft *shareDraft) []sharecard.Line {
-	return sharecard.Select(a.shareLines(draft), draft.selected, !a.settings.HideCardTranslation)
+	return sharecard.Select(a.shareLines(draft), draft.selected, !a.sharePresentation(draft).hideTranslation)
 }
 
 func (a *app) copyShareLyrics(draft *shareDraft) {
@@ -212,7 +248,11 @@ func (a *app) loadShareCover(draft *shareDraft) {
 
 func (a *app) requestShareRender() {
 	draft := a.sharing
-	if draft == nil || !draft.open {
+	a.requestShareRenderFor(draft)
+}
+
+func (a *app) requestShareRenderFor(draft *shareDraft) {
+	if draft == nil || (!draft.open && draft.backgroundTask == nil) {
 		return
 	}
 	draft.renderSerial++
@@ -224,18 +264,23 @@ func (a *app) requestShareRender() {
 	revision := draft.onlineRevision
 	draft.rendering = true
 	cardURL := a.shareCardURL(draft)
+	presentation := a.sharePresentation(draft)
 	card := sharecard.Card{Title: draft.track.Name, Artist: draft.track.ArtistNames(), URL: cardURL,
-		Template: a.settings.CardTemplate, Square: a.settings.CardSquare, Cover: draft.cover, Lines: a.shareFragment(draft)}
+		Template: presentation.template, Square: presentation.square, Cover: draft.cover, Lines: a.shareFragment(draft)}
+	if draft.cardSnapshot != nil {
+		card = *draft.cardSnapshot
+		card.URL = cardURL
+	}
 	go func() {
 		data, err := sharecard.Render(card)
 		a.post(func() {
-			if a.sharing != draft || !draft.open {
+			if a.sharing != draft && draft.backgroundTask == nil {
 				return
 			}
 			draft.rendering = false
 			// 连续操作最多保留一个渲染任务，过期结果只触发最新快照，不回写旧图片。
 			if serial != draft.renderSerial || revision != draft.onlineRevision {
-				a.requestShareRender()
+				a.requestShareRenderFor(draft)
 				return
 			}
 			draft.renderError = err
@@ -246,13 +291,34 @@ func (a *app) requestShareRender() {
 					draft.pngURL = cardURL
 				}
 			}
-			if draft.renderError != nil {
-				draft.pendingOutput = shareOutputNone
-			} else {
-				a.resumeShareOutput(draft)
+			if draft.renderError != nil && draft.backgroundTask != nil {
+				draft.backgroundTask.status = T("Online link ready; image unavailable. Open to edit.")
 			}
 		})
 	}()
+}
+
+func (a *app) openBackgroundShare(draft *shareDraft) {
+	if a.sharing != nil && a.sharing != draft {
+		a.stopSharePreview(a.sharing)
+		a.sharing.open = false
+	}
+	// 已提交任务保留独立快照，重新编辑不能反过来改变它的结果或重试参数。
+	if !draft.onlinePublishing {
+		editor := *draft
+		editor.selected = maps.Clone(draft.selected)
+		if draft.presentation != nil {
+			presentation := *draft.presentation
+			editor.presentation = &presentation
+		}
+		editor.backgroundTask, editor.metadata, editor.shareClient, editor.cardSnapshot = nil, nil, nil, nil
+		editor.shareCover = nil
+		editor.rendering, editor.exporting = false, false
+		draft = &editor
+	}
+	draft.open = true
+	a.sharing = draft
+	a.requestShareRenderFor(draft)
 }
 
 func (a *app) shareCardURL(draft *shareDraft) string {

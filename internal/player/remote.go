@@ -87,12 +87,19 @@ func (c *commands) run() {
 
 // command gives a source a command; if it fails, the bar says so.
 func (p *Player) command(src music.Source, fn func() error) {
+	p.commandWithFailure(src, fn, nil)
+}
+
+func (p *Player) commandWithFailure(src music.Source, fn func() error, onFail func(error)) {
 	gen := p.gen
 	p.cmds.add(func() {
 		if err := fn(); err != nil {
 			p.post(func() {
 				if gen == p.gen {
 					p.remoteFailed(src, err)
+					if onFail != nil {
+						onFail(err)
+					}
 				}
 			})
 		}
@@ -101,7 +108,8 @@ func (p *Player) command(src music.Source, fn func() error) {
 
 // remoteFailed says why a remote source didn't do what it was told.
 func (p *Player) remoteFailed(src music.Source, err error) {
-	p.err = errorText(err)
+	p.feedback = PlaybackFeedback{Stage: "remote"}
+	p.setFailure(src.Info().ID, err)
 	if errors.Is(err, music.ErrSignIn) || errors.Is(err, music.ErrSetup) {
 		p.playing = false
 		if p.remote != nil {
@@ -145,8 +153,10 @@ func (p *Player) loadRemote(gen int, src music.Source, at, skipped, dir int, pla
 				p.remotePoll(r)
 			} else {
 				// Paused while it was on its way.
+				onFail := p.sleepRemoteFail
+				p.sleepRemoteFail = nil
 				p.playing = true
-				p.remoteToggle()
+				p.remotePause(onFail)
 			}
 			p.sync()
 		})
@@ -189,17 +199,22 @@ func (p *Player) remotePosition() time.Duration {
 func (p *Player) remoteToggle() {
 	r := p.remote
 	if p.playing {
-		r.pos, r.running = p.remotePosition(), false
-		r.at, r.command = p.now(), p.now()
-		p.playing = false
-		p.command(r.src, r.src.RemotePause)
-		p.sync()
+		p.remotePause(nil)
 		return
 	}
 	p.playing = true
 	r.running, r.at, r.command = true, p.now(), p.now()
 	p.command(r.src, r.src.RemoteResume)
 	p.remotePoll(r)
+	p.sync()
+}
+
+func (p *Player) remotePause(onFail func(error)) {
+	r := p.remote
+	r.pos, r.running = p.remotePosition(), false
+	r.at, r.command = p.now(), p.now()
+	p.playing = false
+	p.commandWithFailure(r.src, r.src.RemotePause, onFail)
 	p.sync()
 }
 
@@ -358,6 +373,17 @@ func (p *Player) remoteGoes(r *remote, st *music.RemoteState, settling bool) {
 // remoteEnded goes on from the track the source finished, by the queue's order
 // and the listener's repeat.
 func (p *Player) remoteEnded(r *remote) {
+	if p.stopAfterTrack {
+		p.stopAfterTrack = false
+		p.playing, r.running = false, false
+		r.pos, r.at, r.near = 0, p.now(), false
+		p.sync()
+		if p.SleepEnded != nil {
+			p.SleepEnded()
+		}
+		p.post(func() {})
+		return
+	}
 	switch {
 	case p.repeat == RepeatOne:
 		p.load(p.at)
@@ -402,6 +428,7 @@ func (p *Player) remoteMoved(r *remote, st *music.RemoteState) {
 	}
 	r.pos, r.at = p.remotePositionStopped(r), p.now()
 	p.playing = false
+	p.feedback = PlaybackFeedback{Stage: "remote", Failure: "remote-elsewhere"}
 	p.err = i18n.T("Playing something else elsewhere")
 	p.sync()
 }
@@ -414,6 +441,7 @@ func (p *Player) follow(r *remote, at int, st *music.RemoteState) {
 	t := p.queue[p.order[at]]
 	p.track = &t
 	p.err = ""
+	p.feedback = PlaybackFeedback{}
 	p.lyrics, p.lyricsLoaded = nil, false
 	r.seen, r.near, r.polls = true, false, 0
 	r.pos, r.at, r.running = time.Duration(st.Position)*time.Millisecond, p.now(), st.Playing

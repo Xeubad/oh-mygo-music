@@ -5,6 +5,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 
 	"mygo-music/internal/music"
 	"mygo-music/internal/player"
+	"mygo-music/internal/plugin"
 )
 
 // mainThread takes what has to run on the main thread, which TestMain keeps
@@ -39,6 +41,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	mygo.App.SetPath(mygo.PathUserData, dir)
+	// The Plugins page lists the community's plugins from GitHub: never, but in
+	// tests that say what with fakeCommunity, and without posting, which would
+	// come between what a test waits for.
+	fetchCommunity = func(string, int) (*plugin.CommunityPage, error) { select {} }
+	// Nor their owners' pictures, for the tiles of plugins from GitHub.
+	ownerAvatar = func(string) string { return "" }
 	result := make(chan int)
 	go func() { result <- m.Run() }()
 	code := 0
@@ -58,9 +66,10 @@ func TestMain(m *testing.M) {
 // ErrUnsupported to the rest. Can says true of what's in caps, which
 // newFakeSource fills with everything; a test deletes what it wants hidden.
 type fakeSource struct {
-	info music.Info
-	caps map[string]bool
-	vals map[string]string
+	info   music.Info
+	caps   map[string]bool
+	valsMu sync.RWMutex // settings can be written while the test UI reads them
+	vals   map[string]string
 
 	signIn      func() (*music.Account, error)
 	signOut     func() error
@@ -112,12 +121,16 @@ func newFakeSource(id string) *fakeSource {
 func (s *fakeSource) Info() music.Info     { return s.info }
 func (s *fakeSource) Can(what string) bool { return s.caps[what] }
 func (s *fakeSource) Setting(key string) string {
+	s.valsMu.RLock()
+	defer s.valsMu.RUnlock()
 	return s.vals[key]
 }
 func (s *fakeSource) SetSetting(key, value string) error {
 	if s.setSetting != nil {
 		return s.setSetting(key, value)
 	}
+	s.valsMu.Lock()
+	defer s.valsMu.Unlock()
 	s.vals[key] = value
 	return nil
 }
@@ -372,6 +385,12 @@ func newTestApp() *app {
 	a.pl.Source = a.sourceByID
 	a.pl.SetVolume(0.5)
 	return a
+}
+
+// pluginsView builds the main window on the Plugins page, as tall as h.
+func pluginsView(a *app, h int) *ui.Tester {
+	a.route = route{page: pagePlugins, src: a.library.id}
+	return ui.NewTester(a.view, 1200, h)
 }
 
 // fake is the source of an app newTestApp made.
